@@ -119,9 +119,24 @@ test_proxy() {
     local headers
     headers=$(curl -sI --connect-timeout 5 http://127.0.0.1:1080/jdev/cfg/api 2>/dev/null)
     if echo "$headers" | grep -qi "X-Frame-Options"; then
-        pass "Security headers present"
+        pass "X-Frame-Options header present"
     else
-        fail "Security headers missing"
+        fail "X-Frame-Options header missing"
+    fi
+    if echo "$headers" | grep -qi "Content-Security-Policy"; then
+        pass "CSP header present"
+    else
+        fail "CSP header missing"
+    fi
+    if echo "$headers" | grep -qi "Permissions-Policy"; then
+        pass "Permissions-Policy header present"
+    else
+        fail "Permissions-Policy header missing"
+    fi
+    if echo "$headers" | grep -qi "X-XSS-Protection"; then
+        fail "Deprecated X-XSS-Protection header still present (should be removed)"
+    else
+        pass "X-XSS-Protection correctly removed"
     fi
 
     # Test rate limiting (send 150 requests quickly)
@@ -229,6 +244,27 @@ test_appsec() {
         pass "AppSec inspects proxy traffic end-to-end"
     else
         warn "AppSec metrics did not increment (may be delayed)"
+    fi
+
+    # LOW-010: AppSec 401 error detection
+    local appsec_status
+    appsec_status=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://127.0.0.1:1080/crowdsec-appsec 2>/dev/null)
+    if [[ "$appsec_status" == "401" ]]; then
+        warn "AppSec returned 401 — bouncer API key may be misconfigured"
+    else
+        pass "AppSec auth subrequest responds without 401 (HTTP ${appsec_status:-none})"
+    fi
+
+    # LOW-010: CrowdSec whitelist syntax validation
+    local whitelist_file="/etc/crowdsec/parsers/s02-enrich/whitelist-loxone.yaml"
+    if [[ -f "$whitelist_file" ]]; then
+        if cscli parsers inspect whitelist-loxone 2>/dev/null | grep -qi "whitelist-loxone"; then
+            pass "CrowdSec whitelist parser is registered"
+        else
+            warn "CrowdSec whitelist parser may not be registered yet"
+        fi
+    else
+        warn "CrowdSec whitelist file not found"
     fi
 }
 

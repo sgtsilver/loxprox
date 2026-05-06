@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.0] — 2026-05-06
+
+### Security (Ezio Audit Fix Sweep — 23/23 findings resolved)
+- **CRIT-001**: Eliminated `curl | bash` supply-chain vector. CrowdSec install now uses GPG-key-pinned apt repository (`gpgkey` downloaded to temp file, verified, then dearmored to `/usr/share/keyrings/`).
+- **HIGH-002**: Added `Content-Security-Policy` and `Permissions-Policy` headers; removed deprecated `X-XSS-Protection`.
+- **HIGH-001**: Documented AppSec API key exposure risk in `SECURITY.md` with threat model and mitigation guidance.
+- **MED-001**: Removed unconditional `cscli hub upgrade` — hub components are installed at hub-index version; upgrades are intentional operator actions, not automatic surprises.
+- **MED-002**: Rollback now validates backup files with `nginx -t`, `nft -c`, and creates a pre-rollback snapshot.
+- **MED-003 / MED-004**: `progressive-ban.py` — added `timeout=30` to all `subprocess.run()` calls; return codes checked and stderr logged.
+- **LOW-001 / LOW-002**: Replaced predictable temp files with `mktemp` in `detect-loxone.sh` and `gateway-backup.sh`.
+- **LOW-003**: `validate_ip()` now uses strict RFC-style regex (0–255 per octet) with `ipcalc` fallback.
+- **LOW-005**: Added `/var/log/nginx/appsec-detections.log` to logrotate config.
+- **LOW-006**: Discord alert circuit breaker — skips alerts for 15 min after 3 consecutive failures.
+- **LOW-007**: Added `proxy_hide_header Server` and `proxy_hide_header X-Powered-By`.
+- **LOW-009**: Documented Discord webhook rotation procedure in `SECURITY.md`.
+
+### Added
+- Full test infrastructure: `tests/test_progressive_ban.py` (17 pytest cases), `tests/test_deploy_integration.sh` (54 assertions), `tests/test_detect_loxone.sh` (11 assertions).
+- Unified test runner: `tests/run-tests.sh`.
+- CI integration test job: validates config generation inside a Debian 12 Docker container.
+- CI Python test job: runs pytest on every PR.
+
+### Changed
+- `deploy.sh` and `detect-loxone.sh` now guard `main()` with `[[ "${BASH_SOURCE[0]}" == "${0}" ]]` to enable sourcing for unit tests.
+
 ## [1.0.0] — 2026-05-06
 
 ### Added

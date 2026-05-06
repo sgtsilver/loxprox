@@ -81,6 +81,46 @@ PAYLOAD=$(cat <<EOF
 EOF
 )
 
+# ── Circuit breaker: skip alerts after 3 consecutive failures for 15 min ──
+CB_DIR="/tmp/loxprox-discord-cb"
+CB_FILE="$CB_DIR/failures"
+CB_THRESHOLD=3
+CB_COOLDOWN_SECONDS=900  # 15 minutes
+
+mkdir -p "$CB_DIR"
+
+is_circuit_open() {
+    if [[ -f "$CB_FILE" ]]; then
+        local count mtime now
+        count=$(awk '{print $1}' "$CB_FILE")
+        mtime=$(stat -c %Y "$CB_FILE" 2>/dev/null || stat -f %m "$CB_FILE" 2>/dev/null)
+        now=$(date +%s)
+        if [[ "${count:-0}" -ge "$CB_THRESHOLD" && "$((now - mtime))" -lt "$CB_COOLDOWN_SECONDS" ]]; then
+            return 0  # circuit open
+        fi
+    fi
+    return 1  # circuit closed
+}
+
+record_failure() {
+    if [[ -f "$CB_FILE" ]]; then
+        local count
+        count=$(awk '{print $1}' "$CB_FILE")
+        echo "$((count + 1))" > "$CB_FILE"
+    else
+        echo "1" > "$CB_FILE"
+    fi
+}
+
+clear_circuit() {
+    rm -f "$CB_FILE"
+}
+
+if is_circuit_open; then
+    logger -t loxprox-discord "Circuit breaker OPEN — skipping Discord alert: $TITLE"
+    exit 0
+fi
+
 # Send to Discord with retry logic
 for attempt in 1 2 3; do
     if curl -s -o /dev/null -w "%{http_code}" \
@@ -89,10 +129,12 @@ for attempt in 1 2 3; do
         --connect-timeout 10 \
         --max-time 15 \
         "$WEBHOOK_URL" | grep -q "^20[0-9]$"; then
+        clear_circuit
         exit 0
     fi
     sleep "$((attempt * 2))"
 done
 
+record_failure
 logger -t loxprox-discord "FAILED to send Discord alert: $TITLE"
 exit 1

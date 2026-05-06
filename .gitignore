@@ -39,4 +39,12 @@ logs/
 
 # Test artifacts
 test-results/
+.pytest_cache/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Local docs
 DOCUMENTATION.md

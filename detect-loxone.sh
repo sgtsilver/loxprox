@@ -149,6 +149,8 @@ scan_subnet_cidr() {
 
     local found=0
     local ip_int
+    local tmpfile
+    tmpfile=$(mktemp /tmp/loxone-scan-results.XXXXXXXXXX)
 
     for ((ip_int = start; ip_int <= end; ip_int++)); do
         local ip
@@ -158,7 +160,7 @@ scan_subnet_cidr() {
         (
             result=$(probe_loxone "$ip")
             if [[ -n "$result" ]]; then
-                echo "$result" >> /tmp/loxone-scan-results.$$
+                echo "$result" >> "$tmpfile"
             fi
         ) &
 
@@ -169,7 +171,7 @@ scan_subnet_cidr() {
     done
     wait
 
-    if [[ -f /tmp/loxone-scan-results.$$ ]]; then
+    if [[ -f "$tmpfile" && -s "$tmpfile" ]]; then
         while IFS='|' read -r _ ip mac version snr gen; do
             found=1
             echo ""
@@ -199,9 +201,9 @@ scan_subnet_cidr() {
                 ok "This is a Loxone Miniserver Gen 1 (HTTP only)."
                 info "The gateway will proxy HTTP traffic transparently."
             fi
-        done < /tmp/loxone-scan-results.$$
-        rm -f /tmp/loxone-scan-results.$$
+        done < "$tmpfile"
     fi
+    rm -f "$tmpfile"
 
     if [[ "$found" -eq 0 ]]; then
         echo ""
@@ -233,6 +235,8 @@ scan_range() {
 
     local found=0
     local ip_int
+    local tmpfile
+    tmpfile=$(mktemp /tmp/loxone-scan-results.XXXXXXXXXX)
 
     for ((ip_int = start_int; ip_int <= end_int; ip_int++)); do
         local ip
@@ -241,7 +245,7 @@ scan_range() {
         (
             result=$(probe_loxone "$ip")
             if [[ -n "$result" ]]; then
-                echo "$result" >> /tmp/loxone-scan-results.$$
+                echo "$result" >> "$tmpfile"
             fi
         ) &
 
@@ -251,7 +255,7 @@ scan_range() {
     done
     wait
 
-    if [[ -f /tmp/loxone-scan-results.$$ ]]; then
+    if [[ -f "$tmpfile" && -s "$tmpfile" ]]; then
         while IFS='|' read -r _ ip mac version snr gen; do
             found=1
             echo ""
@@ -270,9 +274,9 @@ scan_range() {
             echo -e "    LOXONE_IP=\"${ip}\""
             echo -e "    LOXONE_PORT=\"80\""
             echo ""
-        done < /tmp/loxone-scan-results.$$
-        rm -f /tmp/loxone-scan-results.$$
+        done < "$tmpfile"
     fi
+    rm -f "$tmpfile"
 
     if [[ "$found" -eq 0 ]]; then
         echo ""
@@ -334,4 +338,7 @@ main() {
     fi
 }
 
-main "$@"
+# Only run main if executed directly (not sourced)
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

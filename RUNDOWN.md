@@ -79,9 +79,53 @@ The Miniserver Gen 1 CPU cannot handle SSL. The gateway terminates TLS and speak
 Workflow in `.github/workflows/ci.yml`:
 - **ShellCheck** on all `.sh` files (warning severity)
 - **Syntax check** — `bash -n` on every script
+- **Python unit tests** — pytest with mocked `subprocess.run()` for `progressive-ban.py`
+- **Shell unit tests** — portable mock-based tests for `deploy.sh` and `detect-loxone.sh` functions
+- **Integration test** — config generation validation inside a Debian 12 Docker container
 - **Markdown link check** — validates all documentation links
 
 ---
+
+## Security Improvements (Post-Audit)
+
+All 23 findings from the 2026-05-06 Ezio audit have been addressed:
+
+| Finding | Fix |
+|---------|-----|
+| CRIT-001 `curl \| bash` | GPG-key-pinned apt repository setup — no pipe-to-shell |
+| HIGH-001 AppSec key on disk | Documented threat model + mitigation guidance |
+| HIGH-002 Missing CSP | Added CSP + Permissions-Policy; removed deprecated X-XSS-Protection |
+| HIGH-003 No integration tests | Added Docker-based CI integration test + portable unit tests |
+| HIGH-004 `curl \| bash` in install-gateway.sh | Same GPG-pinned fix applied |
+| MED-001 Unpinned hub collections | Removed unconditional `hub upgrade`; install at hub-index version |
+| MED-002 Rollback without validation | Added `nginx -t`, `nft -c`, pre-rollback snapshot |
+| MED-003 Python subprocess timeouts | Added `timeout=30` to all `subprocess.run()` calls |
+| MED-004 Silent subprocess failures | Return codes checked, stderr logged |
+| MED-005 No Python unit tests | Full pytest suite with mocked `subprocess` |
+| MED-006 No scanner tests | Portable bash unit tests for IP math, OUI, mktemp |
+| LOW-001–LOW-010 | All fixed (mktemp, stricter IP regex, logrotate, circuit breaker, proxy_hide_header, test split, webhook rotation docs, AppSec tests, nftables comment) |
+
+## Test Infrastructure
+
+```
+tests/
+├── run-tests.sh              # unified test runner
+├── test_progressive_ban.py   # 17 pytest cases for ban script
+├── test_deploy_integration.sh # 54 assertions for deploy.sh logic
+└── test_detect_loxone.sh     # 11 assertions for scanner logic
+```
+
+Run locally:
+```bash
+bash tests/run-tests.sh          # all portable tests
+bash tests/run-tests.sh shell    # shell tests only
+bash tests/run-tests.sh python   # Python tests only
+```
+
+VM integration tests (requires live gateway):
+```bash
+sudo ./test-gateway.sh
+```
 
 ## Roadmap / Ideas
 

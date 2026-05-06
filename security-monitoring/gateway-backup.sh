@@ -12,9 +12,9 @@ BACKUP_DIR="/root/loxprox-backups"
 RETENTION_DAYS=30
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP_NAME="loxone-loxprox-backup-${TIMESTAMP}"
-WORK_DIR="/tmp/${BACKUP_NAME}"
+WORK_DIR=$(mktemp -d /tmp/loxprox-backup.XXXXXXXXXX)
 
-mkdir -p "$BACKUP_DIR" "$WORK_DIR"
+mkdir -p "$BACKUP_DIR"
 
 # Config files to back up
 backup_file() {

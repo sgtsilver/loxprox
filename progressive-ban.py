@@ -13,9 +13,16 @@ Run via cron every 15 minutes.
 """
 
 import json
+import logging
 import subprocess
 import sys
 from collections import defaultdict
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger("progressive-ban")
 
 # Escalation table: offense_count -> duration
 # Offense count = total number of bans for this IP (including current)
@@ -25,17 +32,63 @@ ESCALATION = {
     4: "720h",   # 30 days
 }
 DEFAULT_EXTENDED = "720h"  # 30 days for anything beyond 4th
+CSCLI_TIMEOUT = 30  # seconds — MED-003 fix
+
 
 def run_cscli(args):
     cmd = ["cscli"] + args + ["-o", "json"]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=CSCLI_TIMEOUT
+        )
+    except subprocess.TimeoutExpired:
+        logger.error("cscli command timed out after %ds: %s", CSCLI_TIMEOUT, " ".join(cmd))
+        return None
+    except FileNotFoundError:
+        logger.error("cscli not found in PATH")
+        return None
+
     if result.returncode != 0:
-        print(f"cscli error: {result.stderr}", file=sys.stderr)
+        logger.error("cscli error (rc=%d): %s", result.returncode, result.stderr.strip())
         return None
     try:
         return json.loads(result.stdout)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        logger.error("cscli JSON decode error: %s", exc)
         return None
+
+
+def cscli_decision_delete(decision_id: str) -> bool:
+    """Delete a CrowdSec decision by ID. Returns True on success."""
+    try:
+        result = subprocess.run(
+            ["cscli", "decisions", "delete", "--id", str(decision_id)],
+            capture_output=True, text=True, timeout=CSCLI_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        logger.error("cscli decisions delete timed out for id=%s", decision_id)
+        return False
+    if result.returncode != 0:
+        logger.error("cscli decisions delete failed (rc=%d): %s", result.returncode, result.stderr.strip())
+        return False
+    return True
+
+
+def cscli_decision_add(ip: str, duration: str, reason: str) -> bool:
+    """Add a CrowdSec decision. Returns True on success."""
+    try:
+        result = subprocess.run(
+            ["cscli", "decisions", "add", "--ip", ip, "--duration", duration, "--reason", reason],
+            capture_output=True, text=True, timeout=CSCLI_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        logger.error("cscli decisions add timed out for ip=%s", ip)
+        return False
+    if result.returncode != 0:
+        logger.error("cscli decisions add failed (rc=%d): %s", result.returncode, result.stderr.strip())
+        return False
+    return True
+
 
 def main():
     # Get all decisions (active + expired) to count offenses per IP
@@ -88,17 +141,22 @@ def main():
             skipped += 1
             continue
 
-        print(f"[NUKE] IP {ip} | offense #{offenses} | scenario: {scenario} | extending to {target}")
+        logger.info(
+            "[NUKE] IP %s | offense #%d | scenario: %s | extending to %s",
+            ip, offenses, scenario, target,
+        )
 
         # Delete current ban and re-add with longer duration
-        subprocess.run(["cscli", "decisions", "delete", "--id", str(id_)],
-                       capture_output=True, text=True)
-        subprocess.run(["cscli", "decisions", "add", "--ip", ip,
-                        "--duration", target, "--reason", f"repeat-offender-{offenses}"],
-                       capture_output=True, text=True)
+        if not cscli_decision_delete(id_):
+            logger.warning("Failed to delete decision %s for %s — skipping add", id_, ip)
+            continue
+        if not cscli_decision_add(ip, target, f"repeat-offender-{offenses}"):
+            logger.warning("Failed to add extended decision for %s — IP may be unbanned", ip)
+            continue
         extended += 1
 
-    print(f"Done. Extended: {extended}, Skipped: {skipped}")
+    logger.info("Done. Extended: %d, Skipped: %d", extended, skipped)
+
 
 if __name__ == "__main__":
     main()

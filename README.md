@@ -10,9 +10,9 @@
 
 ## About This Project
 
-**Idea & Infrastructure:** [sgtsilver](https://github.com/sgtsilver) — who wanted to secure his Loxone Miniserver without keeping a VPN connected around the clock, and provided the hardware, network context, and real-world constraints to make it happen.
+**Idea & Infrastructure:** [sgtsilver](https://github.com/sgtsilver) — who wanted to secure a Loxone Miniserver without keeping a VPN connected around the clock, and provided the hardware, network context, and real-world constraints to make it happen.
 
-**Design & Implementation:** Claude (Anthropic) — who researched Loxone Gen 1 vulnerabilities, architected the six-layer defense stack, wrote all code, and produced the test suite and documentation. Every line of shell script, every nftables rule, and every sysctl parameter was selected and validated by an AI systems engineer working from first principles.
+**Design & Implementation:** Kimi (Moonshot AI) — who researched Loxone Gen 1 vulnerabilities, architected the six-layer defense stack, wrote all code, and produced the test suite and documentation. Every line of shell script, every nftables rule, and every sysctl parameter was selected and validated by an AI systems engineer working from first principles.
 
 This is an experiment in **AI-led infrastructure hardening**: a human defines the problem and the constraints; the AI designs, implements, tests, and documents the complete solution.
 
