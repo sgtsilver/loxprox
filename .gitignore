@@ -1,0 +1,41 @@
+# Secrets and local configuration
+.env
+*.local
+config.json
+/etc/crowdsec/bouncers/*.yaml.local
+
+# Runtime files
+*.pid
+*.sock
+*.socket
+
+# Backups (generated on target systems)
+backups/
+gateway-backups/
+*.tar.gz
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+.claude/
+
+# macOS
+.DS_Store
+._*
+
+# AI context / session files
+settings.local.json
+
+# Logs
+*.log
+logs/
+
+# Test artifacts
+test-results/

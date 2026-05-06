@@ -1,0 +1,8 @@
+# CrowdSec Log Acquisition Config for Loxone Security Gateway
+# Place at: /etc/crowdsec/acquis.d/nginx.yaml
+
+filenames:
+  - /var/log/nginx/loxone-access.log
+  - /var/log/nginx/loxone-error.log
+labels:
+  type: nginx
