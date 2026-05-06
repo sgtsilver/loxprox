@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use this software in your research, please cite it as below."
+title: "LoxProx"
+abstract: "Hardened security gateway for Loxone Miniservers. Provides reverse proxy, WAF, IDS, firewall, and automated monitoring for IoT home automation systems."
+type: software
+authors:
+  - family-names: "Dewald"
+    given-names: "Paul"
+    orcid: "https://orcid.org/0000-0000-0000-0000"
+repository-code: "https://github.com/sgtsilver/loxprox"
+license: MIT
+version: 1.0.0
+date-released: 2025-01-17
+keywords:
+  - loxone
+  - smart-home
+  - home-automation
+  - security-gateway
+  - reverse-proxy
+  - iot-security
+  - crowdsec
+  - nftables
+  - debian
+  - homelab
