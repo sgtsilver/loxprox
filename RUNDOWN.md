@@ -2,8 +2,8 @@
 
 **Status:** Published on GitHub  
 **Repo:** https://github.com/sgtsilver/loxprox  
-**Version:** 1.0.0  
-**Last updated:** 2026-05-06
+**Version:** 1.1.0  
+**Last updated:** 2026-05-07
 
 ---
 
@@ -83,6 +83,39 @@ Workflow in `.github/workflows/ci.yml`:
 - **Shell unit tests** — portable mock-based tests for `deploy.sh` and `detect-loxone.sh` functions
 - **Integration test** — config generation validation inside a Debian 12 Docker container
 - **Markdown link check** — validates all documentation links
+
+## GitHub Repository Setup
+
+These settings are configured on the repo and affect how code lands in `main`:
+
+| Setting | Status | Notes |
+|---------|--------|-------|
+| Branch protection on `main` | ✅ Active | Requires PR + 1 approval + all CI checks pass |
+| Dependabot (Actions) | ✅ Active | Weekly checks; auto-opens PRs for action updates |
+| Secret scanning | ⏭️ Skipped | LAN-only project; no secrets committed |
+| Release `v1.1.0` | ✅ Published | Permanent tag for rollback |
+
+### Developer workflow (after branch protection)
+
+Direct push to `main` is blocked. Use feature branches:
+
+```bash
+# 1. Create a feature branch
+git checkout -b feature-name
+
+# 2. Commit your changes
+git add -A
+git commit -m "type: description"
+
+# 3. Push the branch
+git push origin feature-name
+
+# 4. Open a Pull Request on GitHub
+#    Click the yellow "Compare & pull request" banner
+
+# 5. Wait for CI to pass (all green checks)
+# 6. Merge via GitHub UI (requires 1 approval)
+```
 
 ---
 
