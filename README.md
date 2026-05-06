@@ -266,3 +266,4 @@ MIT — see [LICENSE](LICENSE).
 - [CrowdSec](https://www.crowdsec.net/) — the collaborative IDS/WAF engine that makes community-driven blocking possible
 - [Loxone](https://www.loxone.com/) — the home automation platform this gateway protects (even if they stopped patching Gen 1)
 - The home automation community — for documenting Loxone Gen 1 limitations so clearly that an AI could design around them
+# test
