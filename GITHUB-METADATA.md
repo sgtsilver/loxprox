@@ -64,7 +64,7 @@ See [CONFIGURATION-GUIDE.md](CONFIGURATION-GUIDE.md) for required variables.
 - Raspberry Pi 3: supported with 64-bit OS
 
 ### Attribution
-Built by Paul Dewald with [Kimi](https://kimi.moonshot.cn) ([Moonshot AI](https://www.moonshot.cn)). See [README.md](README.md#attribution) for details.
+Built by Paul Dewald with [Kimi](https://www.kimi.com) ([Moonshot AI](https://www.moonshot.ai)). See [README.md](README.md#attribution) for details.
 ```
 
 ---
