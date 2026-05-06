@@ -81,7 +81,7 @@ Technical highlights:
 - Raspberry Pi 4/5 compatible
 - MIT licensed
 
-Built in collaboration with Kimi (Moonshot AI) as an experiment in AI-led infrastructure hardening.
+Built in collaboration with [Kimi](https://kimi.moonshot.cn) ([Moonshot AI](https://www.moonshot.cn)) as an experiment in AI-led infrastructure hardening.
 
 Repository: https://github.com/sgtsilver/loxprox
 
