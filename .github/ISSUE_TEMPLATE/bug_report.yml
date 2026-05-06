@@ -7,6 +7,8 @@ body:
       value: |
         Thanks for taking the time to report a bug. Low-effort or AI-generated reports without reproduction steps will be closed without comment.
 
+        > Works on my machine. If it doesn't on yours — well, ask your AI.
+
   - type: checkboxes
     id: preflight
     attributes:

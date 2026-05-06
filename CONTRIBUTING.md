@@ -8,6 +8,8 @@ AI-assisted code and reports are welcome **only if a human has reviewed, underst
 
 If you used AI to help find a bug: include the actual test output and steps to reproduce. If you used AI to write a fix: run it on a real system before submitting. The quality bar is the same whether the code came from a human or a model.
 
+> **Works on my machine. If it doesn't on yours — well, ask your AI.**
+
 ## What We're Looking For
 
 - **Bug fixes** in the deploy script or monitoring tools
