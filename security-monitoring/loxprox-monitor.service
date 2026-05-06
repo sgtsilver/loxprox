@@ -1,0 +1,9 @@
+[Unit]
+Description=LoxProx Monitor
+After=network.target nginx.service crowdsec.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/loxprox/loxprox-monitor.sh
+StandardOutput=append:/var/log/loxprox-monitor.log
+StandardError=append:/var/log/loxprox-monitor.log
