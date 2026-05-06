@@ -74,8 +74,8 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 - Rate limit: 10 req/s per IP, burst 100
 - Connection limit: 20 concurrent per IP
 - Slowloris protection: aggressive timeouts (10-15s)
-- Security headers: X-Frame-Options, X-Content-Type-Options, Referrer-Policy, X-XSS-Protection
-- `server_tokens off`
+- Security headers: X-Frame-Options, X-Content-Type-Options, Referrer-Policy, **Content-Security-Policy**, **Permissions-Policy**
+- `server_tokens off`; `proxy_hide_header Server` and `proxy_hide_header X-Powered-By` to prevent backend version leakage
 - Buffer limits to prevent memory exhaustion
 - AppSec subrequest: every request evaluated by CrowdSec WAF before proxying
 
@@ -96,6 +96,7 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 - **Authentication**: AppSec requires the CrowdSec firewall bouncer API key in the `X-Crowdsec-Appsec-Api-Key` header
 - **Required headers**: `X-Crowdsec-Appsec-Ip`, `X-Crowdsec-Appsec-Uri`, `X-Crowdsec-Appsec-Verb`
 - The nginx `auth_request` subrequest passes these headers automatically via `/etc/nginx/crowdsec-appsec.conf`
+- **Risk note**: The AppSec API key is stored in `/etc/nginx/crowdsec-appsec.conf` (mode 640, root:www-data). If an attacker achieves local file read (e.g., via LFI in Loxone or a compromised nginx worker), they could extract this key and bypass the WAF. This is a known, accepted risk for this architecture. Mitigation: keep Loxone and nginx fully patched; consider systemd `LoadCredential=` for memory-only secret injection (requires njs/Lua in nginx).
 - AppSec metrics: `cscli metrics | grep -A3 Appsec`
 
 ### Layer 5: System Hardening
@@ -209,6 +210,17 @@ sudo bash /tmp/deploy.sh
 3. Verify gateway → Loxone reachability: `curl http://<LOXONE_IP>:80/jdev/cfg/api`
 4. Check nginx error log for backend timeouts
 5. Run test suite: `sudo bash /tmp/test-gateway.sh`
+
+### Discord Webhook Rotation
+
+If a webhook URL is compromised or you need to rotate credentials:
+1. In Discord: Server Settings → Integrations → Webhooks → Delete the old webhook
+2. Create a new webhook and copy the URL
+3. Update `DISCORD_WEBHOOK_URL` in `deploy.sh` (or directly in `/etc/loxprox/config.env`)
+4. Re-run `deploy.sh` or restart the monitor timer: `systemctl restart loxprox-monitor.timer`
+5. Verify: trigger a test alert (e.g., `sudo /opt/loxprox/discord-alert.sh INFO "Test" "Rotation verified"`)
+
+**Note**: The webhook URL is stored in `/etc/loxprox/config.env` with mode 640. Only root and the loxprox group can read it.
 
 ### AppSec Returning 401 Errors
 

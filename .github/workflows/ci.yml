@@ -28,13 +28,127 @@ jobs:
       - name: Syntax check all shell scripts
         run: |
           set -e
-          for f in deploy.sh detect-loxone.sh test-gateway.sh set-static-ip.sh security-monitoring/*.sh; do
+          for f in deploy.sh detect-loxone.sh test-gateway.sh set-static-ip.sh security-monitoring/*.sh tests/*.sh; do
             if [[ -f "$f" ]]; then
               echo "Checking: $f"
               bash -n "$f"
             fi
           done
           echo "All scripts pass syntax check."
+
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pytest
+        run: pip install pytest
+
+      - name: Run Python unit tests
+        run: pytest tests/test_progressive_ban.py -v
+
+  shell-unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run portable shell unit tests
+        run: bash tests/run-tests.sh shell
+
+  integration-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Integration test — config generation in Debian 12 container
+        run: |
+          set -e
+          docker run --rm -v "$PWD:/workspace" -w /workspace debian:12 bash -c '
+            set -euo pipefail
+            apt-get update -qq
+            apt-get install -y -qq curl gnupg nginx nftables bc jq > /dev/null 2>&1 || true
+
+            echo "=== Running portable unit tests inside Debian 12 ==="
+            bash tests/run-tests.sh
+
+            echo ""
+            echo "=== Validating deploy.sh config generation ==="
+            # Verify key functions produce syntactically valid configs
+            export LOXONE_IP="192.168.1.100"
+            export LOXONE_PORT="80"
+            export GATEWAY_IP="192.168.1.50"
+            export LAN_SUBNET="192.168.1.0/24"
+            export SSH_ALLOWED_SUBNETS=("192.168.1.0/24")
+            export RATE_LIMIT_REQ_PER_SEC="10"
+            export RATE_LIMIT_BURST="100"
+            export RATE_LIMIT_CONN_PER_IP="20"
+            export PROXY_CONNECT_TIMEOUT="10"
+            export PROXY_SEND_TIMEOUT="15"
+            export PROXY_READ_TIMEOUT="15"
+            export CLIENT_BODY_TIMEOUT="10"
+            export CLIENT_HEADER_TIMEOUT="10"
+            export ENABLE_APPSEC="true"
+            export APPSEC_MODE="enforce"
+            export CROWDSEC_WHITELIST_IPS=("192.168.1.0/24")
+            export DISCORD_WEBHOOK_URL=""
+            export ALERT_EMAIL=""
+            export AUTOREBOOT_TIME="03:00"
+
+            # Override paths
+            export LOG_FILE="/tmp/loxprox-deploy.log"
+            export BACKUP_DIR="/tmp/loxprox-backup-test"
+            export NGINX_SITE="/tmp/nginx-sites/loxone"
+            export NGINX_ENABLED="/tmp/nginx-sites-enabled/loxone"
+            export NFTABLES_CONF="/tmp/nftables.conf"
+            export SYSCTL_CONF="/tmp/sysctl.conf"
+            export LOGROTATE_CONF="/tmp/logrotate.conf"
+            export GATEWAY_CONFIG_DIR="/tmp/loxprox"
+            export GATEWAY_CONFIG_FILE="$GATEWAY_CONFIG_DIR/config.env"
+
+            mkdir -p /tmp/nginx-sites /tmp/nginx-sites-enabled /tmp/loxprox
+
+            # Mock system commands that need real services
+            systemctl() { true; }
+            apt-get() { true; }
+            dpkg() { true; }
+            cscli() { true; }
+            export -f systemctl apt-get dpkg cscli
+
+            # Source deploy.sh functions
+            source deploy.sh
+
+            apply_sysctls
+            setup_firewall
+            configure_nginx
+            setup_logrotate
+            write_runtime_config
+
+            # Validate generated configs
+            if [[ ! -f "$NGINX_SITE" ]]; then echo "FAIL: nginx site missing"; exit 1; fi
+            if ! grep -q "listen 1080" "$NGINX_SITE"; then echo "FAIL: listen 1080 missing"; exit 1; fi
+            if ! grep -q "Content-Security-Policy" "$NGINX_SITE"; then echo "FAIL: CSP missing"; exit 1; fi
+            if grep -q "X-XSS-Protection" "$NGINX_SITE"; then echo "FAIL: X-XSS-Protection should be removed"; exit 1; fi
+            if ! grep -q "proxy_hide_header Server" "$NGINX_SITE"; then echo "FAIL: proxy_hide_header missing"; exit 1; fi
+
+            if [[ ! -f "$NFTABLES_CONF" ]]; then echo "FAIL: nftables.conf missing"; exit 1; fi
+            if ! grep -q "policy drop" "$NFTABLES_CONF"; then echo "FAIL: nftables policy not drop"; exit 1; fi
+
+            if [[ ! -f "$SYSCTL_CONF" ]]; then echo "FAIL: sysctl.conf missing"; exit 1; fi
+            if ! grep -q "tcp_syncookies = 1" "$SYSCTL_CONF"; then echo "FAIL: syncookies missing"; exit 1; fi
+
+            if [[ ! -f "$LOGROTATE_CONF" ]]; then echo "FAIL: logrotate missing"; exit 1; fi
+            if ! grep -q "appsec-detections.log" "$LOGROTATE_CONF"; then echo "FAIL: appsec logrotate missing"; exit 1; fi
+
+            if [[ ! -f "$GATEWAY_CONFIG_FILE" ]]; then echo "FAIL: runtime config missing"; exit 1; fi
+
+            echo ""
+            echo "=== All integration validations passed ==="
+          '
 
   markdown-lint:
     runs-on: ubuntu-latest

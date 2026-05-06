@@ -77,7 +77,20 @@ systemctl restart nginx
 systemctl enable nginx
 
 echo "[+] Installing CrowdSec..."
-curl -s https://packagecloud.io/install/repositories/crowdsec/crowdsec/script.deb.sh | bash
+# GPG-pinned install — no curl|bash vector
+KEYRING="/etc/apt/keyrings/crowdsec-archive-keyring.gpg"
+TMP_KEY=$(mktemp)
+curl -fsSL -o "$TMP_KEY" "https://packagecloud.io/crowdsec/crowdsec/gpgkey"
+if ! gpg --dry-run --import "$TMP_KEY" &>/dev/null; then
+    rm -f "$TMP_KEY"
+    echo "ERROR: CrowdSec GPG key download failed or is invalid."
+    exit 1
+fi
+gpg --dearmor < "$TMP_KEY" > "$KEYRING"
+rm -f "$TMP_KEY"
+echo "deb [signed-by=${KEYRING}] https://packagecloud.io/crowdsec/crowdsec/debian bookworm main" \
+    > /etc/apt/sources.list.d/crowdsec.list
+apt-get update -q
 apt-get install -y crowdsec
 
 echo "[+] Installing CrowdSec firewall bouncer (nftables)..."
