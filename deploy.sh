@@ -147,19 +147,19 @@ AUTOREBOOT_TIME="03:00"
 # INTERNALS — Do not edit below
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-LOG_FILE="/var/log/loxprox-deploy.log"
-BACKUP_DIR="/root/loxprox-backup-$(date +%Y%m%d-%H%M%S)"
-NGINX_SITE="/etc/nginx/sites-available/loxone"
-NGINX_ENABLED="/etc/nginx/sites-enabled/loxone"
-CROWDSEC_NGINX_ACQUIS="/etc/crowdsec/acquis.d/nginx.yaml"
-CROWDSEC_SSH_ACQUIS="/etc/crowdsec/acquis.d/ssh.yaml"
-CROWDSEC_APPSEC_ACQUIS="/etc/crowdsec/acquis.d/appsec.yaml"
-NGINX_APPSEC_INCLUDE="/etc/nginx/crowdsec-appsec.conf"
-SYSCTL_CONF="/etc/sysctl.d/99-security-gateway.conf"
-NFTABLES_CONF="/etc/nftables.conf"
-LOGROTATE_CONF="/etc/logrotate.d/loxone-nginx"
-GATEWAY_CONFIG_DIR="/etc/loxprox"
-GATEWAY_CONFIG_FILE="$GATEWAY_CONFIG_DIR/config.env"
+LOG_FILE="${LOG_FILE:-/var/log/loxprox-deploy.log}"
+BACKUP_DIR="${BACKUP_DIR:-/root/loxprox-backup-$(date +%Y%m%d-%H%M%S)}"
+NGINX_SITE="${NGINX_SITE:-/etc/nginx/sites-available/loxone}"
+NGINX_ENABLED="${NGINX_ENABLED:-/etc/nginx/sites-enabled/loxone}"
+CROWDSEC_NGINX_ACQUIS="${CROWDSEC_NGINX_ACQUIS:-/etc/crowdsec/acquis.d/nginx.yaml}"
+CROWDSEC_SSH_ACQUIS="${CROWDSEC_SSH_ACQUIS:-/etc/crowdsec/acquis.d/ssh.yaml}"
+CROWDSEC_APPSEC_ACQUIS="${CROWDSEC_APPSEC_ACQUIS:-/etc/crowdsec/acquis.d/appsec.yaml}"
+NGINX_APPSEC_INCLUDE="${NGINX_APPSEC_INCLUDE:-/etc/nginx/crowdsec-appsec.conf}"
+SYSCTL_CONF="${SYSCTL_CONF:-/etc/sysctl.d/99-security-gateway.conf}"
+NFTABLES_CONF="${NFTABLES_CONF:-/etc/nftables.conf}"
+LOGROTATE_CONF="${LOGROTATE_CONF:-/etc/logrotate.d/loxone-nginx}"
+GATEWAY_CONFIG_DIR="${GATEWAY_CONFIG_DIR:-/etc/loxprox}"
+GATEWAY_CONFIG_FILE="${GATEWAY_CONFIG_FILE:-$GATEWAY_CONFIG_DIR/config.env}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 

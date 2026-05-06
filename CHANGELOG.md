@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [1.1.0] — 2026-05-06
 
 ### Security (Ezio Audit Fix Sweep — 23/23 findings resolved)
-- **CRIT-001**: Eliminated `curl | bash` supply-chain vector. CrowdSec install now uses GPG-key-pinned apt repository (`gpgkey` downloaded to temp file, verified, then dearmored to `/usr/share/keyrings/`).
+- **CRIT-001**: Eliminated `curl | bash` supply-chain vector. CrowdSec install now uses GPG-key-pinned apt repository (`gpgkey` downloaded to temp file, verified, then dearmored to `/etc/apt/keyrings/`).
 - **HIGH-002**: Added `Content-Security-Policy` and `Permissions-Policy` headers; removed deprecated `X-XSS-Protection`.
 - **HIGH-001**: Documented AppSec API key exposure risk in `SECURITY.md` with threat model and mitigation guidance.
 - **MED-001**: Removed unconditional `cscli hub upgrade` — hub components are installed at hub-index version; upgrades are intentional operator actions, not automatic surprises.
@@ -23,6 +23,9 @@ All notable changes to this project will be documented in this file.
 - Unified test runner: `tests/run-tests.sh`.
 - CI integration test job: validates config generation inside a Debian 12 Docker container.
 - CI Python test job: runs pytest on every PR.
+
+### Fixed
+- `deploy.sh` internal path variables (`SYSCTL_CONF`, `NFTABLES_CONF`, `NGINX_SITE`, etc.) now use `${VAR:-default}` syntax so CI integration tests can override them when sourcing the script.
 
 ### Changed
 - `deploy.sh` and `detect-loxone.sh` now guard `main()` with `[[ "${BASH_SOURCE[0]}" == "${0}" ]]` to enable sourcing for unit tests.
