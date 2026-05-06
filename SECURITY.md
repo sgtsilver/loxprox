@@ -1,5 +1,13 @@
 # Loxone Miniserver Gen 1 — Security Posture & Threat Model
 
+## Responsible Disclosure
+
+**No bug bounty — no money.** If you find a vulnerability, open a Pull Request with the fix. Every contribution is reviewed and analyzed. This is a community-hardened project: the code is the defense, and better code makes everyone safer.
+
+If you can't provide a fix, open an issue with reproduction steps and we'll address it.
+
+---
+
 ## Executive Summary
 
 The Loxone Miniserver Gen 1 is **end-of-life hardware** with **no TLS support**, **no native authentication hardening**, and **no ongoing security patches**. It is the definition of a "legacy device that must be protected by the network layer."
