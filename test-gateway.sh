@@ -126,7 +126,7 @@ test_proxy() {
 
     # Test rate limiting (send 150 requests quickly)
     local limited=0
-    for i in {1..5}; do
+    for _ in {1..5}; do
         local s
         s=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:1080/jdev/cfg/api 2>/dev/null)
         [[ "$s" == "503" ]] && limited=1
