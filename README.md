@@ -1,13 +1,16 @@
-# Loxone Miniserver Gen 1 — Security Gateway
+# LoxProx — Hardened Gateway for Loxone Miniservers
 
-<!-- Badges will be added once GitHub URL is provided -->
-<!-- [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) -->
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Validation: A-](https://img.shields.io/badge/Validation-A--_brightgreen)]()
+[![Debian 12](https://img.shields.io/badge/Debian-12-A81D33?logo=debian)]()
+[![CIS Hardened](https://img.shields.io/badge/CIS-Hardened-blue)]()
+[![Shellcheck](https://img.shields.io/badge/Shellcheck-passing-brightgreen)]()
 
 > **A drop-in security gateway for Loxone Miniserver Gen 1.** No TLS, no built-in auth, no rate limits — this gateway adds every protection the hardware lacks, transparently.
 
 ## About This Project
 
-**Idea & Infrastructure:** [Paul Dewald](https://github.com/USER-URL-PENDING) — who identified the need, provided the Loxone hardware context, and specified the constraints (locked DNS, hardcoded port 1080, LAN bypass requirement).
+**Idea & Infrastructure:** [sgtsilver](https://github.com/sgtsilver) — who identified the need, provided the Loxone hardware context, and specified the constraints (locked DNS, hardcoded port 1080, LAN bypass requirement).
 
 **Design & Implementation:** Claude (Anthropic) — who researched Loxone Gen 1 vulnerabilities, architected the six-layer defense stack, wrote all code, and produced the test suite and documentation. Every line of shell script, every nftables rule, and every sysctl parameter was selected and validated by an AI systems engineer working from first principles.
 
