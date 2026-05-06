@@ -1,0 +1,46 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://<LOKI_IP>:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: nginx-access
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: nginx-access
+          instance: loxprox-gateway
+          __path__: /var/log/nginx/loxone-access.log
+
+  - job_name: nginx-error
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: nginx-error
+          instance: loxprox-gateway
+          __path__: /var/log/nginx/loxone-error.log
+
+  - job_name: loxprox-monitor
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: loxprox-monitor
+          instance: loxprox-gateway
+          __path__: /var/log/loxprox-monitor.log
+
+  - job_name: crowdsec
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: crowdsec
+          instance: loxprox-gateway
+          __path__: /var/log/crowdsec/crowdsec.log

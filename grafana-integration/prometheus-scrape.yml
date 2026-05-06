@@ -1,0 +1,11 @@
+# Add this job to your prometheus.yml scrape_configs section,
+# or include it via scrape_config_files if your Prometheus supports it.
+
+scrape_configs:
+  - job_name: 'loxprox-gateway'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['<LOXPROX_IP>:9100']
+        labels:
+          instance: 'loxprox-gateway'
+          job: 'loxprox'
