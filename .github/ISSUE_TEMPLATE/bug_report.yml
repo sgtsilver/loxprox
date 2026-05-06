@@ -1,0 +1,80 @@
+name: Bug Report
+description: Report a problem with the gateway
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Low-effort or AI-generated reports without reproduction steps will be closed without comment.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight Checklist
+      description: Please confirm you have done the following before opening this issue.
+      options:
+        - label: I have run `bash tests/run-tests.sh` locally and included the output below
+          required: true
+        - label: I have searched existing issues and this is not a duplicate
+          required: true
+        - label: I can reproduce this on a fresh Debian 12 VM or Raspberry Pi
+          required: false
+
+  - type: textarea
+    id: test_output
+    attributes:
+      label: Test Output
+      description: Paste the full output of `bash tests/run-tests.sh` (or `sudo ./test-gateway.sh` if this is a runtime issue).
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        - Debian version:
+        - Hardware (VM specs / Pi model):
+        - Loxone Miniserver firmware version:
+        - How you deployed (fresh install / upgrade from previous version):
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened? Include exact error messages, log excerpts, or screenshots.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Provide a minimal, step-by-step list that someone else can follow to trigger the bug.
+      placeholder: |
+        1. Start with fresh Debian 12 VM
+        2. Run `sudo ./deploy.sh`
+        3. Run `sudo ./test-gateway.sh`
+        4. Observe failure on check #12
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: ai_disclosure
+    attributes:
+      label: AI Assistance Disclosure
+      description: If AI tools assisted in finding or describing this bug, confirm a human has verified it on real hardware.
+      options:
+        - label: I have personally verified this bug on a real system (not just an AI-generated report)
+          required: true
