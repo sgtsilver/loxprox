@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/sgtsilver/loxprox/blob/main/README.md
+    about: Read the README before opening an issue — many questions are answered there.
+  - name: Security Policy
+    url: https://github.com/sgtsilver/loxprox/blob/main/SECURITY.md
+    about: For vulnerability reports, see SECURITY.md — no bug bounty, PRs with fixes welcome.

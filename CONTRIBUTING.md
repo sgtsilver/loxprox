@@ -2,6 +2,12 @@
 
 This is a specialized security appliance for Loxone Miniserver Gen 1. Contributions are welcome, but please keep the scope focused.
 
+## AI-Generated Contributions
+
+AI-assisted code and reports are welcome **only if a human has reviewed, understood, and verified them on real hardware**. Low-effort AI-generated slop — copy-pasted vulnerability reports, untested PRs, or issues without reproduction steps — will be closed without comment.
+
+If you used AI to help find a bug: include the actual test output and steps to reproduce. If you used AI to write a fix: run it on a real system before submitting. The quality bar is the same whether the code came from a human or a model.
+
 ## What We're Looking For
 
 - **Bug fixes** in the deploy script or monitoring tools
