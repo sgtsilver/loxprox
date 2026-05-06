@@ -13,8 +13,8 @@ set -euo pipefail
 # Configuration
 CONFIG_FILE="${LOXPROX_CONFIG:-/etc/loxprox/config.env}"
 if [[ -f "$CONFIG_FILE" ]]; then
-    # shellcheck source=/dev/null
     set -a
+    # shellcheck source=/dev/null
     source "$CONFIG_FILE"
     set +a
 fi
@@ -43,8 +43,10 @@ record_alert_time() {
 
 can_alert() {
     local key="$1"
-    local last=$(last_alert_time "$key")
-    local now=$(date +%s)
+    local last
+    last=$(last_alert_time "$key")
+    local now
+    now=$(date +%s)
     [ $((now - last)) -gt $ALERT_COOLDOWN ]
 }
 
@@ -81,7 +83,8 @@ check_nginx_errors() {
     local last_pos=0
     [ -f "$last_check_file" ] && last_pos=$(cat "$last_check_file")
     
-    local current_pos=$(wc -c < "$log")
+    local current_pos
+    current_pos=$(wc -c < "$log")
     [ "$current_pos" -le "$last_pos" ] && { echo "$current_pos" > "$last_check_file"; return 0; }
     
     local new_errors
@@ -104,7 +107,8 @@ check_auth_attempts() {
     local last_pos=0
     [ -f "$last_check_file" ] && last_pos=$(cat "$last_check_file")
     
-    local current_pos=$(wc -c < "$log")
+    local current_pos
+    current_pos=$(wc -c < "$log")
     [ "$current_pos" -le "$last_pos" ] && { echo "$current_pos" > "$last_check_file"; return 0; }
     
     local failed_logins
@@ -129,7 +133,8 @@ check_appsec_detections() {
     local last_pos=0
     [ -f "$last_check_file" ] && last_pos=$(cat "$last_check_file")
     
-    local current_pos=$(wc -c < "$log")
+    local current_pos
+    current_pos=$(wc -c < "$log")
     [ "$current_pos" -le "$last_pos" ] && { echo "$current_pos" > "$last_check_file"; return 0; }
     
     local detections

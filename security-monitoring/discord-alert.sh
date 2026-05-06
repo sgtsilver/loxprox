@@ -13,8 +13,8 @@ set -euo pipefail
 # Configuration: read from env or fallback to /etc/loxprox/config.env
 CONFIG_FILE="${LOXPROX_CONFIG:-/etc/loxprox/config.env}"
 if [[ -f "$CONFIG_FILE" ]]; then
-    # shellcheck source=/dev/null
     set -a
+    # shellcheck source=/dev/null
     source "$CONFIG_FILE"
     set +a
 fi
@@ -31,8 +31,6 @@ fi
 SEVERITY="${1:-INFO}"
 TITLE="${2:-Security Alert}"
 MESSAGE="${3:-No details provided}"
-FIELDS="${4:-{}}"
-
 # Color mapping
 case "${SEVERITY^^}" in
     CRITICAL) COLOR=15158332 ;;  # red
