@@ -2,8 +2,8 @@
 
 **Status:** Published on GitHub  
 **Repo:** https://github.com/sgtsilver/loxprox  
-**Version:** 1.2.0 (unreleased)  
-**Last updated:** 2026-05-07
+**Version:** 1.2.0 (released)  
+**Last updated:** 2025-05-08
 
 ---
 
@@ -258,13 +258,19 @@ sudo ./test-gateway.sh
 
 ## Roadmap / Ideas
 
+See [`ROADMAP.md`](ROADMAP.md) for the full long-term plan including Gen 2 feature parity research.
+
+### Quick Wins
 - [ ] Ansible role for fleet deployment
 - [ ] Docker/Podman container version
 - [ ] Web dashboard for CrowdSec decisions + gateway metrics
 - [ ] Automatic TLS certificate renewal monitoring
-- [ ] Support for Loxone Miniserver Go (cloud-dependent)
-- [ ] Tailscale/WireGuard integration for remote management
 - [ ] Prometheus metrics export
+
+### Major Initiatives
+- [ ] **Gen 2 Feature Parity** — Reverse tunnel (no open ports), TLS edge termination, token-based access control. Research complete. See `ROADMAP.md § Reverse Tunnel`.
+- [ ] **Cloudflare Tunnel integration** — Zero open inbound ports, closest equivalent to Loxone Remote Connect. Candidate: `cloudflared`.
+- [ ] **Tailscale/WireGuard integration** — Alternative self-hosted mesh VPN for remote management.
 
 ---
 
