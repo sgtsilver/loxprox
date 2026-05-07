@@ -18,13 +18,13 @@ Pick the length that fits your context.
 
 ## Elevator Pitch (2 sentences)
 
-Loxone Miniserver Gen 1 has no TLS, no rate limiting, no native auth hardening, and end-of-life firmware. LoxProx is a drop-in Debian 12 gateway that adds every protection the hardware lacks — transparently, without touching your LAN.
+Loxone Miniserver Gen 1 has no TLS, no rate limiting, no native auth hardening, and firmware that hasn't seen a known security patch since 2020. LoxProx is a drop-in Debian 12 gateway that adds every protection the hardware lacks — transparently, without touching your LAN.
 
 ---
 
 ## README About Section (Paragraph)
 
-**LoxProx** is a security gateway built specifically for Loxone Miniserver Gen 1 — end-of-life hardware that cannot protect itself. It sits between the internet and your Miniserver, adding TLS termination, rate limiting, a Web Application Firewall (CrowdSec AppSec), intrusion detection (CrowdSec IDS), nftables firewall rules, AppArmor confinement, audit logging, and real-time Discord alerting. LAN traffic bypasses the gateway entirely, so local users are unaffected. Only external traffic is inspected and hardened. Deployment is one script on a Debian 12 VM.
+**LoxProx** is a security gateway built specifically for Loxone Miniserver Gen 1 — legacy first-generation hardware that cannot protect itself. It sits between the internet and your Miniserver, adding TLS termination, rate limiting, a Web Application Firewall (CrowdSec AppSec), intrusion detection (CrowdSec IDS), nftables firewall rules, AppArmor confinement, audit logging, and real-time Discord alerting. LAN traffic bypasses the gateway entirely, so local users are unaffected. Only external traffic is inspected and hardened. Deployment is one script on a Debian 12 VM.
 
 ---
 
@@ -32,7 +32,7 @@ Loxone Miniserver Gen 1 has no TLS, no rate limiting, no native auth hardening, 
 
 **Your smart home has a back door. This is the deadbolt.**
 
-The Loxone Miniserver Gen 1 is the brain of thousands of European smart homes — lights, heating, alarms, cameras, door locks. It's also end-of-life hardware with no TLS support, no rate limiting, no built-in IP filtering, and firmware that will never see another security patch.
+The Loxone Miniserver Gen 1 is the brain of thousands of European smart homes — lights, heating, alarms, cameras, door locks. It's also legacy first-generation hardware with no TLS support, no rate limiting, no built-in IP filtering, and firmware that has not received a known security patch since 2020. While Loxone has not formally declared it EOL, new security features (TLS, Remote Connect, Trusts) are Gen 2+ only.
 
 That bothered me.
 
@@ -48,7 +48,7 @@ It's open source, MIT licensed, and runs on anything from a Proxmox VM to a Rasp
 
 **Show HN: LoxProx — Security gateway for Loxone Miniserver Gen 1**
 
-The Loxone Miniserver Gen 1 is end-of-life IoT hardware that powers a lot of European smart homes. No TLS (CPU can't handle it), no rate limiting, no native auth hardening, EOL firmware. The vendor's answer is "buy Gen 2." That's €500+ and a full config migration.
+The Loxone Miniserver Gen 1 is legacy first-generation IoT hardware that powers a lot of European smart homes. No TLS (CPU can't handle it), no rate limiting, no native auth hardening, and no known security patch since 2020. The vendor's answer is "buy Gen 2." That's €500+ and a full config migration.
 
 LoxProx is a self-hosted alternative: a Debian 12 VM that acts as a transparent security gateway.
 
@@ -70,7 +70,7 @@ MIT licensed. Would love feedback from anyone running CrowdSec on low-resource g
 
 ## LinkedIn / Professional
 
-Published **LoxProx**, an open-source security gateway for Loxone Miniserver Gen 1 smart home controllers. The project addresses a real gap: EOL hardware with no TLS, no rate limiting, and no native security hardening — leaving thousands of homes exposed.
+Published **LoxProx**, an open-source security gateway for Loxone Miniserver Gen 1 smart home controllers. The project addresses a real gap: legacy first-generation hardware with no TLS, no rate limiting, and no native security hardening — leaving thousands of homes exposed.
 
 LoxProx deploys a six-layer defense stack (nftables → nginx → CrowdSec IDS → AppSec WAF → firewall bouncer → AppArmor/auditd) on a Debian 12 VM, transparently protecting external access without affecting LAN users.
 
@@ -91,4 +91,4 @@ Repository: https://github.com/sgtsilver/loxprox
 
 - **For engineers:** LoxProx is a Debian 12 security gateway that adds TLS, WAF, IDS, and firewall rules to Loxone Miniserver Gen 1 via a single idempotent deploy script.
 - **For homeowners:** LoxProx puts a deadbolt on your Loxone smart home — blocking hackers without slowing down your lights.
-- **For the cynical:** Your €3,000 smart home runs on a €200 box from 2014 with no security patches. LoxProx fixes that.
+- **For the cynical:** Your €3,000 smart home runs on a €200 box from 2014 that hasn't seen a security patch since 2020. LoxProx fixes that.

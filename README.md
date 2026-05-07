@@ -20,14 +20,14 @@ This is an experiment in **AI-led infrastructure hardening**: a human defines th
 
 ## The Problem
 
-The Loxone Miniserver Gen 1 is **end-of-life hardware** with:
+The Loxone Miniserver Gen 1 is **legacy first-generation hardware** with:
 - ❌ No HTTPS/TLS support (CPU too weak for SSL)
 - ❌ No native rate limiting
 - ❌ No IP-based access control
 - ❌ No audit logging
-- ❌ No multi-factor authentication
+- ❌ No multi-factor authentication for web/API access
 - ❌ Passwords in config XML are encrypted, not hashed
-- ❌ Firmware is EOL — no security patches
+- ⚠️ Firmware updates have slowed significantly; the last known security patch was in 2020 (Cloud DNS vulnerability CVE-2020-27488). New security features (TLS, Remote Connect, Trusts) are Gen 2+ only.
 
 It is the definition of a *legacy device that must be protected by the network layer*.
 
