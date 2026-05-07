@@ -79,11 +79,14 @@ loxprox/
 ├── phase4-monitoring.md               # Monitoring, log rotation, tuning
 ├── security-monitoring/
 │   ├── discord-alert.sh               # Discord webhook dispatcher
-│   ├── loxprox-monitor.sh             # Security monitor (60s cycle)
+│   ├── gateway-monitor.sh             # Security monitor (60s cycle)
+│   ├── network-watchdog.sh            # Network stack self-healing watchdog
+│   ├── network-watchdog.service       # systemd system service (root)
+│   ├── network-watchdog.timer         # systemd timer (60s)
 │   ├── gateway-backup.sh              # Config backup script
 │   ├── geoip-block.sh                 # GeoIP blocking (optional)
-│   ├── loxprox-monitor.service # systemd service
-│   └── loxprox-monitor.timer   # systemd timer (60s)
+│   ├── loxprox-monitor.service        # systemd service
+│   └── loxprox-monitor.timer          # systemd timer (60s)
 └── assets/                            # Diagrams, screenshots
 ```
 
@@ -119,8 +122,9 @@ The deploy script is **idempotent** — safe to re-run.
 | 7 | **auditd** | Monitors config changes to nginx, crowdsec, nftables, ssh, sudoers |
 | 8 | **unattended-upgrades** | Auto-reboot at 03:00 for kernel patches |
 | 9 | **Security monitor** | 60s cycle: CrowdSec blocks, nginx errors, auth attempts, resource alerts → Discord |
-| 10 | **Log rotation** | 14-day nginx log retention |
-| 11 | **Config backup** | Daily automated backups to `/root/gateway-backups/` |
+| 10 | **Network watchdog** | Self-healing monitor: detects network-layer failures (dhclient death-spiral, routing corruption) and auto-recovers via service restart or reboot |
+| 11 | **Log rotation** | 14-day nginx log retention |
+| 12 | **Config backup** | Daily automated backups to `/root/gateway-backups/` |
 
 ---
 
@@ -240,6 +244,14 @@ sudo cscli decisions add --ip 1.2.3.4 --duration 4h --reason "manual"
 
 # Unban an IP
 sudo cscli decisions delete --ip 1.2.3.4
+
+# Check network watchdog status
+sudo systemctl status network-watchdog.timer
+sudo journalctl -u network-watchdog -f
+
+# Disable/enable network watchdog
+sudo systemctl stop network-watchdog.timer
+sudo systemctl enable --now network-watchdog.timer
 
 # Re-run deployment (idempotent)
 sudo bash deploy.sh

@@ -60,7 +60,8 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
                     │              ├── nftables (input DROP, allow :1080 + SSH)
                     │              ├── AppArmor (nginx profile enforced)
                     │              ├── auditd (config change monitoring)
-                    │              └── Discord alerts (real-time notifications)
+                    │              ├── Discord alerts (real-time notifications)
+                    │              └── Network watchdog (self-healing monitor)
                     │
                     └── LAN:<LAN_SUBNET> ──► Loxone:80 (direct, bypass)
 ```
@@ -119,6 +120,7 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 
 - **Discord webhook**: real-time alerts for blocks, anomalies, service failures
 - **Security monitor** (60s cycle): CrowdSec decisions, nginx errors, auth attempts, AppSec detections, system resources
+- **Network watchdog** (60s cycle): Detects network-layer failures (dhclient death-spiral, kernel routing corruption, interface desync) that process-level checks miss. Self-heals by restarting services; reboots as last resort with pre/post-reboot Discord reporting and anti-loop protection.
 - **Log rotation**: 14-day retention for nginx logs
 - **Config backup**: daily automated backup to `/root/loxprox-backups/`
 - **Test suite**: `sudo ./test-gateway.sh` validates all components post-deploy
