@@ -10,7 +10,7 @@ If you can't provide a fix, open an issue with reproduction steps and we'll addr
 
 ## Executive Summary
 
-The Loxone Miniserver Gen 1 is **end-of-life hardware** with **no TLS support**, **no native authentication hardening**, and **no ongoing security patches**. It is the definition of a "legacy device that must be protected by the network layer."
+The Loxone Miniserver Gen 1 is **legacy first-generation hardware** with **no TLS support**, **no native authentication hardening**, and **no new security features** (TLS, Remote Connect, Trusts are Gen 2+ only). While Loxone has not formally declared it EOL, firmware updates have slowed significantly — the last known security patch was in 2020 (CVE-2020-27488). It is the definition of a "legacy device that must be protected by the network layer."
 
 This gateway exists because the Miniserver cannot protect itself.
 
@@ -42,7 +42,7 @@ This gateway exists because the Miniserver cannot protect itself.
 - No built-in rate limiting
 - No IP-based access control
 - No audit logging
-- Firmware is EOL — no new security patches
+- Firmware updates have slowed; the last known security patch was in 2020 (Cloud DNS vulnerability CVE-2020-27488). New security features (TLS, Remote Connect, Trusts) are Gen 2+ only.
 
 ### What the Gateway DOES
 
