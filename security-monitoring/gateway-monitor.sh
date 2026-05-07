@@ -66,11 +66,24 @@ send_alert() {
 # ── Checks ───────────────────────────────────────────────────────────────────
 
 check_crowdsec_blocks() {
+    local decisions_json
+    decisions_json=$(cscli decisions list -o json 2>/dev/null)
+    [[ -z "$decisions_json" ]] && return 0
+
+    # CrowdSec v1.6+ wraps decisions in {"decisions": [...], "meta": {...}}
+    # Older versions return a flat array. Handle both.
     local new_decisions
-    new_decisions=$(cscli decisions list -o json 2>/dev/null | jq -r '.[] | "\(.value) (\(.type)) - \(.scenario)"' 2>/dev/null | head -10)
-    if [ -n "$new_decisions" ] && [ "$(cscli decisions list -o json 2>/dev/null | jq length)" -gt 0 ]; then
-        local count
-        count=$(cscli decisions list -o json 2>/dev/null | jq length)
+    new_decisions=$(echo "$decisions_json" | jq -r '
+        if type == "object" then .decisions[]? else .[]? end |
+        "\(.value // .source.ip // .ip // "unknown") (\(.type // "unknown")) - \(.scenario // "unknown")"
+    ' 2>/dev/null | head -10)
+
+    local count
+    count=$(echo "$decisions_json" | jq '
+        if type == "object" then (.decisions? | length) else length end
+    ' 2>/dev/null)
+
+    if [ -n "$new_decisions" ] && [ "$count" -gt 0 ] 2>/dev/null; then
         send_alert "WARNING" "CrowdSec Active Blocks" "$count IPs currently blocked by CrowdSec:\n$new_decisions" "crowdsec_blocks"
     fi
 }
