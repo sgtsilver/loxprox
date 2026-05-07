@@ -45,6 +45,9 @@ Internet ──► Router:1080 ──► Gateway:1080 ──► Loxone:80
 
 ## Known Quirks & Lessons Learned
 
+### DHCP → Static Transition Kills Inbound Connections (Debian 12)
+Switching `/etc/network/interfaces` from `inet dhcp` to `inet static` without rebooting leaves a stale `dhclient` running. ~24 hours later the lease renewal loop corrupts the interface state. nginx stays up but becomes unreachable. **Fix:** Kill dhclient, remove `isc-dhcp-client`, then `ifdown/ifup` — or just reboot. This is now automated in `set-static-ip.sh`.
+
 ### CrowdSec AppSec Authentication
 CrowdSec AppSec requires the **firewall bouncer API key** (not the LAPI machine key) in the `X-Crowdsec-Appsec-Api-Key` header, plus `X-Crowdsec-Appsec-Ip`, `-Uri`, and `-Verb`. This was completely undocumented in standard CrowdSec guides and caused hours of 401 debugging. The bouncer `.local` file is the source of truth.
 
