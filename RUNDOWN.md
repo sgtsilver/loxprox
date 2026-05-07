@@ -267,11 +267,6 @@ sudo ./test-gateway.sh
 - [ ] Automatic TLS certificate renewal monitoring
 - [ ] Prometheus metrics export
 
-### Major Initiatives
-- [ ] **Gen 2 Feature Parity** — Reverse tunnel (no open ports), TLS edge termination, token-based access control. Research complete. See `ROADMAP.md § Reverse Tunnel`.
-- [ ] **Cloudflare Tunnel integration** — Zero open inbound ports, closest equivalent to Loxone Remote Connect. Candidate: `cloudflared`.
-- [ ] **Tailscale/WireGuard integration** — Alternative self-hosted mesh VPN for remote management.
-
 ---
 
 ## Citation
