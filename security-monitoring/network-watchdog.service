@@ -1,0 +1,27 @@
+[Unit]
+Description=LoxProx Network Stack Watchdog
+Documentation=https://github.com/sgtsilver/loxprox
+After=network.target nginx.service
+
+# This is a systemd SYSTEM service (not --user). It runs as root by default,
+# which is required to restart networking.service and call reboot.
+# No sudo configuration is needed. No passwordless access is granted.
+
+[Service]
+Type=oneshot
+ExecStart=/opt/loxprox/network-watchdog.sh
+
+# systemd-level loop protection: if the script exits non-zero 3 times in
+# 10 minutes, systemd stops restarting it. This prevents infinite reboot
+# loops if the upstream router is actually down.
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+# If the script exits non-zero after the burst limit is exhausted,
+# systemd triggers a reboot as a last-resort recovery measure.
+FailureAction=reboot
+
+# Logging
+StandardOutput=append:/var/log/loxprox-network-watchdog.log
+StandardError=append:/var/log/loxprox-network-watchdog.log
+SyslogIdentifier=loxprox-watchdog

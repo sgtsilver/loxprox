@@ -149,6 +149,7 @@ AUTOREBOOT_TIME="03:00"
 
 LOG_FILE="${LOG_FILE:-/var/log/loxprox-deploy.log}"
 BACKUP_DIR="${BACKUP_DIR:-/root/loxprox-backup-$(date +%Y%m%d-%H%M%S)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NGINX_SITE="${NGINX_SITE:-/etc/nginx/sites-available/loxone}"
 NGINX_ENABLED="${NGINX_ENABLED:-/etc/nginx/sites-enabled/loxone}"
 CROWDSEC_NGINX_ACQUIS="${CROWDSEC_NGINX_ACQUIS:-/etc/crowdsec/acquis.d/nginx.yaml}"
@@ -848,6 +849,58 @@ EOF
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Network Stack Watchdog
+# ═══════════════════════════════════════════════════════════════════════════════
+# Installs a self-healing monitor that detects network-layer failures
+# (dhclient death-spiral, kernel routing corruption, etc.) and attempts
+# recovery via service restart or automatic reboot. See RUNDOWN.md for
+# full transparency documentation.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+setup_network_watchdog() {
+    banner "Network Watchdog"
+
+    local install_dir="/opt/loxprox"
+    local script_src="${SCRIPT_DIR:-.}/security-monitoring/network-watchdog.sh"
+    local service_src="${SCRIPT_DIR:-.}/security-monitoring/network-watchdog.service"
+    local timer_src="${SCRIPT_DIR:-.}/security-monitoring/network-watchdog.timer"
+    local discord_src="${SCRIPT_DIR:-.}/security-monitoring/discord-alert.sh"
+
+    mkdir -p "$install_dir"
+
+    # Copy watchdog script
+    if [[ -f "$script_src" ]]; then
+        cp "$script_src" "$install_dir/network-watchdog.sh"
+        chmod 755 "$install_dir/network-watchdog.sh"
+        ok "Installed: $install_dir/network-watchdog.sh"
+    else
+        warn "network-watchdog.sh not found at $script_src — skipping watchdog install"
+        return
+    fi
+
+    # Copy Discord alert script (watchdog depends on it)
+    if [[ -f "$discord_src" ]]; then
+        cp "$discord_src" "$install_dir/discord-alert.sh"
+        chmod 755 "$install_dir/discord-alert.sh"
+        ok "Installed: $install_dir/discord-alert.sh"
+    fi
+
+    # Install systemd units
+    if [[ -f "$service_src" && -f "$timer_src" ]]; then
+        cp "$service_src" /etc/systemd/system/network-watchdog.service
+        cp "$timer_src" /etc/systemd/system/network-watchdog.timer
+        systemctl daemon-reload
+        systemctl enable network-watchdog.timer
+        systemctl start network-watchdog.timer
+        ok "Network watchdog enabled (runs every 60s)"
+        info "Disable any time: systemctl stop network-watchdog.timer"
+        info "View logs: journalctl -u network-watchdog --since '10 minutes ago'"
+    else
+        warn "systemd unit files not found — timer not installed"
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Runtime config file (for scripts that need env vars after deploy)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -870,6 +923,9 @@ DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 ALERT_EMAIL="$ALERT_EMAIL"
 APPSEC_MODE="$APPSEC_MODE"
 AUTOREBOOT_TIME="$AUTOREBOOT_TIME"
+# Watchdog expects this IP on the primary interface. Auto-detected at runtime
+# if unset, but pinning it here prevents false positives after IP changes.
+WATCHDOG_EXPECTED_IP="$GATEWAY_IP"
 EOF
 
     chmod 640 "$GATEWAY_CONFIG_FILE"
@@ -1013,6 +1069,7 @@ Services:
   crowdsec-firewall-bouncer → $(service_active crowdsec-firewall-bouncer && echo "running" || echo "NOT RUNNING")
   auditd                    → $(service_active auditd     && echo "running" || echo "NOT RUNNING")
   unattended-upgrades       → $(service_active unattended-upgrades && echo "running" || echo "NOT RUNNING")
+  network-watchdog          → $(systemctl is-active --quiet network-watchdog.timer 2>/dev/null && echo "armed" || echo "NOT ARMED")
 
 Next steps:
   1. Verify proxy: curl -v http://127.0.0.1:1080/jdev/cfg/api
@@ -1052,6 +1109,7 @@ main() {
     setup_auditd
     setup_logrotate
     setup_alerting
+    setup_network_watchdog
     write_runtime_config
     health_check
     summary

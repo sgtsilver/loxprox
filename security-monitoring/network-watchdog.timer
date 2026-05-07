@@ -1,0 +1,11 @@
+[Unit]
+Description=Run LoxProx Network Watchdog every 60 seconds
+Documentation=https://github.com/sgtsilver/loxprox
+
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=60
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target
