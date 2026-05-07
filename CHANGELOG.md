@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0] — Unreleased
+
+### Added
+- **Network Stack Self-Healing Watchdog** (`security-monitoring/network-watchdog.sh`):
+  - Detects network-layer failures (dhclient death-spiral, kernel routing corruption, interface desync) that process-level health checks miss.
+  - State-aware: reads `/etc/network/interfaces` to know whether DHCP or static is expected; never kills dhclient on DHCP-configured systems.
+  - Heal path: restart nginx → restart `networking.service` → re-evaluate.
+  - Reboot path: if healing fails, sends Discord alert with diagnostics, waits 30s, reboots. Post-reboot cycle sends recovery report.
+  - Two-layer anti-reboot-loop protection: script-level (max 2/hour) + systemd-level (`StartLimitBurst=3` + `FailureAction=reboot`).
+  - Runs as systemd **system** service (root by default) — no sudo, no passwordless access, same privilege model as nginx/networking services.
+  - Fully documented in `RUNDOWN.md` with transparency statement, disable instructions, and forensics commands.
+- `deploy.sh` now installs and enables the network watchdog automatically.
+
 ## [1.1.0] — 2026-05-06
 
 ### Security (Ezio Audit Fix Sweep — 23/23 findings resolved)
