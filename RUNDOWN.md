@@ -258,7 +258,7 @@ sudo ./test-gateway.sh
 
 ## Roadmap / Ideas
 
-See [`ROADMAP.md`](ROADMAP.md) for the full long-term plan including Gen 2 feature parity research.
+> ⚠️ Long-term planning docs kept local-only — not committed to GitHub.
 
 ### Quick Wins
 - [ ] Ansible role for fleet deployment
