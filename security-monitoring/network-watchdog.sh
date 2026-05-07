@@ -80,7 +80,8 @@ REBOOT_DELAY_SECONDS=30
 mkdir -p "$STATE_DIR"
 
 log() {
-    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+    local msg
+    msg="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
     # systemd service already redirects stdout/stderr to LOG_FILE via
     # StandardOutput=append: in the unit file. Just echo here.
     echo "$msg"
