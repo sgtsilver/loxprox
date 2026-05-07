@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.2.0] — Unreleased
+## [1.2.0] — 2026-05-07
 
 ### Added
 - **Network Stack Self-Healing Watchdog** (`security-monitoring/network-watchdog.sh`):
