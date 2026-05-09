@@ -52,6 +52,8 @@ LAN (192.168.x.0/24) ──────► Loxone:80  (direct, bypasses gateway)
 
 **Design principle:** LAN devices reach Loxone directly. Only internet traffic passes through the gateway. This means LAN users are unaffected, and the gateway can focus entirely on external threats.
 
+> 🕵️ **What's next?** We've been exploring whether loxprox could one day bridge Gen 1 Miniservers to the outside world — without a VPN, without hardware upgrades. The research rabbit hole went deeper than expected. If you're curious, [#4](https://github.com/sgtsilver/loxprox/issues/4) has the full story (and the caveats).
+
 ---
 
 ## Project Structure
