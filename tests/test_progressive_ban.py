@@ -111,6 +111,79 @@ class TestCscliDecisionAdd:
             assert pb.cscli_decision_add("1.2.3.4", "24h", "reason") is False
 
 
+class TestStateFile:
+    def test_state_file_created_on_first_escalation(self, tmp_path, monkeypatch):
+        """After extending a ban, the decision ID should be written to state file."""
+        state_path = tmp_path / "extended-decisions.json"
+        monkeypatch.setattr(pb, "STATE_FILE", str(state_path))
+
+        all_decisions = [
+            {"value": "1.2.3.4", "id": "1", "origin": "cscli"},
+            {"value": "1.2.3.4", "id": "2", "origin": "cscli"},
+        ]
+        active = [{"value": "1.2.3.4", "id": "2", "origin": "cscli",
+                   "duration": "3h58m", "scenario": "ssh-bf"}]
+
+        with patch.object(pb, "run_cscli", side_effect=[all_decisions, active]):
+            with patch.object(pb, "cscli_decision_delete", return_value=True):
+                with patch.object(pb, "cscli_decision_add", return_value=True):
+                    pb.main()
+
+        assert state_path.exists()
+        state = json.loads(state_path.read_text())
+        assert state["2"] == "24h"
+
+    def test_rerun_skips_id_already_in_state_file(self, tmp_path, monkeypatch):
+        """A second run with the same active decision ID should skip it."""
+        state_path = tmp_path / "extended-decisions.json"
+        monkeypatch.setattr(pb, "STATE_FILE", str(state_path))
+
+        # Pre-populate state file as if a previous run already extended it
+        state_path.write_text(json.dumps({"2": "24h"}))
+
+        all_decisions = [
+            {"value": "1.2.3.4", "id": "1", "origin": "cscli"},
+            {"value": "1.2.3.4", "id": "2", "origin": "cscli"},
+        ]
+        active = [{"value": "1.2.3.4", "id": "2", "origin": "cscli",
+                   "duration": "23h55m", "scenario": "ssh-bf"}]
+
+        with patch.object(pb, "run_cscli", side_effect=[all_decisions, active]):
+            with patch.object(pb, "cscli_decision_delete") as mock_del:
+                with patch.object(pb, "cscli_decision_add") as mock_add:
+                    pb.main()
+                    mock_del.assert_not_called()
+                    mock_add.assert_not_called()
+
+    def test_stale_entries_pruned(self, tmp_path, monkeypatch):
+        """State entries for IDs no longer active should be removed."""
+        state_path = tmp_path / "extended-decisions.json"
+        monkeypatch.setattr(pb, "STATE_FILE", str(state_path))
+
+        # Pre-populate with one stale and one active entry
+        state_path.write_text(json.dumps({"99": "24h", "2": "168h"}))
+
+        all_decisions = [
+            {"value": "1.2.3.4", "id": "1", "origin": "cscli"},
+            {"value": "1.2.3.4", "id": "2", "origin": "cscli"},
+            {"value": "1.2.3.4", "id": "3", "origin": "cscli"},
+        ]
+        active = [{"value": "1.2.3.4", "id": "2", "origin": "cscli",
+                   "duration": "6d23h", "scenario": "ssh-bf"}]
+
+        with patch.object(pb, "run_cscli", side_effect=[all_decisions, active]):
+            with patch.object(pb, "cscli_decision_delete") as mock_del:
+                with patch.object(pb, "cscli_decision_add") as mock_add:
+                    pb.main()
+                    # ID 2 is already at 168h (offense 3), so no change needed
+                    mock_del.assert_not_called()
+                    mock_add.assert_not_called()
+
+        state = json.loads(state_path.read_text())
+        assert "99" not in state  # stale, pruned
+        assert "2" in state       # still active, kept
+
+
 class TestMain:
     def test_no_active_decisions(self):
         with patch.object(pb, "run_cscli", side_effect=[
@@ -149,21 +222,6 @@ class TestMain:
                     args, _ = mock_add.call_args
                     assert args[0] == "1.2.3.4"
                     assert args[1] == "24h"
-
-    def test_already_extended_skipped(self):
-        """If duration already contains target, skip."""
-        all_decisions = [
-            {"value": "1.2.3.4", "id": "1", "origin": "cscli"},
-            {"value": "1.2.3.4", "id": "2", "origin": "cscli"},
-        ]
-        active = [{"value": "1.2.3.4", "id": "2", "origin": "cscli",
-                   "duration": "24h", "scenario": "ssh-bf"}]
-        with patch.object(pb, "run_cscli", side_effect=[all_decisions, active]):
-            with patch.object(pb, "cscli_decision_delete") as mock_del:
-                with patch.object(pb, "cscli_decision_add") as mock_add:
-                    pb.main()
-                    mock_del.assert_not_called()
-                    mock_add.assert_not_called()
 
     def test_capi_ban_skipped(self):
         """CAPI origin bans should never be extended."""
