@@ -331,6 +331,9 @@ table inet filter
 flush table inet filter
 
 table inet filter {
+    # GeoIP blocklist — populated by geoip-block.sh cron
+    include "/etc/nftables.d/*.conf"
+
     chain input {
         type filter hook input priority filter; policy drop;
 
@@ -344,6 +347,9 @@ table inet filter {
         # ICMP (ping, unreachable, etc.)
         ip  protocol icmp  accept
         ip6 nexthdr  icmpv6 accept
+
+        # GeoIP block — drop high-risk countries before they reach the proxy
+        ip saddr @geoip_blocklist drop
 
         # SSH — LAN and site-to-site only
         # Note: CIDR notation in anonymous sets requires nftables >= 1.0.6
@@ -373,6 +379,8 @@ EOF
 After=nftables.service
 Wants=nftables.service
 EOF
+
+    mkdir -p /etc/nftables.d
 
     systemctl enable nftables
     systemctl restart nftables
@@ -843,7 +851,7 @@ setup_alerting() {
     command -v mail &>/dev/null || apt-get install -y mailutils bsd-mailx
 
     cat > /etc/cron.d/loxprox-alert <<EOF
-*/15 * * * * root [ \$(wc -l < /var/log/nginx/loxone-error.log) -gt 100 ] && echo "High error rate on Loxone gateway" | mail -s "Loxone Gateway Alert" "$ALERT_EMAIL"
+*/15 * * * * root prev=\$(cat /var/lib/loxone-monitor/last-error-count 2>/dev/null || echo 0); curr=\$(wc -l < /var/log/nginx/loxone-error.log 2>/dev/null || echo 0); echo "\$curr" > /var/lib/loxone-monitor/last-error-count; [ \$((curr - prev)) -gt 100 ] && echo "High error rate: \$((curr - prev)) new errors in 15 min" | mail -s "Loxone Gateway Alert" "$ALERT_EMAIL"
 EOF
     ok "Alerting → $ALERT_EMAIL"
 }
@@ -993,7 +1001,7 @@ rollback() {
     [[ ! "$yn" =~ ^[Yy]$ ]] && { info "Cancelled."; return; }
 
     local latest
-    latest=$(ls -td /root/loxprox-backup-* 2>/dev/null | head -1)
+    latest=$(ls -td /root/loxprox-backup-[0-9]* 2>/dev/null | head -1)
     [[ -z "$latest" ]] && { error "No backup found."; exit 1; }
 
     info "Validating backup files before restore..."
@@ -1098,6 +1106,16 @@ main() {
     preflight
     apply_sysctls
     setup_firewall
+
+    # Install and run GeoIP blocklist updater
+    local geoip_src="${SCRIPT_DIR:-.}/security-monitoring/geoip-block.sh"
+    if [[ -f "$geoip_src" ]]; then
+        mkdir -p /opt/loxprox
+        cp "$geoip_src" /opt/loxprox/geoip-block.sh
+        chmod 755 /opt/loxprox/geoip-block.sh
+        bash /opt/loxprox/geoip-block.sh || warn "GeoIP blocklist initial load failed — will retry via cron"
+    fi
+
     install_nginx
     configure_nginx
     setup_nginx_hardening

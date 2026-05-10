@@ -113,7 +113,7 @@ class TestCscliDecisionAdd:
 
 class TestStateFile:
     def test_state_file_created_on_first_escalation(self, tmp_path, monkeypatch):
-        """After extending a ban, the decision ID should be written to state file."""
+        """After extending a ban, the IP should be written to state file."""
         state_path = tmp_path / "extended-decisions.json"
         monkeypatch.setattr(pb, "STATE_FILE", str(state_path))
 
@@ -131,15 +131,15 @@ class TestStateFile:
 
         assert state_path.exists()
         state = json.loads(state_path.read_text())
-        assert state["2"] == "24h"
+        assert state["1.2.3.4"] == "24h"
 
-    def test_rerun_skips_id_already_in_state_file(self, tmp_path, monkeypatch):
-        """A second run with the same active decision ID should skip it."""
+    def test_rerun_skips_ip_already_in_state_file(self, tmp_path, monkeypatch):
+        """A second run with the same IP already escalated should skip it."""
         state_path = tmp_path / "extended-decisions.json"
         monkeypatch.setattr(pb, "STATE_FILE", str(state_path))
 
         # Pre-populate state file as if a previous run already extended it
-        state_path.write_text(json.dumps({"2": "24h"}))
+        state_path.write_text(json.dumps({"1.2.3.4": "24h"}))
 
         all_decisions = [
             {"value": "1.2.3.4", "id": "1", "origin": "cscli"},
@@ -155,13 +155,48 @@ class TestStateFile:
                     mock_del.assert_not_called()
                     mock_add.assert_not_called()
 
+    def test_new_id_after_extend_is_not_re_extended(self, tmp_path, monkeypatch):
+        """After delete+add, active list has new ID — should not extend again."""
+        state_path = tmp_path / "extended-decisions.json"
+        monkeypatch.setattr(pb, "STATE_FILE", str(state_path))
+
+        # First run: extend decision id=2 for ip 1.2.3.4
+        state_path.write_text(json.dumps({}))
+        all_decisions_run1 = [
+            {"value": "1.2.3.4", "id": "1", "origin": "cscli"},
+            {"value": "1.2.3.4", "id": "2", "origin": "cscli"},
+        ]
+        active_run1 = [{"value": "1.2.3.4", "id": "2", "origin": "cscli",
+                        "duration": "3h58m", "scenario": "ssh-bf"}]
+        with patch.object(pb, "run_cscli", side_effect=[all_decisions_run1, active_run1]):
+            with patch.object(pb, "cscli_decision_delete", return_value=True):
+                with patch.object(pb, "cscli_decision_add", return_value=True):
+                    pb.main()
+        # State should now track the IP, not the old ID
+        assert json.loads(state_path.read_text()) == {"1.2.3.4": "24h"}
+
+        # Second run: CrowdSec gave the new decision id=99 (new ID after delete+add)
+        # Total offenses still 2 (id=1 expired, id=99 active; id=2 was deleted)
+        all_decisions_run2 = [
+            {"value": "1.2.3.4", "id": "1", "origin": "cscli"},
+            {"value": "1.2.3.4", "id": "99", "origin": "cscli"},
+        ]
+        active_run2 = [{"value": "1.2.3.4", "id": "99", "origin": "cscli",
+                        "duration": "23h55m", "scenario": "ssh-bf"}]
+        with patch.object(pb, "run_cscli", side_effect=[all_decisions_run2, active_run2]):
+            with patch.object(pb, "cscli_decision_delete") as mock_del:
+                with patch.object(pb, "cscli_decision_add") as mock_add:
+                    pb.main()
+                    mock_del.assert_not_called()  # must NOT extend again
+                    mock_add.assert_not_called()
+
     def test_stale_entries_pruned(self, tmp_path, monkeypatch):
-        """State entries for IDs no longer active should be removed."""
+        """State entries for IPs no longer with active cscli bans should be removed."""
         state_path = tmp_path / "extended-decisions.json"
         monkeypatch.setattr(pb, "STATE_FILE", str(state_path))
 
         # Pre-populate with one stale and one active entry
-        state_path.write_text(json.dumps({"99": "24h", "2": "168h"}))
+        state_path.write_text(json.dumps({"5.5.5.5": "24h", "1.2.3.4": "168h"}))
 
         all_decisions = [
             {"value": "1.2.3.4", "id": "1", "origin": "cscli"},
@@ -175,13 +210,13 @@ class TestStateFile:
             with patch.object(pb, "cscli_decision_delete") as mock_del:
                 with patch.object(pb, "cscli_decision_add") as mock_add:
                     pb.main()
-                    # ID 2 is already at 168h (offense 3), so no change needed
+                    # IP 1.2.3.4 is already at 168h (offense 3), so no change needed
                     mock_del.assert_not_called()
                     mock_add.assert_not_called()
 
         state = json.loads(state_path.read_text())
-        assert "99" not in state  # stale, pruned
-        assert "2" in state       # still active, kept
+        assert "5.5.5.5" not in state  # stale, pruned
+        assert "1.2.3.4" in state     # still active, kept
 
 
 class TestMain:

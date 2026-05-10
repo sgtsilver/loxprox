@@ -134,11 +134,14 @@ def main():
     if active is None:
         sys.exit(1)
 
-    # Prune stale state entries (IDs no longer in active decisions)
-    active_ids = {str(d.get("id", "")) for d in active}
+    # Prune stale state entries (IPs no longer with active cscli bans)
+    active_cscli_ips = {
+        d.get("value", "") for d in active
+        if d.get("origin") == "cscli" and d.get("value")
+    }
     pruned = 0
     for key in list(state.keys()):
-        if key not in active_ids:
+        if key not in active_cscli_ips:
             del state[key]
             pruned += 1
     if pruned:
@@ -172,8 +175,8 @@ def main():
             skipped += 1
             continue
 
-        # Skip if this decision ID was already extended to the same target
-        if id_ in state and state[id_] == target:
+        # Skip if this IP was already extended to the same target
+        if ip in state and state[ip] == target:
             skipped += 1
             continue
 
@@ -190,7 +193,7 @@ def main():
             logger.warning("Failed to add extended decision for %s — IP may be unbanned", ip)
             continue
 
-        state[id_] = target
+        state[ip] = target
         save_state(state)
         extended += 1
 
