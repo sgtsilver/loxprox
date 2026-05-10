@@ -4,16 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [1.2.1] — 2026-05-10
 
-### Fixed (Handover Bug Sweep — 6/6 findings resolved)
+### Fixed (Handover Bug Sweep — 10/10 findings resolved)
 - **HIGH-005**: `gateway-backup.sh` — `tar` archived a `mktemp`-generated path that never matched `$BACKUP_NAME`, producing empty backups. Replaced `mktemp -d` with deterministic `WORK_DIR="/tmp/${BACKUP_NAME}"`.
-- **MED-007**: `progressive-ban.py` — Re-extended already-escalated bans on every cron run because `target in current_duration` checked remaining time (not original duration) and suffered false-positive substring matches (e.g. `"24h" in "7h24m"`). Replaced with JSON state file at `/var/lib/loxone-monitor/extended-decisions.json` tracking `decision_id → target_duration`. Stale entries pruned automatically.
-- **MED-008**: `geoip-block.sh` — Blocklists downloaded over plain HTTP (MITM risk). Upgraded to HTTPS. Also added missing `nft -c -f` syntax check + `nft -f` reload so rules take effect immediately.
-- **MED-009**: `discord-alert.sh` — JSON payload built via unsafe heredoc string interpolation. Double quotes, backslashes, or newlines in `$MESSAGE` caused malformed JSON and silent alert loss. Replaced with `jq -n --arg` construction.
-- **LOW-010**: `gateway-monitor.sh` — Missing `LC_ALL=C` before `free` caused empty `mem_pct` on German locales (`Speicher:` instead of `Mem:`).
-- **LOW-011**: `gateway-monitor.sh` — `bc` dependency silently disabled load alerts on minimal VMs. Replaced with `awk "BEGIN {exit !($avg_load > 2.0)}"`.
+- **MED-007**: `progressive-ban.py` — Re-extended already-escalated bans on every cron run because `target in current_duration` checked remaining time (not original duration) and suffered false-positive substring matches. Replaced with JSON state file.
+- **MED-008**: `geoip-block.sh` — Blocklists downloaded over plain HTTP (MITM risk). Upgraded to HTTPS. Added `nft -f /etc/nftables.conf` reload.
+- **MED-009**: `discord-alert.sh` — JSON payload built via unsafe heredoc string interpolation. Replaced with `jq -n --arg` construction.
+- **LOW-010**: `gateway-monitor.sh` — Missing `LC_ALL=C` before `free` caused empty `mem_pct` on German locales.
+- **LOW-011**: `gateway-monitor.sh` — `bc` dependency silently disabled load alerts. Replaced with `awk`.
+- **MED-012**: `progressive-ban.py` — State keyed by decision ID caused infinite re-extension loop. CrowdSec creates a new ID on every delete+add, so the old ID was pruned and the new ID re-processed. Fixed by keying state by **IP address**.
+- **MED-013**: `geoip-block.sh` + `deploy.sh` — GeoIP blocking was a complete no-op. The set was never loaded into a table context, `/etc/nftables.conf` had no include, and no rule referenced the set. Fixed: `deploy.sh` now generates the include + `ip saddr @geoip_blocklist drop` rule, and runs `geoip-block.sh` at deploy time.
+- **LOW-012**: `deploy.sh` — Email alert checked total nginx error log line count, not delta. After a few days of uptime the log always exceeded 100 lines, emailing every 15 minutes indefinitely. Fixed with stored baseline (`last-error-count`).
+- **MED-014**: `deploy.sh` — Rollback glob `loxprox-backup-*` matched pre-rollback snapshot dirs (`loxprox-backup-pre-rollback-*`). On a second rollback the snapshot — containing the post-deploy state — was restored instead of the real backup. Fixed: glob restricted to `loxprox-backup-[0-9]*`.
 
 ### Changed
-- `tests/test_progressive_ban.py` expanded from 17 to 19 cases: added 3 state-file tests (creation, re-run skip, stale pruning).
+- `tests/test_progressive_ban.py` expanded from 17 to 20 cases: added 4 state-file tests (creation, re-run skip, new-ID-after-extend, stale pruning).
 
 ## [1.2.0] — 2026-05-07
 
