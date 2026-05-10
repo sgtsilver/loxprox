@@ -3,7 +3,7 @@
 **Status:** Published on GitHub  
 **Repo:** https://github.com/sgtsilver/loxprox  
 **Version:** 1.2.1 (released)  
-**Last updated:** 2026-05-10
+**Last updated:** 2026-05-10 (handover sweep round 2 complete)
 
 ---
 
@@ -245,18 +245,18 @@ All 23 findings from the 2026-05-06 Ezio audit have been addressed:
 | MED-004 Silent subprocess failures | Return codes checked, stderr logged |
 | MED-005 No Python unit tests | Full pytest suite with mocked `subprocess` |
 | MED-006 No scanner tests | Portable bash unit tests for IP math, OUI, mktemp |
-| LOW-001–LOW-010 | All fixed (mktemp, stricter IP regex, logrotate, circuit breaker, proxy_hide_header, test split, webhook rotation docs, AppSec tests, nftables comment) |
+| LOW-001–LOW-012 | All fixed (mktemp, stricter IP regex, logrotate, circuit breaker, proxy_hide_header, test split, webhook rotation docs, AppSec tests, nftables comment, email delta, rollback glob) |
 
 ### Cumulative Stats
-- **Total findings resolved:** 29 (23 audit + 6 handover)
-- **Test assertions:** 84 (19 pytest + 54 deploy + 11 scanner)
+- **Total findings resolved:** 33 (23 audit + 10 handover)
+- **Test assertions:** 87 (20 pytest + 54 deploy + 11 scanner + 2 shellcheck)
 
 ## Test Infrastructure
 
 ```
 tests/
 ├── run-tests.sh              # unified test runner
-├── test_progressive_ban.py   # 19 pytest cases for ban script
+├── test_progressive_ban.py   # 20 pytest cases for ban script
 ├── test_deploy_integration.sh # 54 assertions for deploy.sh logic
 └── test_detect_loxone.sh     # 11 assertions for scanner logic
 ```
