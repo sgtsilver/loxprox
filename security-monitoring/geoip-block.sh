@@ -61,7 +61,8 @@ done
 
 echo "GeoIP blocklist updated: $(wc -l < "$NFTABLES_GEOIP") lines"
 
-nft -c -f "$NFTABLES_GEOIP" \
-    && nft -f "$NFTABLES_GEOIP" \
+# Reload via /etc/nftables.conf so the set is loaded inside table inet filter
+nft -c -f /etc/nftables.conf \
+    && nft -f /etc/nftables.conf \
     && echo "nftables reloaded" \
     || echo "nftables syntax check failed — rules not applied"
