@@ -54,7 +54,7 @@ DISCORD="${DISCORD_ALERT_PATH:-$SCRIPT_DIR/discord-alert.sh}"
 IFACE="${WATCHDOG_IFACE:-$(ip route show default 2>/dev/null | awk '/default/ {print $5}' | head -1)}"
 IFACE="${IFACE:-$(ip -o link show | awk -F': ' '/^[0-9]+: e/{print $2}' | head -1)}"
 GATEWAY_IP="${WATCHDOG_GATEWAY:-$(ip route show default 2>/dev/null | awk '/default/ {print $3}' | head -1)}"
-GATEWAY_IP="${GATEWAY_IP:-192.168.178.1}"
+GATEWAY_IP="${GATEWAY_IP:-192.168.1.1}"
 NGINX_LOCAL="${WATCHDOG_NGINX_URL:-http://127.0.0.1:1080/}"
 
 # EXPECTED_IP is the VM's own static IP. It must come from
