@@ -7,15 +7,16 @@ After=network.target nginx.service
 # which is required to restart networking.service and call reboot.
 # No sudo configuration is needed. No passwordless access is granted.
 
+# systemd-level loop protection: if the script exits non-zero 3 times in
+# 10 minutes, systemd stops restarting it. This prevents infinite reboot
+# loops if the upstream router is actually down. Belongs in [Unit] per
+# systemd.unit(5); placing them in [Service] is silently ignored.
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
 [Service]
 Type=oneshot
 ExecStart=/opt/loxprox/network-watchdog.sh
-
-# systemd-level loop protection: if the script exits non-zero 3 times in
-# 10 minutes, systemd stops restarting it. This prevents infinite reboot
-# loops if the upstream router is actually down.
-StartLimitIntervalSec=600
-StartLimitBurst=3
 
 # If the script exits non-zero after the burst limit is exhausted,
 # systemd triggers a reboot as a last-resort recovery measure.

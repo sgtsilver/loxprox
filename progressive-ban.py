@@ -34,7 +34,7 @@ ESCALATION = {
 }
 DEFAULT_EXTENDED = "720h"  # 30 days for anything beyond 4th
 CSCLI_TIMEOUT = 30  # seconds — MED-003 fix
-STATE_FILE = "/var/lib/loxone-monitor/extended-decisions.json"
+STATE_FILE = "/var/lib/loxprox/extended-decisions.json"
 
 
 def run_cscli(args):
@@ -54,10 +54,13 @@ def run_cscli(args):
         logger.error("cscli error (rc=%d): %s", result.returncode, result.stderr.strip())
         return None
     try:
-        return json.loads(result.stdout)
+        parsed = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         logger.error("cscli JSON decode error: %s", exc)
         return None
+    # cscli emits `null` (not `[]`) when no decisions exist — Go's nil-slice
+    # JSON marshalling. Normalise so callers can iterate without a None check.
+    return [] if parsed is None else parsed
 
 
 def cscli_decision_delete(decision_id: str) -> bool:
@@ -194,8 +197,10 @@ def main():
             continue
 
         state[ip] = target
-        save_state(state)
         extended += 1
+
+    if extended:
+        save_state(state)
 
     logger.info("Done. Extended: %d, Skipped: %d", extended, skipped)
 
