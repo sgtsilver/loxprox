@@ -34,7 +34,7 @@ These **must** be changed or the deployment will not work for your network.
 
 **Example:**
 ```bash
-LOXONE_IP="192.168.178.20"
+LOXONE_IP="192.168.1.100"
 ```
 
 **Common mistake:** Using the external/public IP or the router's WAN IP. This must be the **internal** LAN IP.
@@ -70,7 +70,7 @@ curl -I http://$LOXONE_IP:$LOXONE_PORT/
 
 **Example:**
 ```bash
-GATEWAY_IP="192.168.178.252"
+GATEWAY_IP="192.168.1.50"
 ```
 
 **How to verify after deploy:**
@@ -89,17 +89,17 @@ ip addr show | grep "inet "
 ip route | grep default
 # Look at the interface name (e.g., eth0), then:
 ip -o -f inet addr show eth0
-# Output: 192.168.178.252/24 → your subnet is 192.168.178.0/24
+# Output: 192.168.1.50/24 → your subnet is 192.168.1.0/24
 ```
 
 **Common home subnets:**
 - `192.168.1.0/24` (most common)
-- `192.168.178.0/24` (Fritz!Box default)
+- `192.168.0.0/24` (TP-Link, D-Link defaults)
 - `10.0.0.0/24` (some routers)
 
 **Example:**
 ```bash
-LAN_SUBNET="192.168.178.0/24"
+LAN_SUBNET="192.168.1.0/24"
 ```
 
 ---
@@ -118,7 +118,7 @@ LAN_SUBNET="192.168.178.0/24"
 
 **Example:**
 ```bash
-SSH_ALLOWED_SUBNETS=("192.168.178.0/24" "192.168.100.0/24")
+SSH_ALLOWED_SUBNETS=("192.168.1.0/24" "192.168.100.0/24")
 ```
 
 **How to test after deploy:**
@@ -197,10 +197,10 @@ These IPs/networks are **never** banned by CrowdSec, even if they trigger attack
 **Example:**
 ```bash
 CROWDSEC_WHITELIST_IPS=(
-    "192.168.178.0/24"      # home LAN
+    "192.168.1.0/24"      # home LAN
     "192.168.100.0/24"      # site-to-site VPN to other location
-    "88.99.80.45"           # uptime.heimtanz.de monitoring
-    "75.2.97.79"            # Heroku app (prowl notifications)
+    "203.0.113.45"        # uptime monitoring service
+    "198.51.100.22"       # notification gateway
 )
 ```
 
