@@ -41,7 +41,7 @@ Release notes live on the GitHub Releases page — they're sourced from `CHANGEL
 ## README Badges
 
 Already added to README.md:
-- License: MIT
+- License: Non-Commercial (see LICENSE)
 - Validation: A-
 - Debian 12
 - CIS Hardened
