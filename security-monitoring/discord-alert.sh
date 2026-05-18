@@ -49,37 +49,25 @@ fi
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 HOSTNAME=$(hostname -s 2>/dev/null || echo "gateway")
 
-PAYLOAD=$(cat <<EOF
-{
-    "embeds": [{
-        "title": "$TITLE",
-        "description": "\`\`\`\n$MESSAGE\n\`\`\`",
-        "color": $COLOR,
-        "timestamp": "$TIMESTAMP",
-        "footer": {
-            "text": "$HOSTNAME | LoxProx"
-        },
-        "fields": [
-            {
-                "name": "Severity",
-                "value": "$SEVERITY",
-                "inline": true
-            },
-            {
-                "name": "Gateway",
-                "value": "$GATEWAY_IP",
-                "inline": true
-            },
-            {
-                "name": "Loxone",
-                "value": "$LOXONE_IP",
-                "inline": true
-            }
+# shellcheck disable=SC2016
+PAYLOAD=$(jq -n \
+    --arg title   "$TITLE" \
+    --arg desc    "$(printf '```\n%s\n```' "$MESSAGE")" \
+    --argjson color "$COLOR" \
+    --arg ts      "$TIMESTAMP" \
+    --arg host    "$HOSTNAME" \
+    --arg sev     "$SEVERITY" \
+    --arg gw      "$GATEWAY_IP" \
+    --arg lox     "$LOXONE_IP" \
+    '{embeds: [{
+        title: $title, description: $desc, color: $color, timestamp: $ts,
+        footer: {text: ($host + " | LoxProx")},
+        fields: [
+            {name: "Severity", value: $sev, inline: true},
+            {name: "Gateway",  value: $gw,  inline: true},
+            {name: "Loxone",   value: $lox, inline: true}
         ]
-    }]
-}
-EOF
-)
+    }]}')
 
 # ── Circuit breaker: skip alerts after 3 consecutive failures for 15 min ──
 CB_DIR="/tmp/loxprox-discord-cb"

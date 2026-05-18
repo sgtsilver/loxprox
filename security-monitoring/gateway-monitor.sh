@@ -164,11 +164,11 @@ check_system_resources() {
     local load avg_load mem_pct disk_pct
     load=$(cat /proc/loadavg)
     avg_load=$(echo "$load" | awk '{print $1}')
-    mem_pct=$(free | awk '/Mem:/ {printf "%.0f", $3/$2 * 100}')
+    mem_pct=$(LC_ALL=C free | awk '/Mem:/ {printf "%.0f", $3/$2 * 100}')
     disk_pct=$(df / | tail -1 | awk '{print $5}' | tr -d '%')
     
     # High load alert
-    if [ "$(echo "$avg_load > 2.0" | bc 2>/dev/null || echo 0)" -eq 1 ]; then
+    if awk "BEGIN {exit !($avg_load > 2.0)}"; then
         send_alert "WARNING" "High System Load" "Load average: $avg_load\nMemory: ${mem_pct}%\nDisk: ${disk_pct}%" "high_load"
     fi
     

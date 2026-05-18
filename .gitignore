@@ -46,5 +46,7 @@ __pycache__/
 *.pyc
 .venv/
 
-# Local docs
+# Local docs / research (not committed)
 DOCUMENTATION.md
+PLAN-v2-v25.md
+for-kimi.md

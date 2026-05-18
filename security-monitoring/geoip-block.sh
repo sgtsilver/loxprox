@@ -28,7 +28,7 @@ mkdir -p "$BLOCKLIST_DIR"
 
 # Download and process each country blocklist
 for cc in "${BLOCK_COUNTRIES[@]}"; do
-    curl -s -f "http://www.ipdeny.com/ipblocks/data/countries/${cc}.zone" \
+    curl -s -f "https://www.ipdeny.com/ipblocks/data/countries/${cc}.zone" \
         -o "${BLOCKLIST_DIR}/${cc}.zone" 2>/dev/null || true
 done
 
@@ -60,3 +60,9 @@ done
 } > "$NFTABLES_GEOIP"
 
 echo "GeoIP blocklist updated: $(wc -l < "$NFTABLES_GEOIP") lines"
+
+# Reload via /etc/nftables.conf so the set is loaded inside table inet filter
+nft -c -f /etc/nftables.conf \
+    && nft -f /etc/nftables.conf \
+    && echo "nftables reloaded" \
+    || echo "nftables syntax check failed — rules not applied"
