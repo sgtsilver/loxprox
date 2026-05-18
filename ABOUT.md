@@ -40,7 +40,7 @@ So I built **LoxProx**: a hardened Debian 12 security gateway that sits between 
 
 LAN traffic goes straight to the Miniserver — local users never notice it's there. Only external traffic gets inspected. One script deploys the whole stack. A 50+-check validation suite tells you if anything is misconfigured.
 
-It's open source, MIT licensed, and runs on anything from a Proxmox VM to a Raspberry Pi 4.
+It's open source, non-commercial licensed, and runs on anything from a Proxmox VM to a Raspberry Pi 4.
 
 ---
 
@@ -64,7 +64,7 @@ Deploy: one script (`deploy.sh`, ~1240 lines, idempotent). Validate: 50+ automat
 
 LAN bypasses the gateway entirely — only internet-facing traffic is hardened. Runs on a 1 vCPU / 512MB VM or a Raspberry Pi 4.
 
-MIT licensed. Would love feedback from anyone running CrowdSec on low-resource gateways.
+Non-commercial licensed. Would love feedback from anyone running CrowdSec on low-resource gateways.
 
 ---
 
@@ -79,7 +79,7 @@ Technical highlights:
 - 50+-check automated validation suite
 - Self-contained HTML security report (A- grade)
 - Raspberry Pi 4/5 compatible
-- MIT licensed
+- Non-commercial licensed
 
 Built in collaboration with [Kimi](https://www.kimi.com) ([Moonshot AI](https://www.moonshot.ai)) as an experiment in AI-led infrastructure hardening.
 
