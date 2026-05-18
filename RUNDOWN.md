@@ -2,8 +2,8 @@
 
 **Status:** Published on GitHub  
 **Repo:** https://github.com/sgtsilver/loxprox  
-**Version:** 1.2.0 (released)  
-**Last updated:** 2025-05-08
+**Version:** 1.2.1 (released)  
+**Last updated:** 2026-05-10 (handover sweep round 2 complete)
 
 ---
 
@@ -215,8 +215,21 @@ git push origin feature-name
 
 ---
 
-## Security Improvements (Post-Audit)
+## Bug Fix Sweeps
 
+### 2026-05-10 Handover Sweep (6 findings)
+Post-code-review fixes found during handover documentation:
+
+| Finding | File | Fix |
+|---------|------|-----|
+| HIGH-005 Empty backups | `gateway-backup.sh` | Deterministic `WORK_DIR` instead of `mktemp` |
+| MED-007 Re-extending bans | `progressive-ban.py` | JSON state file tracks already-escalated decision IDs |
+| MED-008 HTTP GeoIP + no reload | `geoip-block.sh` | HTTPS + `nft -f` reload |
+| MED-009 Unsafe JSON interpolation | `discord-alert.sh` | `jq -n --arg` construction |
+| LOW-010 Locale-dependent `free` | `gateway-monitor.sh` | `LC_ALL=C free` |
+| LOW-011 `bc` dependency | `gateway-monitor.sh` | `awk` comparison |
+
+### 2026-05-06 Ezio Audit (23 findings)
 All 23 findings from the 2026-05-06 Ezio audit have been addressed:
 
 | Finding | Fix |
@@ -232,14 +245,18 @@ All 23 findings from the 2026-05-06 Ezio audit have been addressed:
 | MED-004 Silent subprocess failures | Return codes checked, stderr logged |
 | MED-005 No Python unit tests | Full pytest suite with mocked `subprocess` |
 | MED-006 No scanner tests | Portable bash unit tests for IP math, OUI, mktemp |
-| LOW-001–LOW-010 | All fixed (mktemp, stricter IP regex, logrotate, circuit breaker, proxy_hide_header, test split, webhook rotation docs, AppSec tests, nftables comment) |
+| LOW-001–LOW-012 | All fixed (mktemp, stricter IP regex, logrotate, circuit breaker, proxy_hide_header, test split, webhook rotation docs, AppSec tests, nftables comment, email delta, rollback glob) |
+
+### Cumulative Stats
+- **Total findings resolved:** 33 (23 audit + 10 handover)
+- **Test assertions:** 87 (20 pytest + 54 deploy + 11 scanner + 2 shellcheck)
 
 ## Test Infrastructure
 
 ```
 tests/
 ├── run-tests.sh              # unified test runner
-├── test_progressive_ban.py   # 17 pytest cases for ban script
+├── test_progressive_ban.py   # 20 pytest cases for ban script
 ├── test_deploy_integration.sh # 54 assertions for deploy.sh logic
 └── test_detect_loxone.sh     # 11 assertions for scanner logic
 ```

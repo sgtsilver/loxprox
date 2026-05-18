@@ -14,6 +14,7 @@ Run via cron every 15 minutes.
 
 import json
 import logging
+import os
 import subprocess
 import sys
 from collections import defaultdict
@@ -33,6 +34,7 @@ ESCALATION = {
 }
 DEFAULT_EXTENDED = "720h"  # 30 days for anything beyond 4th
 CSCLI_TIMEOUT = 30  # seconds — MED-003 fix
+STATE_FILE = "/var/lib/loxone-monitor/extended-decisions.json"
 
 
 def run_cscli(args):
@@ -90,7 +92,31 @@ def cscli_decision_add(ip: str, duration: str, reason: str) -> bool:
     return True
 
 
+def load_state() -> dict:
+    """Load the extended-decisions state file. Returns empty dict on missing/corrupt file."""
+    if not os.path.exists(STATE_FILE):
+        return {}
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("State file unreadable (%s), starting fresh", exc)
+        return {}
+
+
+def save_state(state: dict) -> None:
+    """Persist the extended-decisions state file. Logs warning on failure."""
+    try:
+        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except OSError as exc:
+        logger.warning("Failed to write state file %s: %s", STATE_FILE, exc)
+
+
 def main():
+    state = load_state()
+
     # Get all decisions (active + expired) to count offenses per IP
     all_decisions = run_cscli(["decisions", "list", "-a"])
     if all_decisions is None:
@@ -108,6 +134,20 @@ def main():
     if active is None:
         sys.exit(1)
 
+    # Prune stale state entries (IPs no longer with active cscli bans)
+    active_cscli_ips = {
+        d.get("value", "") for d in active
+        if d.get("origin") == "cscli" and d.get("value")
+    }
+    pruned = 0
+    for key in list(state.keys()):
+        if key not in active_cscli_ips:
+            del state[key]
+            pruned += 1
+    if pruned:
+        logger.info("Pruned %d stale entries from state file", pruned)
+        save_state(state)
+
     extended = 0
     skipped = 0
 
@@ -115,8 +155,7 @@ def main():
         ip = d.get("value", "")
         origin = d.get("origin", "")
         scenario = d.get("scenario", "")
-        current_duration = d.get("duration", "")
-        id_ = d.get("id", "")
+        id_ = str(d.get("id", ""))
 
         if not ip or not id_:
             continue
@@ -136,8 +175,8 @@ def main():
             skipped += 1
             continue
 
-        # Check if already extended (rough check by duration string)
-        if target in current_duration:
+        # Skip if this IP was already extended to the same target
+        if ip in state and state[ip] == target:
             skipped += 1
             continue
 
@@ -153,6 +192,9 @@ def main():
         if not cscli_decision_add(ip, target, f"repeat-offender-{offenses}"):
             logger.warning("Failed to add extended decision for %s — IP may be unbanned", ip)
             continue
+
+        state[ip] = target
+        save_state(state)
         extended += 1
 
     logger.info("Done. Extended: %d, Skipped: %d", extended, skipped)
