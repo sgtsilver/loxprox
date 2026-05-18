@@ -1,6 +1,6 @@
 # LoxProx — Hardened Gateway for Loxone Miniservers
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: Non-Commercial](https://img.shields.io/badge/License-Non--Commercial-red.svg)](#license)
 [![Validation: A-](https://img.shields.io/badge/Validation-A--_brightgreen)]()
 [![Debian 12](https://img.shields.io/badge/Debian-12-A81D33?logo=debian)]()
 [![CIS Hardened](https://img.shields.io/badge/CIS-Hardened-blue)]()
@@ -70,7 +70,7 @@ loxprox/
 ├── README.md                          # This file
 ├── SECURITY.md                        # Threat model, incident response, hardening
 ├── VALIDATION-REPORT.html             # Independent security audit (2026 frameworks)
-├── LICENSE                            # MIT
+├── LICENSE                            # Non-Commercial
 ├── CONTRIBUTING.md                    # Contribution guidelines
 ├── CHANGELOG.md                       # Version history
 ├── phase1-hardening.md                # Proxmox firewall + Loxone hardening
@@ -272,7 +272,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). This is a specialized security appliance
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+**Non-Commercial Use Only** — see [LICENSE](LICENSE).
+
+The Software may be used, modified, and distributed freely for personal,
+educational, research, and non-commercial purposes. Commercial use — directly
+or indirectly, in whole or in part — is strictly prohibited.
 
 ---
 
