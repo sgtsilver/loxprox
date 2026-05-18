@@ -156,7 +156,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Markdown link check
-        uses: lycheeverse/lychee-action@v1
+        uses: lycheeverse/lychee-action@v2
         with:
           args: --no-progress --exclude-path phase2-gateway/ README.md SECURITY.md CONFIGURATION-GUIDE.md CONTRIBUTING.md CHANGELOG.md
           fail: false
