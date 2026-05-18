@@ -22,7 +22,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DISCORD="${DISCORD_ALERT_PATH:-$SCRIPT_DIR/discord-alert.sh}"
 LOG_FILE="/var/log/loxprox-monitor.log"
-STATE_DIR="/var/lib/loxone-monitor"
+STATE_DIR="/var/lib/loxprox"
 ALERT_COOLDOWN=300  # 5 min between identical alert types
 
 mkdir -p "$STATE_DIR"
@@ -83,7 +83,7 @@ check_crowdsec_blocks() {
         if type == "object" then (.decisions? | length) else length end
     ' 2>/dev/null)
 
-    if [ -n "$new_decisions" ] && [ "$count" -gt 0 ] 2>/dev/null; then
+    if [[ -n "$new_decisions" && "${count:-0}" -gt 0 ]]; then
         send_alert "WARNING" "CrowdSec Active Blocks" "$count IPs currently blocked by CrowdSec:\n$new_decisions" "crowdsec_blocks"
     fi
 }

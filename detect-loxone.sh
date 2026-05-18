@@ -90,18 +90,18 @@ probe_loxone() {
         fi
     done
 
-    # Even if OUI doesn't match, the response format is very distinctive
-    # Some units may have different OUIs. Accept if format matches.
+    # Fetch /jdev/cfg/api once — both for OUI-fallback verification and to
+    # pull version + serial. Avoids a duplicate request per probe.
+    version_json=$(curl -s --connect-timeout 1 --max-time 2 "http://${ip}/jdev/cfg/api" 2>/dev/null)
+
+    # If the OUI doesn't match, demand a matching /api response shape before
+    # accepting this host as a Loxone Miniserver.
     if [[ "$oui_found" -eq 0 ]]; then
-        # Double-check with API endpoint for extra confidence
-        version_json=$(curl -s --connect-timeout 1 --max-time 2 "http://${ip}/jdev/cfg/api" 2>/dev/null)
         if ! echo "$version_json" | grep -q '"LL".*"control".*"dev/cfg/api"'; then
             return 1
         fi
     fi
 
-    # Get version info
-    version_json=$(curl -s --connect-timeout 1 --max-time 2 "http://${ip}/jdev/cfg/api" 2>/dev/null)
     version=$(echo "$version_json" | grep -oP "'version':\s*'\K[^']+" | head -1)
     snr=$(echo "$version_json" | grep -oP "'snr':\s*'\K[^']+" | head -1)
 
@@ -128,6 +128,82 @@ probe_loxone() {
 
 # ── Scan execution ───────────────────────────────────────────────────────────
 
+# Print a result block for a single matched host. Args:
+#   1: ip, 2: mac, 3: version, 4: snr, 5: gen
+#   6: include_warnings ("1" → emit Gen 1/Gen 2 advice and curl hint)
+print_match() {
+    local ip="$1" mac="$2" version="$3" snr="$4" gen="$5" verbose="$6"
+
+    echo ""
+    echo -e "${GREEN}═══════════════════════════════════════════════════════════════════════════════${NC}"
+    echo -e "  ${GREEN}✓ LOXONE MINISERVER DETECTED${NC}"
+    echo -e "${GREEN}═══════════════════════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "  IP Address:      ${CYAN}$ip${NC}"
+    echo -e "  MAC Address:     ${CYAN}$mac${NC}"
+    echo -e "  Serial:          ${CYAN}$snr${NC}"
+    echo -e "  Firmware:        ${CYAN}$version${NC}"
+    echo -e "  Generation:      ${CYAN}$gen${NC}"
+    echo ""
+    echo -e "  ${YELLOW}Suggested deploy.sh configuration:${NC}"
+    echo ""
+    echo -e "    LOXONE_IP=\"${ip}\""
+    echo -e "    LOXONE_PORT=\"80\""
+    echo ""
+
+    if [[ "$verbose" == "1" ]]; then
+        echo -e "  ${YELLOW}To test connectivity:${NC}"
+        echo -e "    curl http://${ip}/jdev/cfg/api"
+        echo ""
+        if [[ "$gen" == *"Gen 2"* ]]; then
+            warn "This appears to be a Loxone Miniserver Gen 2 or newer."
+            warn "Gen 2 supports HTTPS — consider enabling TLS termination on the gateway."
+        else
+            ok "This is a Loxone Miniserver Gen 1 (HTTP only)."
+            info "The gateway will proxy HTTP traffic transparently."
+        fi
+    fi
+}
+
+# Probe a contiguous integer IP range in batches of 50 concurrent curls.
+# Returns 0 on at least one match, 1 otherwise. Args:
+#   1: start_int, 2: end_int, 3: verbose ("1" to print Gen 1/Gen 2 advice)
+scan_int_range() {
+    local start="$1" end="$2" verbose="$3"
+    local found=0 ip_int batch=0
+    local tmpfile
+    tmpfile=$(mktemp /tmp/loxone-scan-results.XXXXXXXXXX)
+
+    for ((ip_int = start; ip_int <= end; ip_int++)); do
+        local ip
+        ip=$(int_to_ip "$ip_int")
+
+        (
+            result=$(probe_loxone "$ip")
+            [[ -n "$result" ]] && echo "$result" >> "$tmpfile"
+        ) &
+
+        # Throttle to ~50 in-flight probes. Counting completed iterations
+        # (batch++) avoids the iter-0 modulo-zero false trigger that used to
+        # call `wait` after only one background was spawned.
+        ((batch++))
+        if (( batch % 50 == 0 )); then
+            wait
+        fi
+    done
+    wait
+
+    if [[ -f "$tmpfile" && -s "$tmpfile" ]]; then
+        while IFS='|' read -r _ ip mac version snr gen; do
+            found=1
+            print_match "$ip" "$mac" "$version" "$snr" "$gen" "$verbose"
+        done < "$tmpfile"
+    fi
+    rm -f "$tmpfile"
+
+    [[ "$found" -eq 1 ]]
+}
+
 scan_subnet_cidr() {
     local cidr="$1"
     local network prefix
@@ -147,65 +223,7 @@ scan_subnet_cidr() {
     info "Scanning $cidr ($((end - start + 1)) hosts)..."
     info "This will take approximately $(((end - start + 1) / 50 + 1)) seconds."
 
-    local found=0
-    local ip_int
-    local tmpfile
-    tmpfile=$(mktemp /tmp/loxone-scan-results.XXXXXXXXXX)
-
-    for ((ip_int = start; ip_int <= end; ip_int++)); do
-        local ip
-        ip=$(int_to_ip "$ip_int")
-
-        # Background probe
-        (
-            result=$(probe_loxone "$ip")
-            if [[ -n "$result" ]]; then
-                echo "$result" >> "$tmpfile"
-            fi
-        ) &
-
-        # Throttle to ~50 parallel probes
-        if (( (ip_int - start) % 50 == 0 )); then
-            wait
-        fi
-    done
-    wait
-
-    if [[ -f "$tmpfile" && -s "$tmpfile" ]]; then
-        while IFS='|' read -r _ ip mac version snr gen; do
-            found=1
-            echo ""
-            echo -e "${GREEN}═══════════════════════════════════════════════════════════════════════════════${NC}"
-            echo -e "  ${GREEN}✓ LOXONE MINISERVER DETECTED${NC}"
-            echo -e "${GREEN}═══════════════════════════════════════════════════════════════════════════════${NC}"
-            echo ""
-            echo -e "  IP Address:      ${CYAN}$ip${NC}"
-            echo -e "  MAC Address:     ${CYAN}$mac${NC}"
-            echo -e "  Serial:          ${CYAN}$snr${NC}"
-            echo -e "  Firmware:        ${CYAN}$version${NC}"
-            echo -e "  Generation:      ${CYAN}$gen${NC}"
-            echo ""
-            echo -e "  ${YELLOW}Suggested deploy.sh configuration:${NC}"
-            echo ""
-            echo -e "    LOXONE_IP=\"${ip}\""
-            echo -e "    LOXONE_PORT=\"80\""
-            echo ""
-            echo -e "  ${YELLOW}To test connectivity:${NC}"
-            echo -e "    curl http://${ip}/jdev/cfg/api"
-            echo ""
-
-            if [[ "$gen" == *"Gen 2"* ]]; then
-                warn "This appears to be a Loxone Miniserver Gen 2 or newer."
-                warn "Gen 2 supports HTTPS — consider enabling TLS termination on the gateway."
-            else
-                ok "This is a Loxone Miniserver Gen 1 (HTTP only)."
-                info "The gateway will proxy HTTP traffic transparently."
-            fi
-        done < "$tmpfile"
-    fi
-    rm -f "$tmpfile"
-
-    if [[ "$found" -eq 0 ]]; then
+    if ! scan_int_range "$start" "$end" "1"; then
         echo ""
         error "No Loxone Miniserver found on $cidr"
         echo ""
@@ -219,8 +237,6 @@ scan_subnet_cidr() {
         echo "  ./detect-loxone.sh 192.168.1.0/24"
         return 1
     fi
-
-    return 0
 }
 
 scan_range() {
@@ -233,52 +249,7 @@ scan_range() {
 
     info "Scanning range $start_ip → $end_ip ($((end_int - start_int + 1)) hosts)..."
 
-    local found=0
-    local ip_int
-    local tmpfile
-    tmpfile=$(mktemp /tmp/loxone-scan-results.XXXXXXXXXX)
-
-    for ((ip_int = start_int; ip_int <= end_int; ip_int++)); do
-        local ip
-        ip=$(int_to_ip "$ip_int")
-
-        (
-            result=$(probe_loxone "$ip")
-            if [[ -n "$result" ]]; then
-                echo "$result" >> "$tmpfile"
-            fi
-        ) &
-
-        if (( (ip_int - start_int) % 50 == 0 )); then
-            wait
-        fi
-    done
-    wait
-
-    if [[ -f "$tmpfile" && -s "$tmpfile" ]]; then
-        while IFS='|' read -r _ ip mac version snr gen; do
-            found=1
-            echo ""
-            echo -e "${GREEN}═══════════════════════════════════════════════════════════════════════════════${NC}"
-            echo -e "  ${GREEN}✓ LOXONE MINISERVER DETECTED${NC}"
-            echo -e "${GREEN}═══════════════════════════════════════════════════════════════════════════════${NC}"
-            echo ""
-            echo -e "  IP Address:      ${CYAN}$ip${NC}"
-            echo -e "  MAC Address:     ${CYAN}$mac${NC}"
-            echo -e "  Serial:          ${CYAN}$snr${NC}"
-            echo -e "  Firmware:        ${CYAN}$version${NC}"
-            echo -e "  Generation:      ${CYAN}$gen${NC}"
-            echo ""
-            echo -e "  ${YELLOW}Suggested deploy.sh configuration:${NC}"
-            echo ""
-            echo -e "    LOXONE_IP=\"${ip}\""
-            echo -e "    LOXONE_PORT=\"80\""
-            echo ""
-        done < "$tmpfile"
-    fi
-    rm -f "$tmpfile"
-
-    if [[ "$found" -eq 0 ]]; then
+    if ! scan_int_range "$start_int" "$end_int" "0"; then
         echo ""
         error "No Loxone Miniserver found in range $start_ip → $end_ip"
         return 1

@@ -30,16 +30,17 @@ fi
 
 NGINX_ERROR_COUNT=0
 if [[ -f /var/log/nginx/loxone-error.log ]]; then
-    # Count errors in last 5 minutes (approximate via file mtime/position logic is hard,
-    # so we count lines matching error patterns from the last 1000 lines)
+    # grep -c already prints "0" on no matches; `|| true` masks the rc=1 only.
+    # Using `|| echo 0` here would emit two lines under `pipefail` and break
+    # the Prometheus textfile collector.
     NGINX_ERROR_COUNT=$(tail -n 1000 /var/log/nginx/loxone-error.log 2>/dev/null | \
-        grep -cE "limiting requests|upstream prematurely|502|503|504" || echo 0)
+        grep -cE "limiting requests|upstream prematurely|502|503|504" || true)
 fi
 
 NGINX_RATE_LIMITED=0
 if [[ -f /var/log/nginx/loxone-error.log ]]; then
     NGINX_RATE_LIMITED=$(tail -n 1000 /var/log/nginx/loxone-error.log 2>/dev/null | \
-        grep -c "limiting requests" || echo 0)
+        grep -c "limiting requests" || true)
 fi
 
 # ── AppSec metrics ─────────────────────────────────────────────────────────────
@@ -53,7 +54,7 @@ fi
 
 SSH_FAILED=0
 if [[ -f /var/log/auth.log ]]; then
-    SSH_FAILED=$(grep -cE "Failed password|Invalid user" /var/log/auth.log 2>/dev/null | tail -1 || echo 0)
+    SSH_FAILED=$(grep -cE "Failed password|Invalid user" /var/log/auth.log 2>/dev/null || true)
 fi
 
 # ── Service health ─────────────────────────────────────────────────────────────

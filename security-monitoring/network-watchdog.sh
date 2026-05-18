@@ -56,11 +56,12 @@ IFACE="${IFACE:-$(ip -o link show | awk -F': ' '/^[0-9]+: e/{print $2}' | head -
 GATEWAY_IP="${WATCHDOG_GATEWAY:-$(ip route show default 2>/dev/null | awk '/default/ {print $3}' | head -1)}"
 GATEWAY_IP="${GATEWAY_IP:-192.168.178.1}"
 NGINX_LOCAL="${WATCHDOG_NGINX_URL:-http://127.0.0.1:1080/}"
-EXPECTED_IP="${WATCHDOG_EXPECTED_IP:-${GATEWAY_IP:-}}"
 
-# If EXPECTED_IP is still empty, we can't validate the interface IP.
-# This only happens in pathological cases; skip the IP check rather than fail.
-[[ -z "$EXPECTED_IP" ]] && EXPECTED_IP="UNSET"
+# EXPECTED_IP is the VM's own static IP. It must come from
+# WATCHDOG_EXPECTED_IP — never fall back to GATEWAY_IP, which by now has been
+# reassigned above to the *upstream router* IP. Falling back to that would
+# make check_interface_ip permanently fail and trigger reboot loops.
+EXPECTED_IP="${WATCHDOG_EXPECTED_IP:-UNSET}"
 
 # ── State / Logging ───────────────────────────────────────────────────────────
 STATE_DIR="/var/lib/loxprox"
