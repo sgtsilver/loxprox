@@ -64,6 +64,15 @@ class TestRunCscli:
             result = pb.run_cscli(["decisions", "list"])
             assert result is None
 
+    def test_run_cscli_null_response_returns_empty_list(self):
+        # cscli emits `null` (not `[]`) when no decisions exist — Go nil-slice
+        # JSON. Confirm we normalise so main() doesn't exit(1) on a clean VM.
+        with patch.object(
+            pb.subprocess, "run",
+            return_value=FakeCompletedProcess(stdout="null\n"),
+        ):
+            assert pb.run_cscli(["decisions", "list"]) == []
+
 
 class TestCscliDecisionDelete:
     def test_delete_success(self):

@@ -382,6 +382,21 @@ EOF
 
     mkdir -p /etc/nftables.d
 
+    # Pre-seed an empty geoip set so the include glob resolves to a real
+    # set definition. Without this, the `@geoip_blocklist` reference in
+    # /etc/nftables.conf is undefined on first deploy (geoip-block.sh runs
+    # later in main()), and `systemctl restart nftables` fails → set -e aborts.
+    # geoip-block.sh overwrites this file with real CIDRs when it runs.
+    if [[ ! -s /etc/nftables.d/99-geoip.conf ]]; then
+        cat > /etc/nftables.d/99-geoip.conf <<'EOF'
+# Placeholder — overwritten by geoip-block.sh on first run
+set geoip_blocklist {
+    type ipv4_addr
+    flags interval
+}
+EOF
+    fi
+
     systemctl enable nftables
     systemctl restart nftables
     ok "nftables firewall active — input policy: drop, allowed: SSH (LAN), :1080 (any)."
@@ -851,9 +866,94 @@ setup_alerting() {
     command -v mail &>/dev/null || apt-get install -y mailutils bsd-mailx
 
     cat > /etc/cron.d/loxprox-alert <<EOF
-*/15 * * * * root prev=\$(cat /var/lib/loxone-monitor/last-error-count 2>/dev/null || echo 0); curr=\$(wc -l < /var/log/nginx/loxone-error.log 2>/dev/null || echo 0); echo "\$curr" > /var/lib/loxone-monitor/last-error-count; [ \$((curr - prev)) -gt 100 ] && echo "High error rate: \$((curr - prev)) new errors in 15 min" | mail -s "Loxone Gateway Alert" "$ALERT_EMAIL"
+*/15 * * * * root prev=\$(cat /var/lib/loxprox/last-error-count 2>/dev/null || echo 0); curr=\$(wc -l < /var/log/nginx/loxone-error.log 2>/dev/null || echo 0); echo "\$curr" > /var/lib/loxprox/last-error-count; [ \$((curr - prev)) -gt 100 ] && echo "High error rate: \$((curr - prev)) new errors in 15 min" | mail -s "Loxone Gateway Alert" "$ALERT_EMAIL"
 EOF
     ok "Alerting → $ALERT_EMAIL"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Security Monitor + Backup + Progressive Ban (cron + systemd timer)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Installs:
+#   /opt/loxprox/gateway-monitor.sh       (systemd timer, 60s)
+#   /opt/loxprox/gateway-backup.sh        (cron, daily 02:00)
+#   /opt/loxprox/geoip-block.sh           (cron, daily 03:00)
+#   /opt/loxprox/progressive-ban.py       (cron, every 15 min)
+#   /opt/loxprox/discord-alert.sh         (alert dispatcher)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+setup_security_monitoring() {
+    banner "Security Monitoring (monitor + backup + progressive ban)"
+
+    local install_dir="/opt/loxprox"
+    local src_dir="${SCRIPT_DIR:-.}"
+    mkdir -p "$install_dir"
+
+    # Copy the five scripts that cron and the monitor timer drive
+    local f
+    for f in \
+        "$src_dir/progressive-ban.py" \
+        "$src_dir/security-monitoring/gateway-monitor.sh" \
+        "$src_dir/security-monitoring/gateway-backup.sh" \
+        "$src_dir/security-monitoring/geoip-block.sh" \
+        "$src_dir/security-monitoring/discord-alert.sh"
+    do
+        if [[ -f "$f" ]]; then
+            install -m 0755 "$f" "$install_dir/"
+            info "Installed: $install_dir/$(basename "$f")"
+        else
+            warn "Missing source: $f — skipping"
+        fi
+    done
+
+    # Monitor systemd timer (60s cycle)
+    cat > /etc/systemd/system/loxprox-monitor.service <<'EOF'
+[Unit]
+Description=LoxProx Gateway Monitor
+After=network.target nginx.service crowdsec.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/loxprox/gateway-monitor.sh
+StandardOutput=append:/var/log/loxprox-monitor.log
+StandardError=append:/var/log/loxprox-monitor.log
+EOF
+
+    cat > /etc/systemd/system/loxprox-monitor.timer <<'EOF'
+[Unit]
+Description=Run LoxProx Gateway Monitor every 60 seconds
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now loxprox-monitor.timer
+
+    # Single cron file for all periodic jobs
+    cat > /etc/cron.d/loxprox <<'EOF'
+# LoxProx security automation
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+MAILTO=
+
+# Progressive ban escalation — extend repeat offenders every 15 min
+*/15 * * * * root /opt/loxprox/progressive-ban.py >> /var/log/loxprox-cron.log 2>&1
+
+# Daily config backup
+0 2 * * * root /opt/loxprox/gateway-backup.sh >> /var/log/loxprox-cron.log 2>&1
+
+# Daily GeoIP blocklist refresh
+0 3 * * * root /opt/loxprox/geoip-block.sh >> /var/log/loxprox-cron.log 2>&1
+EOF
+    chmod 644 /etc/cron.d/loxprox
+
+    ok "Security monitor (60s), daily backup, daily GeoIP, progressive ban (15min) installed."
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1127,6 +1227,7 @@ main() {
     setup_auditd
     setup_logrotate
     setup_alerting
+    setup_security_monitoring
     setup_network_watchdog
     write_runtime_config
     health_check
