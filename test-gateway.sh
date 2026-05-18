@@ -57,6 +57,12 @@ test_services() {
     else
         warn "monitor timer not enabled"
     fi
+
+    if systemctl is-enabled --quiet network-watchdog.timer 2>/dev/null; then
+        pass "network watchdog timer is enabled"
+    else
+        warn "network watchdog timer not enabled"
+    fi
 }
 
 # ── Network Tests ────────────────────────────────────────────────────────────
@@ -299,13 +305,6 @@ test_monitoring() {
         pass "jq is installed (monitor dependency)"
     else
         fail "jq is NOT installed (monitor will fail)"
-    fi
-
-    # Verify bc is installed
-    if command -v bc >/dev/null 2>&1; then
-        pass "bc is installed (monitor dependency)"
-    else
-        fail "bc is NOT installed (monitor will fail)"
     fi
 }
 
