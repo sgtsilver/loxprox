@@ -34,7 +34,7 @@ set -euo pipefail
 # [REQUIRED] Loxone Miniserver IP address
 #   How to find: Run ./detect-loxone.sh on this machine, or check your router's
 #   DHCP lease table for a device named "Loxone" or with MAC starting EE:E0:00
-#   Example: "192.168.178.20"
+#   Example: "192.168.1.100"
 LOXONE_IP="192.168.1.100"
 
 # [REQUIRED] Loxone port (Gen 1 = 80, Gen 2 = usually 80 with HTTPS redirect)
@@ -44,13 +44,13 @@ LOXONE_PORT="80"
 
 # [REQUIRED] This gateway's static IP address
 #   This VM/LXC must have a static IP so router port forwarding doesn't break.
-#   Example: "192.168.178.252"
+#   Example: "192.168.1.50"
 #   How to set: Run ./set-static-ip.sh BEFORE this script if needed.
 GATEWAY_IP="192.168.1.50"
 
 # [REQUIRED] Your LAN subnet (CIDR notation)
 #   This is the network range that can reach SSH and is whitelisted in CrowdSec.
-#   Example: "192.168.178.0/24"
+#   Example: "192.168.1.0/24"
 #   How to find: ip route | grep default → check your interface's network mask
 LAN_SUBNET="192.168.1.0/24"
 
@@ -58,7 +58,7 @@ LAN_SUBNET="192.168.1.0/24"
 #   Only IPs from these networks can connect via SSH.
 #   NEVER add 0.0.0.0/0 here — that exposes SSH to the entire internet.
 #   Add your home LAN, a site-to-site VPN, and any jump boxes.
-#   Example: ("192.168.178.0/24" "192.168.100.0/24" "10.8.0.0/24")
+#   Example: ("192.168.1.0/24" "192.168.100.0/24" "10.8.0.0/24")
 SSH_ALLOWED_SUBNETS=("192.168.1.0/24" "10.0.0.0/24")
 
 # ═══════════════════════════════════════════════════════════════════════════════
