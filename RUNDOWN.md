@@ -2,8 +2,8 @@
 
 **Status:** Published on GitHub  
 **Repo:** https://github.com/sgtsilver/loxprox  
-**Version:** 1.3.0 (released)  
-**Last updated:** 2026-05-18 (second bug sweep + rename to loxprox)
+**Version:** 1.3.1 (released)  
+**Last updated:** 2026-05-18 (v1.3.1 supersedes withdrawn v1.3.0 — watchdog StartLimitBurst fix)
 
 ---
 
@@ -34,9 +34,9 @@ Internet ──► Router:1080 ──► Gateway:1080 ──► Loxone:80
 
 | File | Purpose |
 |------|---------|
-| `deploy.sh` | One-shot Debian 12 hardening & installation (870 lines, idempotent) |
+| `deploy.sh` | One-shot Debian 12 hardening & installation (~1240 lines, idempotent) |
 | `detect-loxone.sh` | Network autodetector — finds your Miniserver by MAC OUI and API fingerprint |
-| `test-gateway.sh` | 29-check validation suite — run after deploy to verify every control |
+| `test-gateway.sh` | 50+ automated checks — run after deploy to verify every control |
 | `set-static-ip.sh` | Pre-deploy VM network configuration |
 | `security-monitoring/` | Discord alerts, health monitor, config backup, GeoIP block script, network watchdog |
 | `security-monitoring/network-watchdog.sh` | Self-healing network stack monitor |
@@ -92,7 +92,7 @@ The watchdog runs as a **systemd system service** — root by default. This is r
 | Layer | Mechanism |
 |-------|-----------|
 | **Script-level** | Tracks reboots in `/var/lib/loxprox/watchdog-reboot-history.log`. Max 2 per hour. If exceeded, sends Discord alert and exits without rebooting. |
-| **systemd-level** | `StartLimitIntervalSec=600` + `StartLimitBurst=3`. If the script exits non-zero 3 times in 10 minutes, systemd stops restarting it. `FailureAction=reboot` triggers only after the burst limit, as a last resort. |
+| **systemd-level** | `FailureAction=reboot` acts as a last-resort safety net if the script exits non-zero. `StartLimitBurst=0` (disabled) because a finite burst limit conflicts with the 60-second timer — the 4th start would be blocked as "start-limit-hit" and falsely trigger a reboot. The script already has its own anti-loop counter (max 2/hour). |
 
 This means: even if your Fritzbox is physically unplugged, the VM reboots **at most twice** in an hour, then stops and waits for you.
 
@@ -189,7 +189,7 @@ These settings are configured on the repo and affect how code lands in `main`:
 | Branch protection on `main` | ✅ Active | Requires PR + 1 approval + all CI checks pass |
 | Dependabot (Actions) | ✅ Active | Weekly checks; auto-opens PRs for action updates |
 | Secret scanning | ⏭️ Skipped | LAN-only project; no secrets committed |
-| Release `v1.1.0` | ✅ Published | Permanent tag for rollback |
+| Releases | ✅ Published | `v1.1.0`, `v1.2.0`, `v1.2.1`, `v1.3.1` (latest). v1.3.0 was withdrawn — do not install. See [Releases](https://github.com/sgtsilver/loxprox/releases). |
 
 ### Developer workflow (after branch protection)
 
@@ -248,15 +248,15 @@ All 23 findings from the 2026-05-06 Ezio audit have been addressed:
 | LOW-001–LOW-012 | All fixed (mktemp, stricter IP regex, logrotate, circuit breaker, proxy_hide_header, test split, webhook rotation docs, AppSec tests, nftables comment, email delta, rollback glob) |
 
 ### Cumulative Stats
-- **Total findings resolved:** 33 (23 audit + 10 handover)
-- **Test assertions:** 87 (20 pytest + 54 deploy + 11 scanner + 2 shellcheck)
+- **Total findings resolved:** 45 (23 audit + 10 handover + 12 second sweep)
+- **Test assertions:** 88 (21 pytest + 54 deploy + 11 scanner + 2 shellcheck)
 
 ## Test Infrastructure
 
 ```
 tests/
 ├── run-tests.sh              # unified test runner
-├── test_progressive_ban.py   # 20 pytest cases for ban script
+├── test_progressive_ban.py   # 21 pytest cases for ban script
 ├── test_deploy_integration.sh # 54 assertions for deploy.sh logic
 └── test_detect_loxone.sh     # 11 assertions for scanner logic
 ```
