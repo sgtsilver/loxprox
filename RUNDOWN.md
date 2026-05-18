@@ -2,8 +2,8 @@
 
 **Status:** Published on GitHub  
 **Repo:** https://github.com/sgtsilver/loxprox  
-**Version:** 1.2.1 (released)  
-**Last updated:** 2026-05-10 (handover sweep round 2 complete)
+**Version:** 1.3.0 (released)  
+**Last updated:** 2026-05-18 (second bug sweep + rename to loxprox)
 
 ---
 
