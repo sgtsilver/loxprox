@@ -62,7 +62,8 @@ LAN (192.168.x.0/24) ──────► Loxone:80  (direct, bypasses gateway)
 loxprox/
 ├── deploy.sh                          # ★ MAIN DEPLOY SCRIPT — run on target
 ├── detect-loxone.sh                   # ★ AUTO-DETECT your Miniserver IP
-├── test-gateway.sh                    # ★ VALIDATION SUITE — 29 automated checks
+├── test-gateway.sh                    # ★ VALIDATION SUITE — 50+ automated checks
+├── progressive-ban.py                 # CrowdSec progressive-ban escalator (cron, 15min)
 ├── set-static-ip.sh                   # VM network pre-configuration
 ├── CONFIGURATION-GUIDE.md             # ★ Explains every setting in deploy.sh
 ├── .env.example                       # Configuration template
@@ -103,7 +104,7 @@ loxprox/
    - This scans your network and prints the exact IP, MAC, firmware version, and suggested config values.
 5. **Configure:** Open `deploy.sh` and edit the `[REQUIRED]` values at the top. Stuck? Read `CONFIGURATION-GUIDE.md` — it explains every setting with examples.
 6. **Deploy:** `chmod +x deploy.sh && sudo ./deploy.sh`
-7. **Validate:** `sudo bash test-gateway.sh` (29 automated checks)
+7. **Validate:** `sudo bash test-gateway.sh` (50+ automated checks)
 8. **Cut over:** Follow `phase3-cutover.md` to switch router forwarding.
 9. **Monitor:** Follow `phase4-monitoring.md` to tune and observe.
 
@@ -126,7 +127,7 @@ The deploy script is **idempotent** — safe to re-run.
 | 9 | **Security monitor** | 60s cycle: CrowdSec blocks, nginx errors, auth attempts, resource alerts → Discord |
 | 10 | **Network watchdog** | Self-healing monitor: detects network-layer failures (dhclient death-spiral, routing corruption) and auto-recovers via service restart or reboot |
 | 11 | **Log rotation** | 14-day nginx log retention |
-| 12 | **Config backup** | Daily automated backups to `/root/gateway-backups/` |
+| 12 | **Config backup** | Daily automated backups to `/root/loxprox-backups/` |
 
 ---
 
@@ -222,7 +223,7 @@ After deployment, run the validation suite:
 sudo bash test-gateway.sh
 ```
 
-This performs **29 automated checks** across services, firewall, proxy, CrowdSec, AppSec, monitoring, kernel hardening, and backups. It also adds and removes a test ban to verify the full blocking pipeline.
+This performs **50+ automated checks** across services, firewall, proxy, CrowdSec, AppSec, monitoring, kernel hardening, and backups. It also adds and removes a test ban to verify the full blocking pipeline.
 
 ---
 

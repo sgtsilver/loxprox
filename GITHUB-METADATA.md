@@ -27,45 +27,14 @@ Colors: Dark background (#0d1117), green accent (#238636), white text.
 
 ---
 
-## Releases — v1.0.0 Notes
+## Releases
 
-Title: `LoxProx v1.0.0 — Production Ready`
+Release notes live on the GitHub Releases page — they're sourced from `CHANGELOG.md` and authored at tag time, not here. Don't draft release bodies in this file (they go stale).
 
-Body:
-```markdown
-## LoxProx v1.0.0
+- Current shelf: https://github.com/sgtsilver/loxprox/releases
+- For changes since the last release, see `CHANGELOG.md`.
 
-A hardened security gateway for Loxone Miniservers. Deploys a Debian 12 VM as a protective reverse proxy with WAF, IDS, firewall, and automated monitoring.
-
-### What's Included
-- **nginx reverse proxy** with CrowdSec AppSec WAF
-- **CrowdSec IDS** with community threat intelligence
-- **nftables firewall** with rate limiting & GeoIP blocking
-- **Automated monitoring** with Discord alerting
-- **Network autodetector** — finds your Miniserver automatically
-- **29-check validation suite** — verify every security control
-- **Self-contained HTML report** — A- grade across 9 security frameworks
-
-### Quick Start
-```bash
-curl -fsSL https://raw.githubusercontent.com/sgtsilver/loxprox/main/deploy.sh | sudo bash
-```
-
-See [CONFIGURATION-GUIDE.md](CONFIGURATION-GUIDE.md) for required variables.
-
-### Validation
-- **Grade:** A- (Production Ready)
-- **Controls:** 29/34 pass, 5 are enhancements
-- **Frameworks:** CIS Debian 12, OWASP Top 10 2026, OWASP IoT Top 10
-
-### Hardware
-- VM: 1 vCPU, 512MB RAM, 4GB disk
-- Raspberry Pi 4/5: fully supported (ARM64)
-- Raspberry Pi 3: supported with 64-bit OS
-
-### Attribution
-Built by Paul Dewald with [Kimi](https://www.kimi.com) ([Moonshot AI](https://www.moonshot.ai)). See [README.md](README.md#attribution) for details.
-```
+> **Do not** publish a `curl … | sudo bash` install line. The CrowdSec install in `deploy.sh` was hardened in v1.1.0 (CRIT-001 fix) specifically to remove pipe-to-shell from the supply chain — publishing one for `deploy.sh` itself would reintroduce the same vector. Users should `git clone` (or download a tagged tarball), inspect, then run.
 
 ---
 
