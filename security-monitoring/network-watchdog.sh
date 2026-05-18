@@ -247,8 +247,9 @@ handle_reboot() {
         log "The upstream network (router/Fritzbox) may actually be down."
         send_discord "CRITICAL" "Watchdog Gave Up — Manual Intervention Required" \
             "$msg\n\nFailed checks: ${failed_checks}\n\n${diagnostics}\n\nAction: Check your upstream router/Fritzbox. If the router is up, SSH in and run:\njournalctl -u network-watchdog --since '1 hour ago'\ncat $LOG_FILE"
-        # Exit non-zero so systemd knows we failed, but FailureAction won't
-        # trigger because StartLimitBurst protects against loops.
+        # Exit non-zero so systemd knows we failed. FailureAction=reboot is a
+        # last-resort safety net; the script-level counter (max 2/hour) is the
+        # primary loop protection.
         exit 1
     fi
 

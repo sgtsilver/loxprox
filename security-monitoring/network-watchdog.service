@@ -7,12 +7,14 @@ After=network.target nginx.service
 # which is required to restart networking.service and call reboot.
 # No sudo configuration is needed. No passwordless access is granted.
 
-# systemd-level loop protection: if the script exits non-zero 3 times in
-# 10 minutes, systemd stops restarting it. This prevents infinite reboot
-# loops if the upstream router is actually down. Belongs in [Unit] per
-# systemd.unit(5); placing them in [Service] is silently ignored.
+# systemd-level safety net: if the script exits non-zero, systemd can
+# trigger a reboot as last-resort recovery. StartLimitBurst=0 is required
+# because the timer fires every 60 s; a finite burst limit would block the
+# 4th start (~3 min) and falsely trigger FailureAction=reboot. The script
+# already has its own anti-loop counter (max 2 reboots/hour). Belongs in
+# [Unit] per systemd.unit(5); placing them in [Service] is silently ignored.
 StartLimitIntervalSec=600
-StartLimitBurst=3
+StartLimitBurst=0
 
 [Service]
 Type=oneshot
