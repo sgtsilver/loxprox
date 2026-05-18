@@ -145,7 +145,7 @@ Switching `/etc/network/interfaces` from `inet dhcp` to `inet static` without re
 CrowdSec AppSec requires the **firewall bouncer API key** (not the LAPI machine key) in the `X-Crowdsec-Appsec-Api-Key` header, plus `X-Crowdsec-Appsec-Ip`, `-Uri`, and `-Verb`. This was completely undocumented in standard CrowdSec guides and caused hours of 401 debugging. The bouncer `.local` file is the source of truth.
 
 ### CrowdSec Whitelist CIDR Syntax
-CrowdSec's parser expects `cidr:` for ranges, not `ip:`. Using `ip:192.168.178.0/24` causes a FATAL parser error. `cidr:192.168.178.0/24` is correct.
+CrowdSec's parser expects `cidr:` for ranges, not `ip:`. Using `ip:192.168.1.0/24` causes a FATAL parser error. `cidr:192.168.1.0/24` is correct.
 
 ### nftables Table Isolation
 The `crowdsec-firewall-bouncer` manages its own `table ip crowdsec` with timeout-based sets. When reloading static rules, use `flush table inet filter` — never `flush ruleset` — or you wipe the bouncer's dynamic blocks.
