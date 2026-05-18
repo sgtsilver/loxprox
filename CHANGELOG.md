@@ -2,25 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.3.0] — 2026-05-18
+> **v1.3.0 was withdrawn on 2026-05-18 — do not use.** The systemd unit change in v1.3.0 (moving `StartLimit*` from `[Service]` to `[Unit]`) activated a previously-silent `StartLimitBurst=3` that, combined with the watchdog's 60-second timer and `FailureAction=reboot`, caused an unbounded reboot loop on the 4th start. **v1.3.1 supersedes v1.3.0** and contains the same fixes plus the burst-value correction. Install v1.3.1 or later.
 
-### Fixed (Second Bug Sweep — 12/12 findings resolved)
+## [1.3.1] — 2026-05-18 (supersedes withdrawn v1.3.0)
+
+### Fixed (regression from v1.3.0)
+- **CRIT**: `network-watchdog.service` — v1.3.0 moved `StartLimitIntervalSec=600` + `StartLimitBurst=3` from `[Service]` to `[Unit]` per `systemd.unit(5)`. The move was correct, but for the first time the values *activated* — and `3` is far too low when the watchdog timer fires every 60 s. The 4th start inside the 600 s window was blocked as `start-limit-hit`, then `FailureAction=reboot` interpreted that as failure and rebooted the host. Result: production VM rebooted ~10× in ~40 minutes. Set `StartLimitBurst=0` (disabled). The script already has its own anti-loop counter (`MAX_REBOOTS_PER_HOUR=2`); the systemd-level limit was redundant *and* lethal at that burst value. Updated comments in `network-watchdog.sh` (`handle_reboot` block) to match.
+
+### Fixed (Second Bug Sweep — carried over from v1.3.0, 12/12 findings resolved)
 - **HIGH**: `progressive-ban.py` — `cscli decisions list -o json` emits `null` (Go nil-slice marshal), not `[]`. `json.loads("null") → None` then `sys.exit(1)` on every cron run on a gateway with no decisions. Normalised to `[]` in `run_cscli`. New regression test `test_run_cscli_null_response_returns_empty_list`.
 - **HIGH**: `grafana-integration/loxprox-metrics.sh` — `... | grep -c PATTERN || echo 0` under `pipefail` emitted a two-line string `"0\n0"` that broke node_exporter textfile scraping. Replaced with `|| true` in 3 places.
 - **MED**: `network-watchdog.sh` — `EXPECTED_IP` fallback chained to `GATEWAY_IP`, which by then has been reassigned to the upstream router IP. Configs without an explicit `WATCHDOG_EXPECTED_IP` would trip `check_interface_ip` forever and trigger reboot loops (capped at 2/hr by anti-loop). Default to `UNSET` and skip the check.
 - **MED**: `deploy.sh` first-deploy ordering — `setup_firewall` restarted nftables while `/etc/nftables.conf` referenced `@geoip_blocklist`, which was only defined later when `geoip-block.sh` runs. Pre-seed an empty placeholder set so the include resolves and nftables loads on a clean VM.
 - **MED**: `deploy.sh` was missing the install-monitoring step — `gateway-monitor.sh`, `gateway-backup.sh`, the monitor systemd timer, and the cron file. Added `setup_security_monitoring()` so a fresh deploy matches what operators had been installing by hand.
 - **LOW**: `gateway-monitor.sh:86` fragile `[ "$count" -gt 0 ] 2>/dev/null` (which does NOT suppress `set -e` from `[`'s rc=2 on empty `$count`). Use `[[ "${count:-0}" -gt 0 ]]`.
-- **LOW**: `network-watchdog.service` — `StartLimitIntervalSec` + `StartLimitBurst` were in `[Service]`; per `systemd.unit(5)` they belong in `[Unit]`. systemd was silently ignoring them with `Unknown key` warnings. Moved.
+- **LOW**: `network-watchdog.service` — `StartLimitIntervalSec` + `StartLimitBurst` directives moved from `[Service]` to `[Unit]` per `systemd.unit(5)`. (See the **CRIT** entry above for the burst-value follow-up that this move forced.)
 
-### Changed (polish / dedup)
+### Changed (polish / dedup, from v1.3.0)
 - `detect-loxone.sh` — `scan_subnet_cidr` and `scan_range` were ~95% duplicated; factored into shared `scan_int_range` + `print_match` (−40 LOC, same behaviour).
 - `detect-loxone.sh:probe_loxone` — `/jdev/cfg/api` was GET'd twice on OUI miss; one call now.
 - `detect-loxone.sh` — throttle `wait` fired at iter 0 with only 1 background spawned (first 50-batch never actually parallel); counter-based now.
 - `progressive-ban.py` — `save_state` moved out of the escalation loop.
 - `test-gateway.sh` — dropped dead `bc`-as-monitor-dep check (LOW-011 removed the `bc` dependency in v1.2.1); updated paths/timer to `/opt/loxprox/` and `loxprox-monitor.timer`.
 
-### Renamed (install footprint)
+### Renamed (install footprint, from v1.3.0)
 - `/opt/loxone-security/*` → `/opt/loxprox/*`
 - `/var/lib/loxone-monitor/*` → `/var/lib/loxprox/*`
 - `loxone-security-monitor.{service,timer}` → `loxprox-monitor.{service,timer}`
@@ -28,11 +33,17 @@ All notable changes to this project will be documented in this file.
 
 For operators on an earlier install, see PR #5 for a step-by-step migration.
 
-### Docs
+### Docs (carried + extended)
 - `CONFIGURATION-GUIDE.md`, `RUNDOWN.md`, `deploy.sh`, `network-watchdog.sh` — replaced specific network examples with RFC-style documentation ranges (`192.168.1.x`, `203.0.113.x`, `198.51.100.x`). No behaviour change.
+- `README.md`, `ABOUT.md`, `RUNDOWN.md` — replaced stale "29 automated checks" with "50+ automated checks" (`test-gateway.sh` has grown to ~51 assertions). Fixed stale backup path `/root/gateway-backups/` → `/root/loxprox-backups/`. Added `progressive-ban.py` to the README file tree. Refreshed deploy.sh line count (~1240 lines) and the cumulative test-assertion stat (88 total).
+- `GITHUB-METADATA.md` — dropped the stale v1.0.0 release-notes draft and the `curl ... | sudo bash` install line (would have reintroduced the supply-chain vector that v1.1.0's CRIT-001 fix removed from `deploy.sh`). Releases are sourced from `CHANGELOG.md` at tag time now.
 
 ### Tests
 - pytest: 21 (was 20). Scanner shell: 11. Deploy integration: 54. All green. `systemd-analyze verify` clean on all units.
+
+## [1.3.0] — 2026-05-18 — **WITHDRAWN**
+
+This release was withdrawn ~3 hours after publication. The systemd-unit fix it contained activated a previously-silent `StartLimitBurst=3` that, combined with the 60-second watchdog timer and `FailureAction=reboot`, caused an unbounded reboot loop on the 4th start. See `[1.3.1]` for the corrected release; all v1.3.0 content is included there.
 
 ## [1.2.1] — 2026-05-10
 
@@ -59,7 +70,7 @@ For operators on an earlier install, see PR #5 for a step-by-step migration.
   - State-aware: reads `/etc/network/interfaces` to know whether DHCP or static is expected; never kills dhclient on DHCP-configured systems.
   - Heal path: restart nginx → restart `networking.service` → re-evaluate.
   - Reboot path: if healing fails, sends Discord alert with diagnostics, waits 30s, reboots. Post-reboot cycle sends recovery report.
-  - Two-layer anti-reboot-loop protection: script-level (max 2/hour) + systemd-level (`StartLimitBurst=3` + `FailureAction=reboot`).
+  - Two-layer anti-reboot-loop protection: script-level (max 2/hour) + systemd-level (`FailureAction=reboot` as last-resort safety net; `StartLimitBurst=0` because a finite burst limit conflicts with a 60-second timer).
   - Runs as systemd **system** service (root by default) — no sudo, no passwordless access, same privilege model as nginx/networking services.
   - Fully documented in `RUNDOWN.md` with transparency statement, disable instructions, and forensics commands.
 - `deploy.sh` now installs and enables the network watchdog automatically.
