@@ -26,10 +26,44 @@ BLOCK_COUNTRIES=(
 
 mkdir -p "$BLOCKLIST_DIR"
 
-# Download and process each country blocklist
+# Minimum fraction of country lists that must download successfully before we
+# replace the active blocklist. Below this threshold we keep the last known-good
+# rules so a partial outage at ipdeny.com cannot silently shrink coverage.
+: "${GEOIP_MIN_SUCCESS_RATIO:=1.0}"
+
+# Download to .new files first; only promote on success. Track failures so we
+# can fail closed (keep last known-good) when the update is incomplete.
+total=${#BLOCK_COUNTRIES[@]}
+succeeded=0
+failed_countries=()
 for cc in "${BLOCK_COUNTRIES[@]}"; do
-    curl -s -f "https://www.ipdeny.com/ipblocks/data/countries/${cc}.zone" \
-        -o "${BLOCKLIST_DIR}/${cc}.zone" 2>/dev/null || true
+    if curl -s -f --max-time 30 "https://www.ipdeny.com/ipblocks/data/countries/${cc}.zone" \
+            -o "${BLOCKLIST_DIR}/${cc}.zone.new" 2>/dev/null \
+        && [ -s "${BLOCKLIST_DIR}/${cc}.zone.new" ]; then
+        succeeded=$((succeeded + 1))
+    else
+        rm -f "${BLOCKLIST_DIR}/${cc}.zone.new"
+        failed_countries+=("$cc")
+    fi
+done
+
+required=$(awk -v t="$total" -v r="$GEOIP_MIN_SUCCESS_RATIO" 'BEGIN { v = t * r; printf "%d", (v == int(v) ? v : int(v) + 1) }')
+if [ "$succeeded" -lt "$required" ]; then
+    # Fail closed: drop staged downloads, keep current active rules untouched.
+    for cc in "${BLOCK_COUNTRIES[@]}"; do
+        rm -f "${BLOCKLIST_DIR}/${cc}.zone.new"
+    done
+    echo "GeoIP update FAILED: only $succeeded/$total country lists fetched (need $required)." >&2
+    echo "GeoIP update FAILED: failed countries: ${failed_countries[*]:-none}" >&2
+    echo "GeoIP update FAILED: keeping last known-good blocklist; active nftables rules unchanged." >&2
+    logger -t loxprox-geoip -p user.err "GeoIP update failed: ${succeeded}/${total} lists, failed=[${failed_countries[*]:-none}]; kept last known-good"
+    exit 1
+fi
+
+# Promote staged files atomically (per file) into the active blocklist.
+for cc in "${BLOCK_COUNTRIES[@]}"; do
+    [ -f "${BLOCKLIST_DIR}/${cc}.zone.new" ] || continue
+    mv -f "${BLOCKLIST_DIR}/${cc}.zone.new" "${BLOCKLIST_DIR}/${cc}.zone"
 done
 
 # Build nftables set
@@ -40,7 +74,7 @@ done
     echo "    type ipv4_addr"
     echo "    flags interval"
     echo "    elements = {"
-    
+
     first=true
     for cc in "${BLOCK_COUNTRIES[@]}"; do
         [ -f "${BLOCKLIST_DIR}/${cc}.zone" ] || continue
@@ -54,7 +88,7 @@ done
             fi
         done < "${BLOCKLIST_DIR}/${cc}.zone"
     done
-    
+
     echo "    }"
     echo "}"
 } > "$NFTABLES_GEOIP"
