@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 > **v1.3.0 was withdrawn on 2026-05-18 — do not use.** The systemd unit change in v1.3.0 (moving `StartLimit*` from `[Service]` to `[Unit]`) activated a previously-silent `StartLimitBurst=3` that, combined with the watchdog's 60-second timer and `FailureAction=reboot`, caused an unbounded reboot loop on the 4th start. **v1.3.1 supersedes v1.3.0** and contains the same fixes plus the burst-value correction. Install v1.3.1 or later.
 
+## [1.3.2] — 2026-05-21
+
+### Fixed (Third-Party Audit Sweep — 5/5 findings resolved)
+- **HIGH**: `deploy.sh:validate_network()` — regex was shape-only and accepted impossible CIDRs such as `999.999.1.0/24`. Bad `LAN_SUBNET` or `SSH_ALLOWED_SUBNETS` inputs could pass preflight and produce invalid or unintended firewall behaviour at nftables reload. Tightened to require each octet 0–255 (matching `validate_ip` strictness), with optional `ipcalc -c` fallback. Regression tests added for octet-overflow, 3-octet, and alpha-octet inputs.
+- **MED**: `deploy.sh:preflight()` — `LAN_SUBNET` was validated but each entry of `SSH_ALLOWED_SUBNETS` was not. Malformed entries were accepted until nftables reload time, where deployment failed late or behaved unpredictably. Preflight now iterates the array and runs the same CIDR validator on every entry; empty array refuses to deploy.
+- **MED**: `security-monitoring/geoip-block.sh` — every `curl` was `|| true`, so a complete (or partial) download outage at ipdeny.com silently shrank coverage while operators believed GeoIP blocking was fresh. Made the update path fail closed: each list downloads to `${cc}.zone.new`; only when `GEOIP_MIN_SUCCESS_RATIO` (default `1.0`) of fetches succeed are the staged files promoted. Otherwise active rules are left untouched, an error is logged via `logger -p user.err`, and the script exits non-zero so cron mail / monitoring picks it up.
+- **MED**: `deploy.sh:setup_alerting()` — the 15-minute cron writes `/var/lib/loxprox/last-error-count`, but the directory was only created later by `setup_security_monitoring()`. On a pristine host with `ALERT_EMAIL` set, the first cron tick failed silently. `setup_alerting()` now `mkdir -p /var/lib/loxprox` (mode 0750) up front.
+- **LOW**: `deploy.sh:configure_crowdsec()` — comment block claimed "pinned versions" while installs use rolling collection names (cscli does not support `@version` tags on `collections install`). Rewrote the comment to reflect reality: determinism is provided by skipping `cscli hub upgrade` on every deploy and by operator-driven upgrade after staging validation, not by version pins.
+
+### Tests
+- `tests/test_deploy_integration.sh` — added four `validate_network()` regression cases (octet >255, 256-edge, 3-octet CIDR, alpha-octet CIDR). Deploy integration suite: 64 assertions (was 60). Scanner shell suite: 11. All green.
+
 ## [1.3.1] — 2026-05-18 (supersedes withdrawn v1.3.0)
 
 ### Fixed (regression from v1.3.0)

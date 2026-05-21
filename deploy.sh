@@ -201,8 +201,14 @@ validate_ip() {
 }
 
 validate_network() {
+    # Strict CIDR validation: each octet 0-255, prefix 0-32.
+    # Shape-only checks (e.g. accepting 999.999.1.0/24) would slip through
+    # preflight and yield invalid or unintended firewall behavior at reload.
     local cidr="$1"
-    if [[ "$cidr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/([0-9]|[12][0-9]|3[0-2])$ ]]; then
+    if [[ "$cidr" =~ ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)/([0-9]|[12][0-9]|3[0-2])$ ]]; then
+        return 0
+    fi
+    if command -v ipcalc &>/dev/null && ipcalc -c "$cidr" &>/dev/null; then
         return 0
     fi
     error "Invalid CIDR: $cidr"
@@ -221,6 +227,15 @@ preflight() {
     validate_ip "$LOXONE_IP" || exit 1
     validate_ip "$GATEWAY_IP" || exit 1
     validate_network "$LAN_SUBNET" || exit 1
+
+    if [[ ${#SSH_ALLOWED_SUBNETS[@]} -eq 0 ]]; then
+        error "SSH_ALLOWED_SUBNETS is empty — refusing to deploy (would expose SSH)."
+        exit 1
+    fi
+    local _ssh_subnet
+    for _ssh_subnet in "${SSH_ALLOWED_SUBNETS[@]}"; do
+        validate_network "$_ssh_subnet" || { error "SSH_ALLOWED_SUBNETS contains invalid CIDR: $_ssh_subnet"; exit 1; }
+    done
 
     # Debian 12 check
     if ! grep -q "bookworm\|12" /etc/os-release 2>/dev/null; then
@@ -704,9 +719,11 @@ EOF
     info "Updating CrowdSec hub catalog..."
     cscli hub update || true
 
-    info "Installing collections (pinned versions)..."
-    # Versions are pinned below. Upgrade only after staging validation.
-    # To update: run 'cscli hub list', update the versions here, test, commit.
+    info "Installing collections (rolling, current hub catalog)..."
+    # cscli does not support @version pinning on 'collections install', so these
+    # names resolve to whatever 'cscli hub update' just fetched. Determinism is
+    # provided instead by (a) skipping 'cscli hub upgrade' on every deploy and
+    # (b) operator-driven upgrade after staging validation.
     cscli collections install crowdsecurity/nginx            --error || true
     cscli collections install crowdsecurity/sshd             --error || true
     cscli collections install crowdsecurity/linux            --error || true
@@ -718,9 +735,9 @@ EOF
         cscli collections install crowdsecurity/appsec-virtual-patching --error || true
     fi
 
-    # Intentionally NOT running 'cscli hub upgrade' — unpinned upgrades can
+    # Intentionally NOT running 'cscli hub upgrade' — uncontrolled upgrades can
     # break parsers or scenarios. Upgrade manually after testing in staging.
-    info "Hub components installed (pinned). Run 'cscli hub upgrade' manually when validated."
+    info "Hub components installed. Run 'cscli hub upgrade' manually when validated."
 
     # Whitelist trusted IPs
     info "Writing CrowdSec whitelist..."
@@ -864,6 +881,11 @@ setup_alerting() {
 
     banner "Mail Alerting"
     command -v mail &>/dev/null || apt-get install -y mailutils bsd-mailx
+
+    # Cron writes /var/lib/loxprox/last-error-count; create the dir up front so
+    # alerting works on a pristine host even before setup_security_monitoring runs.
+    mkdir -p /var/lib/loxprox
+    chmod 0750 /var/lib/loxprox
 
     cat > /etc/cron.d/loxprox-alert <<EOF
 */15 * * * * root prev=\$(cat /var/lib/loxprox/last-error-count 2>/dev/null || echo 0); curr=\$(wc -l < /var/log/nginx/loxone-error.log 2>/dev/null || echo 0); echo "\$curr" > /var/lib/loxprox/last-error-count; [ \$((curr - prev)) -gt 100 ] && echo "High error rate: \$((curr - prev)) new errors in 15 min" | mail -s "Loxone Gateway Alert" "$ALERT_EMAIL"

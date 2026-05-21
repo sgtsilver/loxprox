@@ -114,6 +114,12 @@ test_validate_network() {
     if validate_network "0.0.0.0/0"; then pass "0/0 accepted"; else fail "0/0 rejected"; fi
     if ! validate_network "192.168.1.0" 2>/dev/null; then pass "missing prefix rejected"; else fail "missing prefix accepted"; fi
     if ! validate_network "192.168.1.0/33" 2>/dev/null; then pass "prefix >32 rejected"; else fail "prefix >32 accepted"; fi
+
+    # Octet validation (audit HIGH): impossible networks must be rejected.
+    if ! validate_network "999.999.1.0/24" 2>/dev/null; then pass "999.999.1.0/24 rejected (octet >255)"; else fail "999.999.1.0/24 accepted (octet >255)"; fi
+    if ! validate_network "192.168.256.0/24" 2>/dev/null; then pass "256 octet rejected"; else fail "256 octet accepted"; fi
+    if ! validate_network "192.168.1/24" 2>/dev/null; then pass "3-octet CIDR rejected"; else fail "3-octet CIDR accepted"; fi
+    if ! validate_network "abc.def.ghi.jkl/24" 2>/dev/null; then pass "alpha CIDR rejected"; else fail "alpha CIDR accepted"; fi
 }
 
 test_apply_sysctls() {
