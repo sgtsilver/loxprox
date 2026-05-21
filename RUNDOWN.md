@@ -2,8 +2,8 @@
 
 **Status:** Published on GitHub  
 **Repo:** https://github.com/sgtsilver/loxprox  
-**Version:** 1.3.1 (released)  
-**Last updated:** 2026-05-18 (v1.3.1 supersedes withdrawn v1.3.0 — watchdog StartLimitBurst fix)
+**Version:** 1.3.2 (released)  
+**Last updated:** 2026-05-21 (v1.3.2 — third-party audit sweep: CIDR validation, SSH subnet validation, GeoIP fail-closed, alert dir bootstrap, CrowdSec wording)
 
 ---
 
@@ -189,7 +189,7 @@ These settings are configured on the repo and affect how code lands in `main`:
 | Branch protection on `main` | ✅ Active | Requires PR + 1 approval + all CI checks pass |
 | Dependabot (Actions) | ✅ Active | Weekly checks; auto-opens PRs for action updates |
 | Secret scanning | ⏭️ Skipped | LAN-only project; no secrets committed |
-| Releases | ✅ Published | `v1.1.0`, `v1.2.0`, `v1.2.1`, `v1.3.1` (latest). v1.3.0 was withdrawn — do not install. See [Releases](https://github.com/sgtsilver/loxprox/releases). |
+| Releases | ✅ Published | `v1.1.0`, `v1.2.0`, `v1.2.1`, `v1.3.1`, `v1.3.2` (latest). v1.3.0 was withdrawn — do not install. See [Releases](https://github.com/sgtsilver/loxprox/releases). |
 
 ### Developer workflow (after branch protection)
 
