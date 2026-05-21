@@ -95,8 +95,74 @@ done
 
 echo "GeoIP blocklist updated: $(wc -l < "$NFTABLES_GEOIP") lines"
 
-# Reload via /etc/nftables.conf so the set is loaded inside table inet filter
-nft -c -f /etc/nftables.conf \
-    && nft -f /etc/nftables.conf \
-    && echo "nftables reloaded" \
-    || echo "nftables syntax check failed — rules not applied"
+# Update the live kernel set incrementally. A single atomic `nft -f` of the
+# full ruleset fails with "No buffer space available" once the set passes
+# ~20 000 CIDRs — the netlink message representing the transaction exceeds
+# what the kernel will accept in one shot (independent of socket buffer
+# sysctls; see issue #11). We instead flush the existing set and add elements
+# in small batches, each as its own netlink message.
+#
+# Persistent file `/etc/nftables.d/99-geoip.conf` is still updated above so
+# that the set is repopulated at boot via the normal nftables.service reload
+# (the boot-time path starts from empty kernel state and currently fits in
+# a single transaction; see issue #11 for the long-term plan).
+
+GEOIP_BATCH_SIZE="${GEOIP_BATCH_SIZE:-1000}"
+
+if nft list set inet filter geoip_blocklist >/dev/null 2>&1; then
+    echo "Updating live geoip_blocklist set in batches of ${GEOIP_BATCH_SIZE}..."
+    if ! nft flush set inet filter geoip_blocklist 2>/dev/null; then
+        echo "FAILED: could not flush live geoip_blocklist set." >&2
+        logger -t loxprox-geoip -p user.err "Live set flush failed; on-disk file is updated but kernel state is stale"
+        exit 1
+    fi
+
+    batch_file=$(mktemp)
+    trap 'rm -f "$batch_file"' EXIT
+    added=0
+    batch_count=0
+    : > "$batch_file"
+
+    flush_batch() {
+        [ -s "$batch_file" ] || return 0
+        if ! nft add element inet filter geoip_blocklist "{ $(cat "$batch_file") }" 2>/dev/null; then
+            echo "FAILED: nft add element rejected batch #${batch_count} (size ~${GEOIP_BATCH_SIZE})." >&2
+            logger -t loxprox-geoip -p user.err "Live set partial update — batch ${batch_count} failed at ${added} elements"
+            exit 1
+        fi
+        batch_count=$((batch_count + 1))
+        : > "$batch_file"
+    }
+
+    # Stream every CIDR from every promoted country file; build comma-separated batches.
+    for cc in "${BLOCK_COUNTRIES[@]}"; do
+        [ -f "${BLOCKLIST_DIR}/${cc}.zone" ] || continue
+        while read -r cidr; do
+            [[ "$cidr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]] || continue
+            if [ -s "$batch_file" ]; then
+                echo -n "," >> "$batch_file"
+            fi
+            echo -n "$cidr" >> "$batch_file"
+            added=$((added + 1))
+            if [ $((added % GEOIP_BATCH_SIZE)) -eq 0 ]; then
+                flush_batch
+            fi
+        done < "${BLOCKLIST_DIR}/${cc}.zone"
+    done
+    flush_batch
+
+    rm -f "$batch_file"
+    trap - EXIT
+    echo "Live set updated: ${added} CIDRs in ${batch_count} batches."
+else
+    # First-deploy path: the set doesn't exist yet, so we need the full ruleset
+    # load via /etc/nftables.conf to declare it. Smaller-set case, single shot
+    # is fine here.
+    if nft -c -f /etc/nftables.conf && nft -f /etc/nftables.conf; then
+        echo "nftables reloaded (first-deploy path)."
+    else
+        echo "FAILED: nft -f /etc/nftables.conf rejected the ruleset." >&2
+        logger -t loxprox-geoip -p user.err "First-deploy reload failed; geoip_blocklist set not declared"
+        exit 1
+    fi
+fi

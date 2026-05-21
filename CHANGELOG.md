@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 > **v1.3.0 was withdrawn on 2026-05-18 — do not use.** The systemd unit change in v1.3.0 (moving `StartLimit*` from `[Service]` to `[Unit]`) activated a previously-silent `StartLimitBurst=3` that, combined with the watchdog's 60-second timer and `FailureAction=reboot`, caused an unbounded reboot loop on the 4th start. **v1.3.1 supersedes v1.3.0** and contains the same fixes plus the burst-value correction. Install v1.3.1 or later.
 
+## [1.3.3] — 2026-05-21
+
+### Fixed
+- **HIGH**: `security-monitoring/geoip-block.sh` — the final `nft -c -f /etc/nftables.conf && nft -f /etc/nftables.conf` step failed with `netlink: Error: Could not process rule: No buffer space available` once the blocklist passed ~20 000 CIDRs. The error is a netlink message-size limit (independent of `net.core.rmem_max` / `wmem_max` socket buffer sysctls — confirmed live by bumping them to 8 MB with no effect). Symptom: `/etc/nftables.d/99-geoip.conf` updated daily, but kernel state silently stale after first boot. The boot path was not affected (kernel state empty at that point fits in a single transaction). Replaced the single atomic reload with an incremental loader: `nft flush set inet filter geoip_blocklist` followed by `nft add element inet filter geoip_blocklist { … }` in batches of `GEOIP_BATCH_SIZE` (default 1000) — each batch is its own small netlink message. First-deploy path (set not declared yet) still uses the full `nft -f /etc/nftables.conf` reload to declare the set. Fail closed: a failed flush or any failed batch exits non-zero and logs via `logger -p user.err`. (#11)
+
+### Notes
+- New optional env var: `GEOIP_BATCH_SIZE` (default `1000`). Lower it on extremely memory-constrained hosts; raise it if you want fewer netlink round-trips.
+- Tests: shellcheck/syntax clean. End-to-end validated on the production VM (22 061 CIDRs → 11 031 interval-merged set entries, 23 batches, exit 0).
+
 ## [1.3.2] — 2026-05-21
 
 ### Fixed (Third-Party Audit Sweep — 5/5 findings resolved)
