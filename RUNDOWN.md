@@ -34,7 +34,7 @@ Internet ──► Router:1080 ──► Gateway:1080 ──► Loxone:80
 
 | File | Purpose |
 |------|---------|
-| `deploy.sh` | One-shot Debian 12 hardening & installation (~1240 lines, idempotent) |
+| `deploy.sh` | One-shot Debian 12 hardening & installation (~1265 lines, idempotent) |
 | `detect-loxone.sh` | Network autodetector — finds your Miniserver by MAC OUI and API fingerprint |
 | `test-gateway.sh` | 50+ automated checks — run after deploy to verify every control |
 | `set-static-ip.sh` | Pre-deploy VM network configuration |
@@ -257,7 +257,7 @@ All 23 findings from the 2026-05-06 Ezio audit have been addressed:
 tests/
 ├── run-tests.sh              # unified test runner
 ├── test_progressive_ban.py   # 21 pytest cases for ban script
-├── test_deploy_integration.sh # 54 assertions for deploy.sh logic
+├── test_deploy_integration.sh # 64 assertions for deploy.sh logic
 └── test_detect_loxone.sh     # 11 assertions for scanner logic
 ```
 
