@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 > **v1.3.0 was withdrawn on 2026-05-18 — do not use.** The systemd unit change in v1.3.0 (moving `StartLimit*` from `[Service]` to `[Unit]`) activated a previously-silent `StartLimitBurst=3` that, combined with the watchdog's 60-second timer and `FailureAction=reboot`, caused an unbounded reboot loop on the 4th start. **v1.3.1 supersedes v1.3.0** and contains the same fixes plus the burst-value correction. Install v1.3.1 or later.
 
+## [1.3.4] — 2026-05-22
+
+### Security
+
+- **HIGH — supply chain**: `deploy.sh` and `phase2-gateway/install-gateway.sh` now cross-verify the CrowdSec packagecloud GPG key against three independent public keyservers (`keys.openpgp.org`, `keyserver.ubuntu.com`, `pgp.surf.nl`) before importing it. Previously the key was Trust-On-First-Use: an attacker with first-install MITM (rogue CA, hostile resolver, CDN compromise) could substitute the key and serve attacker-signed `crowdsec` packages. The verifier extracts the primary fingerprint from the freshly-downloaded primary key, queries each keyserver for the same fingerprint, and refuses to import if any keyserver returns a *different* fingerprint (positive attack signal — always fatal). Below the quorum threshold (`LOXPROX_GPG_QUORUM=2`), behaviour is controlled by `LOXPROX_GPG_VERIFY_MODE`: `soft` (default) warns and falls back to TOFU when keyservers are unreachable; `hard` aborts. No fingerprint is hardcoded — when CrowdSec rotates keys, the keyservers reflect the rotation automatically and no script update is required. Only affects fresh installs (existing deployments keep their already-imported keyring untouched, since the install block is gated by `command -v cscli`).
+
+- **MED — kernel hardening (CVE-2026-46300 "Fragnesia")**: `apply_sysctls()` now sets `kernel.unprivileged_userns_clone = 0`. Fragnesia is an unpatched Linux XFRM ESP-in-TCP LPE (CVSS 7.8, public PoC) that requires unprivileged user namespaces to reach the vulnerable code path. The gateway VM has no legitimate use for unprivileged userns (no containers, no sandboxed browsers, no non-root processes that need them), so disabling them removes the exploit prerequisite at zero functional cost. Mitigation lands as a runtime change on `deploy.sh` re-run; on the production VM it was applied live via `/etc/sysctl.d/95-loxprox-userns.conf` prior to this release.
+
+### Notes — upstream patches applied via apt (not part of this release, but related)
+
+- **DSA-6278-1** (16 May 2026) — nginx `1.22.1-9+deb12u4 → +deb12u7`. Covers CVE-2026-40701, -42934, -42945, **-42946** (SCGI/uWSGI memory disclosure, only exploitable when `scgi_pass`/`uwsgi_pass` is configured — LoxProx does not configure either), -40460. Pulled in by `apt upgrade` on 2026-05-22.
+- **DSA-6275-1** (15 May 2026) — linux kernel `6.1.170-1 → 6.1.172-1`. Fixes CVE-2026-46333 (kernel LPE). Reboot required to activate; auto-reboot at `AUTOREBOOT_TIME` (default 03:00) will pick it up.
+- **CrowdSec** `1.7.7 → 1.7.8` — routine upstream maintenance release, no security-tracker advisory.
+
+### Tests
+- `tests/test_deploy_integration.sh` — added two regression cases:
+  - `apply_sysctls()` emits `kernel.unprivileged_userns_clone = 0`
+  - `verify_crowdsec_key` function is defined and references all three keyserver hosts
+- Deploy integration suite: 68 assertions (was 64). Scanner shell: 11. All green.
+
+### Operator action required
+
+- **No action for existing installs.** The GPG fingerprint pin only fires on fresh installs (when `cscli` is absent). Existing deployments keep their already-trusted keyring.
+- **Re-run `deploy.sh`** on existing installs to pick up the Fragnesia sysctl. Or apply manually:
+  ```
+  echo "kernel.unprivileged_userns_clone = 0" | sudo tee /etc/sysctl.d/95-loxprox-userns.conf
+  sudo sysctl --system
+  ```
+- **Apply kernel + nginx DSAs** via `sudo apt update && sudo apt upgrade` if `unattended-upgrades` has not already done so. Kernel patch activates on reboot.
+
 ## [1.3.3] — 2026-05-21
 
 ### Fixed

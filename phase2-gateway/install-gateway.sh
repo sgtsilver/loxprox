@@ -77,7 +77,11 @@ systemctl restart nginx
 systemctl enable nginx
 
 echo "[+] Installing CrowdSec..."
-# GPG-pinned install — no curl|bash vector
+# GPG-verified install with multi-source fingerprint cross-check.
+# Soft-fail (LOXPROX_GPG_VERIFY_MODE=soft, default): warn + fall back to TOFU
+#   if quorum of public keyservers is unreachable.
+# Hard-fail (=hard): abort when quorum can't be reached.
+# Any CONFLICTING fingerprint is always fatal — that's a positive attack signal.
 KEYRING="/etc/apt/keyrings/crowdsec-archive-keyring.gpg"
 TMP_KEY=$(mktemp)
 curl -fsSL -o "$TMP_KEY" "https://packagecloud.io/crowdsec/crowdsec/gpgkey"
@@ -86,6 +90,63 @@ if ! gpg --dry-run --import "$TMP_KEY" &>/dev/null; then
     echo "ERROR: CrowdSec GPG key download failed or is invalid."
     exit 1
 fi
+
+GPG_MODE="${LOXPROX_GPG_VERIFY_MODE:-soft}"
+GPG_QUORUM="${LOXPROX_GPG_QUORUM:-2}"
+PRIMARY_FPR=$(gpg --show-keys --with-fingerprint --with-colons "$TMP_KEY" 2>/dev/null \
+              | awk -F: '$1=="fpr" {print $10; exit}')
+if [ -z "$PRIMARY_FPR" ]; then
+    rm -f "$TMP_KEY"
+    echo "ERROR: could not extract fingerprint from CrowdSec GPG key."
+    exit 1
+fi
+echo "    Primary fingerprint: $PRIMARY_FPR"
+
+# Independent keyservers (different operators, DNS, TLS PKI).
+GPG_SOURCES=(
+    "https://keys.openpgp.org/vks/v1/by-fingerprint/${PRIMARY_FPR}"
+    "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x${PRIMARY_FPR}&options=mr"
+    "https://pgp.surf.nl/pks/lookup?op=get&search=0x${PRIMARY_FPR}&options=mr"
+)
+AGREE=0; CONFLICT=0; UNREACHABLE=0
+for URL in "${GPG_SOURCES[@]}"; do
+    KS_TMP=$(mktemp)
+    if ! curl -fsSL --max-time 15 -o "$KS_TMP" "$URL" 2>/dev/null; then
+        UNREACHABLE=$((UNREACHABLE + 1))
+        echo "    unreachable: ${URL%%\?*}"
+        rm -f "$KS_TMP"; continue
+    fi
+    KS_FPR=$(gpg --show-keys --with-fingerprint --with-colons "$KS_TMP" 2>/dev/null \
+             | awk -F: '$1=="fpr" {print $10; exit}')
+    rm -f "$KS_TMP"
+    if [ -z "$KS_FPR" ]; then
+        UNREACHABLE=$((UNREACHABLE + 1))
+        echo "    parse failure: ${URL%%\?*}"
+        continue
+    fi
+    if [ "$KS_FPR" = "$PRIMARY_FPR" ]; then
+        AGREE=$((AGREE + 1))
+        echo "    agree:       ${URL%%\?*}"
+    else
+        CONFLICT=$((CONFLICT + 1))
+        echo "    CONFLICT:    ${URL%%\?*} returned $KS_FPR"
+    fi
+done
+if [ "$CONFLICT" -gt 0 ]; then
+    rm -f "$TMP_KEY"
+    echo "ERROR: ${CONFLICT} keyserver(s) returned a different fingerprint — refusing to install."
+    exit 1
+fi
+if [ "$AGREE" -ge "$GPG_QUORUM" ]; then
+    echo "    cross-verified (${AGREE}/${#GPG_SOURCES[@]} sources agree)."
+elif [ "$GPG_MODE" = "hard" ]; then
+    rm -f "$TMP_KEY"
+    echo "ERROR: GPG quorum not met (${AGREE}/${GPG_QUORUM}, ${UNREACHABLE} unreachable). Aborting (mode=hard)."
+    exit 1
+else
+    echo "    WARN: GPG quorum not met (${AGREE}/${GPG_QUORUM}, ${UNREACHABLE} unreachable). Continuing (mode=soft)."
+fi
+
 gpg --dearmor < "$TMP_KEY" > "$KEYRING"
 rm -f "$TMP_KEY"
 echo "deb [signed-by=${KEYRING}] https://packagecloud.io/crowdsec/crowdsec/debian bookworm main" \
