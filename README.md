@@ -1,287 +1,288 @@
-# LoxProx — Hardened Gateway for Loxone Miniservers
+**Sprache:** Deutsch · [English](README.en.md)
 
-[![License: Non-Commercial](https://img.shields.io/badge/License-Non--Commercial-red.svg)](#license)
+# LoxProx — Abgesichertes Gateway für Loxone Miniserver
+
+[![License: Non-Commercial](https://img.shields.io/badge/License-Non--Commercial-red.svg)](#lizenz)
 [![Validation: A-](https://img.shields.io/badge/Validation-A--_brightgreen)]()
 [![Debian 12](https://img.shields.io/badge/Debian-12-A81D33?logo=debian)]()
 [![CIS Hardened](https://img.shields.io/badge/CIS-Hardened-blue)]()
 [![Shellcheck](https://img.shields.io/badge/Shellcheck-passing-brightgreen)]()
 
-> **A drop-in security gateway for Loxone Miniserver Gen 1.** No TLS, no built-in auth, no rate limits — this gateway adds every protection the hardware lacks, transparently.
+> **Ein sofort einsatzbereites Security-Gateway für den Loxone Miniserver Gen 1.** Kein TLS, keine eingebaute Auth, keine Rate Limits — dieses Gateway ergänzt transparent jeden Schutz, den die Hardware vermissen lässt.
 
-## About This Project
+## Über das Projekt
 
-**Idea & Infrastructure:** [sgtsilver](https://github.com/sgtsilver) — who wanted to secure a Loxone Miniserver without keeping a VPN connected around the clock, and provided the hardware, network context, and real-world constraints to make it happen.
+**Idee & Infrastruktur:** [sgtsilver](https://github.com/sgtsilver) — wollte seinen Loxone Miniserver absichern, ohne dauerhaft ein VPN aufrechtzuerhalten, und brachte Hardware, Netzwerk-Kontext und die realen Constraints ein.
 
-**Design & Implementation:** [Kimi](https://www.kimi.com) ([Moonshot AI](https://www.moonshot.ai)) — who researched Loxone Gen 1 vulnerabilities, architected the six-layer defense stack, wrote all code, and produced the test suite and documentation. Every line of shell script, every nftables rule, and every sysctl parameter was selected and validated by an AI systems engineer working from first principles.
+**Design & Implementierung:** [Kimi](https://www.kimi.com) ([Moonshot AI](https://www.moonshot.ai)) — recherchierte die Schwachstellen von Loxone Gen 1, entwarf den sechsschichtigen Schutz-Stack, schrieb sämtlichen Code und erstellte Tests und Dokumentation. Jede Zeile Shell-Script, jede nftables-Regel und jeder sysctl-Parameter wurde von einer KI als Systemingenieurin aus ersten Prinzipien gewählt und validiert.
 
-This is an experiment in **AI-led infrastructure hardening**: a human defines the problem and the constraints; the AI designs, implements, tests, and documents the complete solution.
-
----
-
-## The Problem
-
-The Loxone Miniserver Gen 1 is **legacy first-generation hardware** with:
-- ❌ No HTTPS/TLS support (CPU too weak for SSL)
-- ❌ No native rate limiting
-- ❌ No IP-based access control
-- ❌ No audit logging
-- ❌ No multi-factor authentication for web/API access
-- ❌ Passwords in config XML are encrypted, not hashed
-- ⚠️ Firmware updates have slowed significantly; the last known security patch was in 2020 (Cloud DNS vulnerability CVE-2020-27488). New security features (TLS, Remote Connect, Trusts) are Gen 2+ only.
-
-It is the definition of a *legacy device that must be protected by the network layer*.
-
-This gateway exists because the Miniserver cannot protect itself.
+Das hier ist ein Experiment in **KI-geführter Infrastruktur-Absicherung**: Ein Mensch definiert Problem und Constraints; die KI entwirft, implementiert, testet und dokumentiert die komplette Lösung.
 
 ---
 
-## Architecture
+## Das Problem
+
+Der Loxone Miniserver Gen 1 ist **Hardware der ersten Generation** mit:
+- ❌ Keine HTTPS/TLS-Unterstützung (CPU zu schwach für SSL)
+- ❌ Kein natives Rate Limiting
+- ❌ Keine IP-basierte Zugriffskontrolle
+- ❌ Kein Audit-Logging
+- ❌ Keine Multi-Faktor-Authentifizierung für Web/API-Zugriff
+- ❌ Passwörter in der Config-XML sind verschlüsselt, nicht gehasht
+- ⚠️ Firmware-Updates kommen nur noch im Schneckentempo; der letzte bekannte Security-Patch war 2020 (Cloud-DNS-Lücke CVE-2020-27488). Neue Sicherheits-Features (TLS, Remote Connect, Trusts) gibt es ausschließlich ab Gen 2.
+
+Die Definition eines *Legacy-Geräts, das auf der Netzwerkebene geschützt werden muss*.
+
+Dieses Gateway existiert, weil der Miniserver sich selbst nicht schützen kann.
+
+---
+
+## Architektur
 
 ```
-Internet ──► Router:1080 ──► Security Gateway:1080 ──► Loxone:80
+Internet ──► Router:1080 ──► Security-Gateway:1080 ──► Loxone:80
                                     │
-                                    ├── nginx (proxy, rate limits, headers)
-                                    ├── CrowdSec (IDS, CAPI blocks, AppSec WAF)
-                                    ├── nftables (input DROP, allow :1080 + SSH)
-                                    ├── AppArmor (nginx profile enforced)
-                                    ├── auditd (config change monitoring)
-                                    └── Discord alerts (real-time notifications)
+                                    ├── nginx (Proxy, Rate Limits, Header)
+                                    ├── CrowdSec (IDS, CAPI-Blocks, AppSec WAF)
+                                    ├── nftables (Input DROP, erlaubt :1080 + SSH)
+                                    ├── AppArmor (nginx-Profil aktiv)
+                                    ├── auditd (Config-Änderungs-Überwachung)
+                                    └── Discord-Alerts (Echtzeit-Benachrichtigungen)
 
-LAN (192.168.x.0/24) ──────► Loxone:80  (direct, bypasses gateway)
+LAN (192.168.x.0/24) ──────► Loxone:80  (direkt, am Gateway vorbei)
 ```
 
-**Design principle:** LAN devices reach Loxone directly. Only internet traffic passes through the gateway. This means LAN users are unaffected, and the gateway can focus entirely on external threats.
+**Design-Prinzip:** LAN-Geräte erreichen den Miniserver direkt. Nur Internet-Traffic läuft durch das Gateway. Heißt: LAN-Geräte bleiben unberührt, und das Gateway kann sich voll auf externe Bedrohungen konzentrieren.
 
-> 🕵️ **What's next?** We've been exploring whether loxprox could one day bridge Gen 1 Miniservers to the outside world — without a VPN, without hardware upgrades. The research rabbit hole went deeper than expected. If you're curious, [#4](https://github.com/sgtsilver/loxprox/issues/4) has the full story (and the caveats).
+> 🕵️ **Was kommt als Nächstes?** Wir haben überlegt, ob LoxProx eines Tages Gen-1-Miniserver ohne VPN und ohne Hardware-Upgrade nach außen anbinden könnte. Die Recherche ging tiefer als erwartet. Wer neugierig ist — in [#4](https://github.com/sgtsilver/loxprox/issues/4) steht die ganze Geschichte (samt aller Vorbehalte).
 
 ---
 
-## Project Structure
+## Projekt-Struktur
 
 ```
 loxprox/
-├── deploy.sh                          # ★ MAIN DEPLOY SCRIPT — run on target
-├── detect-loxone.sh                   # ★ AUTO-DETECT your Miniserver IP
-├── test-gateway.sh                    # ★ VALIDATION SUITE — 50+ automated checks
-├── progressive-ban.py                 # CrowdSec progressive-ban escalator (cron, 15min)
-├── set-static-ip.sh                   # VM network pre-configuration
-├── CONFIGURATION-GUIDE.md             # ★ Explains every setting in deploy.sh
-├── .env.example                       # Configuration template
-├── README.md                          # This file
-├── SECURITY.md                        # Threat model, incident response, hardening
-├── VALIDATION-REPORT.html             # Independent security audit (2026 frameworks)
+├── deploy.sh                          # ★ HAUPT-DEPLOY-SCRIPT — auf der Ziel-VM laufen lassen
+├── detect-loxone.sh                   # ★ AUTO-ERKENNUNG deines Miniservers
+├── test-gateway.sh                    # ★ VALIDIERUNGS-SUITE — 50+ automatisierte Checks
+├── progressive-ban.py                 # CrowdSec Progressive-Ban-Eskalator (Cron, 15 Min)
+├── set-static-ip.sh                   # Netzwerk-Vorkonfiguration der VM
+├── CONFIGURATION-GUIDE.md             # ★ Erklärt jede Einstellung in deploy.sh
+├── .env.example                       # Konfigurations-Template
+├── README.md                          # Diese Datei (Deutsch)
+├── README.en.md                       # English version
+├── SECURITY.md                        # Bedrohungsmodell, Incident Response, Härtung
+├── VALIDATION-REPORT.html             # Unabhängiges Security-Audit (Frameworks 2026)
 ├── LICENSE                            # Non-Commercial
-├── CONTRIBUTING.md                    # Contribution guidelines
-├── CHANGELOG.md                       # Version history
-├── phase1-hardening.md                # Proxmox firewall + Loxone hardening
+├── CONTRIBUTING.md                    # Beitrags-Richtlinien
+├── CHANGELOG.md                       # Versionshistorie
+├── phase1-hardening.md                # Proxmox-Firewall + Loxone-Härtung
 ├── phase2-gateway/
-│   ├── nginx-loxone.conf              # Nginx reverse proxy config (reference)
-│   ├── crowdsec-acquis.yaml           # CrowdSec log source config (reference)
-│   └── sysctls.conf                   # Kernel tuning (reference)
-├── phase3-cutover.md                  # Router + firewall cutover steps
-├── phase4-monitoring.md               # Monitoring, log rotation, tuning
+│   ├── nginx-loxone.conf              # nginx Reverse-Proxy-Config (Referenz)
+│   ├── crowdsec-acquis.yaml           # CrowdSec Log-Quellen (Referenz)
+│   └── sysctls.conf                   # Kernel-Tuning (Referenz)
+├── phase3-cutover.md                  # Router- und Firewall-Umstellung
+├── phase4-monitoring.md               # Monitoring, Log-Rotation, Tuning
 ├── security-monitoring/
-│   ├── discord-alert.sh               # Discord webhook dispatcher
-│   ├── gateway-monitor.sh             # Security monitor (60s cycle)
-│   ├── network-watchdog.sh            # Network stack self-healing watchdog
-│   ├── network-watchdog.service       # systemd system service (root)
-│   ├── network-watchdog.timer         # systemd timer (60s)
-│   ├── gateway-backup.sh              # Config backup script
-│   ├── geoip-block.sh                 # GeoIP blocking (optional)
-│   ├── loxprox-monitor.service        # systemd service
-│   └── loxprox-monitor.timer          # systemd timer (60s)
-└── assets/                            # Diagrams, screenshots
+│   ├── discord-alert.sh               # Discord-Webhook-Dispatcher
+│   ├── gateway-monitor.sh             # Security-Monitor (60-Sek-Zyklus)
+│   ├── network-watchdog.sh            # Selbstheilender Netzwerk-Watchdog
+│   ├── network-watchdog.service       # systemd-Service (root)
+│   ├── network-watchdog.timer         # systemd-Timer (60 s)
+│   ├── gateway-backup.sh              # Config-Backup-Script
+│   ├── geoip-block.sh                 # GeoIP-Blocking (optional)
+│   ├── loxprox-monitor.service        # systemd-Service
+│   └── loxprox-monitor.timer          # systemd-Timer (60 s)
+└── assets/                            # Diagramme, Screenshots
 ```
 
 ---
 
-## Quick Start
+## Schnellstart
 
-1. **Create a Debian 12 VM or LXC** (1 vCPU, 512MB RAM, 5GB disk minimum).
-2. **Set static IP:** Copy and run `set-static-ip.sh` inside the target.
-3. **Copy `deploy.sh`**, `detect-loxone.sh`, and `.env.example` into the target.
-4. **Find your Loxone:** `chmod +x detect-loxone.sh && ./detect-loxone.sh`
-   - This scans your network and prints the exact IP, MAC, firmware version, and suggested config values.
-5. **Configure:** Open `deploy.sh` and edit the `[REQUIRED]` values at the top. Stuck? Read `CONFIGURATION-GUIDE.md` — it explains every setting with examples.
+1. **Lege eine Debian-12-VM oder einen LXC an** (mindestens 1 vCPU, 512 MB RAM, 5 GB Disk).
+2. **Statische IP setzen:** Kopiere `set-static-ip.sh` in die Ziel-VM und führe es dort aus.
+3. **Kopiere `deploy.sh`**, `detect-loxone.sh` und `.env.example` in die Ziel-VM.
+4. **Finde deinen Loxone:** `chmod +x detect-loxone.sh && ./detect-loxone.sh`
+   - Scannt dein Netz und gibt dir die exakte IP, MAC, Firmware-Version und passende Config-Werte aus.
+5. **Konfigurieren:** Öffne `deploy.sh` und passe die `[REQUIRED]`-Werte oben an. Unsicher? Lies `CONFIGURATION-GUIDE.md` — dort wird jede Einstellung mit Beispielen erklärt.
 6. **Deploy:** `chmod +x deploy.sh && sudo ./deploy.sh`
-7. **Validate:** `sudo bash test-gateway.sh` (50+ automated checks)
-8. **Cut over:** Follow `phase3-cutover.md` to switch router forwarding.
-9. **Monitor:** Follow `phase4-monitoring.md` to tune and observe.
+7. **Validieren:** `sudo bash test-gateway.sh` (50+ automatisierte Checks)
+8. **Umschalten:** Folge `phase3-cutover.md`, um das Router-Forwarding umzuziehen.
+9. **Monitoren:** Folge `phase4-monitoring.md` für Tuning und Beobachtung.
 
-The deploy script is **idempotent** — safe to re-run.
-
----
-
-## What's Deployed
-
-| Layer | Component | Purpose |
-|-------|-----------|---------|
-| 1 | **nftables** | Input DROP by default; SSH restricted to LAN; :1080 open to internet |
-| 2 | **nginx** | Reverse proxy, 10 req/s rate limit, connection caps, security headers, slowloris timeouts |
-| 3 | **CrowdSec** | IDS parsing nginx + SSH logs; CAPI community feed (~26k known bad IPs) |
-| 4 | **Firewall Bouncer** | Pulls CrowdSec decisions → enforces via nftables dynamically |
-| 5 | **AppSec WAF** | Virtual patching (200+ CVE-specific rules); inspects every request before proxying |
-| 6 | **AppArmor** | nginx profile enforced |
-| 7 | **auditd** | Monitors config changes to nginx, crowdsec, nftables, ssh, sudoers |
-| 8 | **unattended-upgrades** | Auto-reboot at 03:00 for kernel patches |
-| 9 | **Security monitor** | 60s cycle: CrowdSec blocks, nginx errors, auth attempts, resource alerts → Discord |
-| 10 | **Network watchdog** | Self-healing monitor: detects network-layer failures (dhclient death-spiral, routing corruption) and auto-recovers via service restart or reboot |
-| 11 | **Log rotation** | 14-day nginx log retention |
-| 12 | **Config backup** | Daily automated backups to `/root/loxprox-backups/` |
+Das Deploy-Script ist **idempotent** — kannst du gefahrlos erneut laufen lassen.
 
 ---
 
-## Hardware Requirements
+## Was deployt wird
 
-### Minimum (Tested Configuration)
+| Schicht | Komponente | Zweck |
+|---------|------------|-------|
+| 1 | **nftables** | Input DROP per Default; SSH nur aus dem LAN; :1080 fürs Internet offen |
+| 2 | **nginx** | Reverse-Proxy, 10 req/s Rate Limit, Connection-Caps, Security-Header, Slowloris-Timeouts |
+| 3 | **CrowdSec** | IDS, parst nginx- und SSH-Logs; CAPI-Community-Feed (~26k bekannte Bad IPs) |
+| 4 | **Firewall Bouncer** | Holt CrowdSec-Entscheidungen ab → setzt sie dynamisch in nftables durch |
+| 5 | **AppSec WAF** | Virtual Patching (200+ CVE-spezifische Regeln); prüft jeden Request, bevor er weitergereicht wird |
+| 6 | **AppArmor** | nginx-Profil aktiv |
+| 7 | **auditd** | Überwacht Config-Änderungen an nginx, crowdsec, nftables, ssh, sudoers |
+| 8 | **unattended-upgrades** | Auto-Reboot um 03:00 für Kernel-Patches |
+| 9 | **Security-Monitor** | 60-Sek-Zyklus: CrowdSec-Blocks, nginx-Fehler, Auth-Versuche, Resource-Alarme → Discord |
+| 10 | **Network Watchdog** | Selbstheilender Monitor: erkennt Netzwerk-Ausfälle (dhclient-Death-Spiral, Routing-Korruption) und repariert automatisch per Service-Restart oder Reboot |
+| 11 | **Log-Rotation** | 14 Tage nginx-Log-Aufbewahrung |
+| 12 | **Config-Backup** | Tägliche automatische Backups nach `/root/loxprox-backups/` |
 
-| Resource | Minimum | Recommended |
-|----------|---------|-------------|
-| CPU | 1 core | 1-2 cores |
+---
+
+## Hardware-Anforderungen
+
+### Minimum (getestete Konfiguration)
+
+| Resource | Minimum | Empfohlen |
+|----------|---------|-----------|
+| CPU | 1 Core | 1–2 Cores |
 | RAM | 512 MB | 1 GB |
 | Disk | 5 GB | 10 GB |
-| OS | Debian 12 (Bookworm) 64-bit | Debian 12 or Ubuntu 22.04 LTS |
+| OS | Debian 12 (Bookworm) 64-bit | Debian 12 oder Ubuntu 22.04 LTS |
 
-The reference deployment runs on a **1 vCPU, 512MB RAM Proxmox LXC** with headroom to spare. The entire security stack (nginx + CrowdSec + AppSec + bouncer) consumes approximately **100–150 MB RAM** under normal home-automation traffic loads.
+Die Referenz-Installation läuft auf einem **1 vCPU, 512 MB RAM Proxmox-LXC** mit Luft nach oben. Der gesamte Security-Stack (nginx + CrowdSec + AppSec + Bouncer) frisst bei normaler Home-Automation-Last etwa **100–150 MB RAM**.
 
-### Raspberry Pi Viability
+### Raspberry Pi
 
-This stack is **designed to be lightweight enough for Raspberry Pi** home automation deployments.
+Der Stack ist **leichtgewichtig genug für Raspberry-Pi-Deployments** im Home-Automation-Umfeld.
 
-| Model | Architecture | RAM | Compatibility | Notes |
-|-------|-------------|-----|---------------|-------|
-| **Pi 5** | ARMv8 (64-bit) | 2–8 GB | ✅ Full | Overkill. Will run effortlessly. |
-| **Pi 4** | ARMv8 (64-bit) | 1–8 GB | ✅ Full | Ideal. Official CrowdSec ARM64 packages available. |
-| **Pi 3** | ARMv8 (64-bit) | 1 GB | ✅ Full | Good fit. Use 64-bit Raspberry Pi OS. |
-| **Pi 2** | ARMv7 (32-bit) | 1 GB | ⚠️ Partial | CrowdSec officially requires 64-bit. Community reports success with 64-bit kernel or manual ARMv7 compile. Not recommended for production without testing. |
-| **Pi 1 / Zero (original)** | ARMv6 | 512 MB | ❌ No | CrowdSec does not provide ARMv6 binaries. |
-| **Pi Zero 2 W** | ARMv8 (64-bit) | 512 MB | ⚠️ Tight | 64-bit OS supported, but 512MB RAM is tight. May need swap and scenario pruning. |
+| Modell | Architektur | RAM | Kompatibilität | Hinweis |
+|--------|-------------|-----|----------------|---------|
+| **Pi 5** | ARMv8 (64-bit) | 2–8 GB | ✅ Voll | Overkill. Läuft mühelos. |
+| **Pi 4** | ARMv8 (64-bit) | 1–8 GB | ✅ Voll | Ideal. Offizielle ARM64-Pakete von CrowdSec verfügbar. |
+| **Pi 3** | ARMv8 (64-bit) | 1 GB | ✅ Voll | Guter Fit. 64-bit Raspberry Pi OS verwenden. |
+| **Pi 2** | ARMv7 (32-bit) | 1 GB | ⚠️ Teilweise | CrowdSec verlangt offiziell 64-bit. Community berichtet Erfolge mit 64-bit-Kernel oder manuellem ARMv7-Build. Ohne Tests für Produktion nicht empfohlen. |
+| **Pi 1 / Zero (original)** | ARMv6 | 512 MB | ❌ Nein | Keine ARMv6-Binaries von CrowdSec. |
+| **Pi Zero 2 W** | ARMv8 (64-bit) | 512 MB | ⚠️ Knapp | 64-bit OS möglich, 512 MB RAM aber knapp. Swap und Scenario-Reduktion vermutlich nötig. |
 
-**Comparable projects running similar stacks on Pi:**
+**Vergleichbare Projekte auf Pi mit ähnlichem Stack:**
 
-- [CrowdSec on Raspberry Pi 3 with DietPi](https://it-security.dnit.fr/en/crowdsec-installation-on-rpi3-with-dietpi-raspberry-os/) — running CrowdSec + nftables on Pi 3 since 2021
-- [Home Assistant community](https://community.learnlinux.tv/t/reverse-proxy-for-home-automation/4325) — users running 18+ Docker containers (including nginx reverse proxy) on Pi 4 at ~18% CPU, 2.5GB RAM
-- [CrowdSec + Nginx on Raspberry Pi](https://www.polimetro.com/en/How-to-protect-your-Raspberry-Pi-with-CrowdSec/) — comprehensive 2025 guide for Pi 3/4/5
-- [CrowdSec Firewall Bouncer on low-end VPS](https://github.com/crowdsecurity/crowdsec/issues/3641) — 2-core, 2GB RAM OpenCloudOS deployment with nginx + ModSecurity + CrowdSec
+- [CrowdSec on Raspberry Pi 3 with DietPi](https://it-security.dnit.fr/en/crowdsec-installation-on-rpi3-with-dietpi-raspberry-os/) — CrowdSec + nftables auf Pi 3 seit 2021 im Einsatz
+- [Home Assistant community](https://community.learnlinux.tv/t/reverse-proxy-for-home-automation/4325) — 18+ Docker-Container (inkl. nginx Reverse-Proxy) auf Pi 4 bei ~18 % CPU, 2,5 GB RAM
+- [CrowdSec + Nginx on Raspberry Pi](https://www.polimetro.com/en/How-to-protect-your-Raspberry-Pi-with-CrowdSec/) — umfassende 2025er-Anleitung für Pi 3/4/5
+- [CrowdSec Firewall Bouncer on low-end VPS](https://github.com/crowdsecurity/crowdsec/issues/3641) — 2-Core, 2 GB RAM OpenCloudOS mit nginx + ModSecurity + CrowdSec
 
-**Resource estimates for this stack on Pi:**
+**Resource-Schätzung auf dem Pi:**
 
-| Service | RAM (typical) |
-|---------|--------------|
-| nginx (1 worker) | ~5–10 MB |
-| CrowdSec agent | ~30–50 MB |
-| CrowdSec firewall bouncer | ~10–20 MB |
+| Service | RAM (typisch) |
+|---------|---------------|
+| nginx (1 Worker) | ~5–10 MB |
+| CrowdSec-Agent | ~30–50 MB |
+| CrowdSec Firewall Bouncer | ~10–20 MB |
 | AppSec WAF | ~20–40 MB |
-| OS overhead | ~100–200 MB |
-| **Total** | **~165–320 MB** |
+| OS-Overhead | ~100–200 MB |
+| **Gesamt** | **~165–320 MB** |
 
-A Pi 3 or Pi 4 handles this with room to spare. A Pi 2 may work with a 64-bit kernel or source compile, but Pi 3+ is strongly recommended.
-
----
-
-## Threats Mitigated
-
-| Threat | Mitigation |
-|--------|-----------|
-| Internet scanning / reconnaissance | nftables DROP default + CrowdSec CAPI |
-| Brute force on web UI | nginx rate limits + CrowdSec `http-generic-bf` |
-| Application-layer DDoS | nginx conn limits, timeouts, CrowdSec |
-| Credential stuffing | Rate limits + CrowdSec `http-cve` |
-| Exploitation of Loxone CVEs | AppSec WAF (200+ virtual patches) |
-| SSH brute force | CrowdSec `ssh-bf` + nftables source restriction |
-| Slowloris / slow-read | nginx aggressive timeouts (10–15s) |
-| Config tampering | auditd + AppArmor |
-
-**Not mitigated:** Volumetric DDoS (link saturation). A 512MB RAM gateway cannot absorb a pipe-filling attack. For that, you need ISP-level scrubbing or a cloud service.
+Ein Pi 3 oder Pi 4 schafft das mit Reserve. Pi 2 läuft eventuell mit 64-bit-Kernel oder Source-Build, klar empfohlen ist aber Pi 3+.
 
 ---
 
-## Configuration
+## Abgewehrte Bedrohungen
 
-All tunables are at the top of `deploy.sh`:
+| Bedrohung | Mitigation |
+|-----------|-----------|
+| Internet-Scanning / Reconnaissance | nftables DROP-Default + CrowdSec CAPI |
+| Brute-Force gegen Web-UI | nginx Rate Limits + CrowdSec `http-generic-bf` |
+| Application-Layer-DDoS | nginx Connection-Limits, Timeouts, CrowdSec |
+| Credential Stuffing | Rate Limits + CrowdSec `http-cve` |
+| Ausnutzung von Loxone-CVEs | AppSec WAF (200+ Virtual Patches) |
+| SSH-Brute-Force | CrowdSec `ssh-bf` + nftables-Source-Beschränkung |
+| Slowloris / Slow-Read | aggressive nginx-Timeouts (10–15 s) |
+| Config-Manipulation | auditd + AppArmor |
+
+**Nicht abgedeckt:** Volumetrischer DDoS (Leitungssättigung). Ein 512-MB-RAM-Gateway kann eine pipe-füllende Attacke nicht abfangen. Dafür brauchst du ISP-Scrubbing oder einen Cloud-Service.
+
+---
+
+## Konfiguration
+
+Alle Schalter stehen oben in `deploy.sh`:
 
 ```bash
-LOXONE_IP="192.168.1.100"           # Your Miniserver IP
-GATEWAY_IP="192.168.1.50"           # This gateway's static IP
-LAN_SUBNET="192.168.1.0/24"         # LAN that can reach SSH
+LOXONE_IP="192.168.1.100"           # IP deines Miniservers
+GATEWAY_IP="192.168.1.50"           # statische IP dieses Gateways
+LAN_SUBNET="192.168.1.0/24"         # LAN, das SSH erreichen darf
 SSH_ALLOWED_SUBNETS=("192.168.1.0/24" "10.0.0.0/24")
 RATE_LIMIT_REQ_PER_SEC="10"
 RATE_LIMIT_BURST="100"
 ENABLE_APPSEC="true"
-APPSEC_MODE="enforce"                # "monitor" or "enforce"
+APPSEC_MODE="enforce"                # "monitor" oder "enforce"
 ```
 
-Discord alerting is optional. Set `DISCORD_WEBHOOK_URL` in the config section or leave empty to skip.
+Discord-Alerting ist optional. Setze `DISCORD_WEBHOOK_URL` im Config-Bereich oder lass das Feld leer, um es zu überspringen.
 
 ---
 
-## Testing
+## Tests
 
-After deployment, run the validation suite:
+Nach dem Deploy die Validierungs-Suite laufen lassen:
 
 ```bash
 sudo bash test-gateway.sh
 ```
 
-This performs **50+ automated checks** across services, firewall, proxy, CrowdSec, AppSec, monitoring, kernel hardening, and backups. It also adds and removes a test ban to verify the full blocking pipeline.
+Sie führt **50+ automatisierte Checks** durch — Services, Firewall, Proxy, CrowdSec, AppSec, Monitoring, Kernel-Härtung und Backups. Sie fügt außerdem einen Test-Ban hinzu und entfernt ihn wieder, um die komplette Blocking-Kette zu prüfen.
 
 ---
 
-## Operational Commands
+## Betrieb
 
 ```bash
-# Check all components
+# Alle Komponenten prüfen
 sudo bash test-gateway.sh
 
-# View CrowdSec blocks
+# CrowdSec-Blocks anzeigen
 sudo cscli decisions list
 
-# Check AppSec metrics
+# AppSec-Metriken
 sudo cscli metrics | grep -A3 Appsec
 
-# View live nginx access log
+# Live-nginx-Access-Log
 sudo tail -f /var/log/nginx/loxone-access.log
 
-# Manually ban an IP
+# IP manuell sperren
 sudo cscli decisions add --ip 1.2.3.4 --duration 4h --reason "manual"
 
-# Unban an IP
+# IP entsperren
 sudo cscli decisions delete --ip 1.2.3.4
 
-# Check network watchdog status
+# Network-Watchdog-Status
 sudo systemctl status network-watchdog.timer
 sudo journalctl -u network-watchdog -f
 
-# Disable/enable network watchdog
+# Network-Watchdog deaktivieren / aktivieren
 sudo systemctl stop network-watchdog.timer
 sudo systemctl enable --now network-watchdog.timer
 
-# Re-run deployment (idempotent)
+# Deploy nochmal laufen lassen (idempotent)
 sudo bash deploy.sh
 ```
 
-See `SECURITY.md` for the full incident response playbook.
+Das komplette Incident-Response-Playbook steht in `SECURITY.md`.
 
 ---
 
-## Contributing
+## Mitarbeit
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). This is a specialized security appliance — contributions should stay focused on Loxone-gateway-specific hardening, Pi compatibility, and test coverage.
-
----
-
-## License
-
-**Non-Commercial Use Only** — see [LICENSE](LICENSE).
-
-The Software may be used, modified, and distributed freely for personal,
-educational, research, and non-commercial purposes. Commercial use — directly
-or indirectly, in whole or in part — is strictly prohibited.
+Siehe [CONTRIBUTING.md](CONTRIBUTING.md). Das hier ist eine spezialisierte Security-Appliance — Beiträge sollten beim Härten des Loxone-Gateways, Pi-Kompatibilität und Test-Coverage bleiben.
 
 ---
 
-## Acknowledgments
+## Lizenz
 
-- [CrowdSec](https://www.crowdsec.net/) — the collaborative IDS/WAF engine that makes community-driven blocking possible
-- [Loxone](https://www.loxone.com/) — the home automation platform this gateway protects (even if they stopped patching Gen 1)
-- The home automation community — for documenting Loxone Gen 1 limitations so clearly that an AI could design around them
+**Non-Commercial Use Only** — siehe [LICENSE](LICENSE).
+
+Die Software darf für persönliche, schulische, Forschungs- und nicht-kommerzielle Zwecke frei genutzt, verändert und weiterverteilt werden. Kommerzielle Nutzung — direkt oder indirekt, ganz oder teilweise — ist ausdrücklich untersagt.
+
+---
+
+## Danksagungen
+
+- [CrowdSec](https://www.crowdsec.net/) — die kollaborative IDS/WAF-Engine, die Community-getriebenes Blocking überhaupt erst möglich macht
+- [Loxone](https://www.loxone.com/) — die Home-Automation-Plattform, die dieses Gateway schützt (auch wenn sie Gen 1 nicht mehr patcht)
+- Die Home-Automation-Community — fürs so saubere Dokumentieren der Gen-1-Grenzen, dass eine KI darum herum bauen konnte
