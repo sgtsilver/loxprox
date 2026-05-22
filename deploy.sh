@@ -215,6 +215,101 @@ validate_network() {
     return 1
 }
 
+# ─── GPG cross-verification ──────────────────────────────────────────────────
+#
+# Why: the historical install fetched the CrowdSec packagecloud key over HTTPS
+# and trusted it on first use (TOFU). A first-install MITM (rogue CA, hostile
+# resolver, CDN compromise) could substitute the key and serve attacker-signed
+# packages. Cross-checking the fingerprint against multiple independently
+# operated public keyservers raises the bar to "simultaneously compromise N
+# separate infrastructures with separate TLS chains and operators."
+#
+# No hardcoded fingerprint: whatever fingerprint the primary source returns is
+# what we compare against. When CrowdSec rotates keys, every source picks up
+# the new key — no deploy.sh update required.
+#
+# Behaviour:
+#   - CONFLICT (any source returns a different fingerprint) → always abort,
+#     regardless of mode. That is a positive attack signal, not a network blip.
+#   - QUORUM MET (>= LOXPROX_GPG_QUORUM sources agree) → trust + import.
+#   - QUORUM NOT MET (network failures, keyservers down) → mode decides:
+#       * soft (default): warn + proceed (falls back to TOFU)
+#       * hard           : abort
+#
+# Env vars: LOXPROX_GPG_VERIFY_MODE=soft|hard   LOXPROX_GPG_QUORUM=N
+#
+verify_crowdsec_key() {
+    local primary_key="$1"
+    local mode="${LOXPROX_GPG_VERIFY_MODE:-soft}"
+    local quorum="${LOXPROX_GPG_QUORUM:-2}"
+
+    # Independent keyservers — separate operators, separate DNS, separate TLS PKI.
+    # Hagrid (community), Canonical (Ubuntu), SURFnet (NL academic).
+    local sources=(
+        "https://keys.openpgp.org/vks/v1/by-fingerprint/%FPR%"
+        "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x%FPR%&options=mr"
+        "https://pgp.surf.nl/pks/lookup?op=get&search=0x%FPR%&options=mr"
+    )
+
+    local primary_fpr
+    primary_fpr=$(gpg --show-keys --with-fingerprint --with-colons "$primary_key" 2>/dev/null \
+                  | awk -F: '$1=="fpr" {print $10; exit}')
+    if [[ -z "$primary_fpr" ]]; then
+        error "verify_crowdsec_key: could not extract fingerprint from primary key"
+        return 1
+    fi
+    info "Primary key fingerprint: $primary_fpr"
+
+    local agree=0 conflict=0 unreachable=0
+    local src_tpl url tmp fpr
+    for src_tpl in "${sources[@]}"; do
+        url="${src_tpl//%FPR%/$primary_fpr}"
+        tmp=$(mktemp)
+        if ! curl -fsSL --max-time 15 -o "$tmp" "$url" 2>/dev/null; then
+            unreachable=$((unreachable + 1))
+            info "  unreachable: ${url%%\?*}"
+            rm -f "$tmp"
+            continue
+        fi
+        fpr=$(gpg --show-keys --with-fingerprint --with-colons "$tmp" 2>/dev/null \
+              | awk -F: '$1=="fpr" {print $10; exit}')
+        rm -f "$tmp"
+        if [[ -z "$fpr" ]]; then
+            unreachable=$((unreachable + 1))
+            info "  parse failure: ${url%%\?*}"
+            continue
+        fi
+        if [[ "$fpr" == "$primary_fpr" ]]; then
+            agree=$((agree + 1))
+            info "  agree:       ${url%%\?*}"
+        else
+            conflict=$((conflict + 1))
+            warn "  CONFLICT:    ${url%%\?*} returned $fpr (expected $primary_fpr)"
+        fi
+    done
+
+    # A keyserver returning a DIFFERENT fingerprint is always fatal.
+    if (( conflict > 0 )); then
+        error "Fingerprint conflict detected on ${conflict} keyserver(s) — refusing to import."
+        error "This is a positive attack signal. Investigate before re-running."
+        return 1
+    fi
+
+    if (( agree >= quorum )); then
+        ok "GPG key cross-verified (${agree}/${#sources[@]} independent sources agree)."
+        return 0
+    fi
+
+    # Below quorum — mode decides.
+    if [[ "$mode" == "hard" ]]; then
+        error "GPG quorum not met (${agree}/${quorum} required, ${unreachable} unreachable). Aborting (mode=hard)."
+        return 1
+    fi
+    warn "GPG quorum not met (${agree}/${quorum} required, ${unreachable} unreachable). Continuing (mode=soft, falling back to TOFU)."
+    warn "Set LOXPROX_GPG_VERIFY_MODE=hard to refuse install when keyservers are unreachable."
+    return 0
+}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Pre-flight
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -310,6 +405,13 @@ net.ipv4.icmp_ignore_bogus_error_responses = 1
 kernel.dmesg_restrict = 1
 kernel.kptr_restrict = 2
 kernel.randomize_va_space = 2
+
+# ── Kernel: unprivileged user namespaces ───────────────────────────────────
+# Mitigates the prerequisite for CVE-2026-46300 ("Fragnesia", XFRM ESP-in-TCP
+# LPE) and the broader class of unprivileged-userns kernel exploits. The
+# gateway VM has no legitimate user of this feature — nothing runs as a
+# non-root sandbox, no containers, no unprivileged browsers.
+kernel.unprivileged_userns_clone = 0
 
 # ── Filesystem: hardlink / symlink attacks ─────────────────────────────────
 fs.protected_hardlinks = 1
@@ -654,6 +756,14 @@ install_crowdsec() {
         if ! gpg --dry-run --import "$tmp_key" &>/dev/null; then
             rm -f "$tmp_key"
             error "Downloaded CrowdSec GPG key is invalid. Possible MITM or CDN compromise."
+            exit 1
+        fi
+
+        # Cross-verify the fingerprint against independent public keyservers
+        # before importing. See verify_crowdsec_key() for design notes.
+        if ! verify_crowdsec_key "$tmp_key"; then
+            rm -f "$tmp_key"
+            error "CrowdSec GPG cross-verification failed — refusing to install."
             exit 1
         fi
 

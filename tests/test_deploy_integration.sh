@@ -133,6 +133,35 @@ test_apply_sysctls() {
     if grep -q "rp_filter = 1" "$SYSCTL_CONF"; then pass "rp_filter present"; else fail "rp_filter missing"; fi
     if grep -q "dmesg_restrict = 1" "$SYSCTL_CONF"; then pass "dmesg_restrict present"; else fail "dmesg_restrict missing"; fi
     if grep -q "protected_hardlinks = 1" "$SYSCTL_CONF"; then pass "protected_hardlinks present"; else fail "protected_hardlinks missing"; fi
+    # v1.3.4: Fragnesia (CVE-2026-46300) mitigation
+    if grep -q "unprivileged_userns_clone = 0" "$SYSCTL_CONF"; then pass "unprivileged_userns_clone=0 present (Fragnesia mitigation)"; else fail "unprivileged_userns_clone setting missing"; fi
+}
+
+test_gpg_verifier() {
+    echo ""
+    echo "━━━ verify_crowdsec_key() ━━━"
+
+    # Function must be defined after sourcing deploy.sh
+    if declare -F verify_crowdsec_key &>/dev/null; then pass "verify_crowdsec_key function defined"; else fail "verify_crowdsec_key function missing"; fi
+
+    # Must reference all three independent keyserver hosts (string match in script)
+    if grep -q "keys.openpgp.org" "$PROJECT_DIR/deploy.sh"; then pass "keys.openpgp.org source listed"; else fail "keys.openpgp.org source missing"; fi
+    if grep -q "keyserver.ubuntu.com" "$PROJECT_DIR/deploy.sh"; then pass "keyserver.ubuntu.com source listed"; else fail "keyserver.ubuntu.com source missing"; fi
+    if grep -q "pgp.surf.nl" "$PROJECT_DIR/deploy.sh"; then pass "pgp.surf.nl source listed"; else fail "pgp.surf.nl source missing"; fi
+
+    # CONFLICT must always abort (positive attack signal)
+    if grep -q "conflict > 0" "$PROJECT_DIR/deploy.sh"; then pass "conflict path is hard-fail"; else fail "conflict path not hard-fail"; fi
+
+    # Soft-fail mode env var documented
+    if grep -q "LOXPROX_GPG_VERIFY_MODE" "$PROJECT_DIR/deploy.sh"; then pass "LOXPROX_GPG_VERIFY_MODE env var honoured"; else fail "LOXPROX_GPG_VERIFY_MODE env var missing"; fi
+
+    # No hardcoded fingerprint — verifier must extract dynamically (audit guard
+    # against future regressions where someone pastes in a 40-char hex literal).
+    if grep -E "^[[:space:]]*[A-Fa-f0-9]{40}[[:space:]]*$" "$PROJECT_DIR/deploy.sh" >/dev/null; then
+        fail "hardcoded 40-char hex fingerprint found in deploy.sh — verifier should be dynamic"
+    else
+        pass "no hardcoded fingerprint in deploy.sh"
+    fi
 }
 
 test_setup_firewall() {
@@ -293,6 +322,7 @@ echo "════════════════════════�
 test_validate_ip
 test_validate_network
 test_apply_sysctls
+test_gpg_verifier
 test_setup_firewall
 test_configure_nginx
 test_configure_crowdsec
