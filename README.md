@@ -12,11 +12,13 @@
 
 ## Über das Projekt
 
-**Idee & Infrastruktur:** [sgtsilver](https://github.com/sgtsilver) — wollte seinen Loxone Miniserver absichern, ohne dauerhaft ein VPN aufrechtzuerhalten, und brachte Hardware, Netzwerk-Kontext und die realen Constraints ein.
+**Idee, Hardware und das letzte Wort:** [sgtsilver](https://github.com/sgtsilver) — IT-Systemadministrator. Weiß, wie Angreifer wirklich vorgehen, weiß, wie man Infrastruktur dagegen verteidigt, schreibt selbst keinen Code. Bringt das Netz, den Miniserver, die realen Constraints und das operative Bauchgefühl, mit dem sich ein wirklich solides Design von einem nur clever klingenden unterscheiden lässt.
 
-**Design & Implementierung:** [Kimi](https://www.kimi.com) ([Moonshot AI](https://www.moonshot.ai)) — recherchierte die Schwachstellen von Loxone Gen 1, entwarf den sechsschichtigen Schutz-Stack, schrieb sämtlichen Code und erstellte Tests und Dokumentation. Jede Zeile Shell-Script, jede nftables-Regel und jeder sysctl-Parameter wurde von einer KI als Systemingenieurin aus ersten Prinzipien gewählt und validiert.
+**Design und Implementierung: ein rotierendes KI-Panel.** [Kimi](https://www.kimi.com) ([Moonshot AI](https://www.moonshot.ai)) lieferte die ursprüngliche Architektur und den Großteil des Codes. [Claude](https://claude.com) ([Anthropic](https://www.anthropic.com)) reviewt, fact-checkt, findet und fixt Bugs und übernimmt Folgearbeiten (unter anderem das v1.3.4-Release rund um Supply-Chain und Kernel-Härtung). Weitere Modelle (GPT, Gemini etc.) werden hinzugezogen, wenn einzelne Entscheidungen wirklich gegengelesen werden müssen.
 
-Das hier ist ein Experiment in **KI-geführter Infrastruktur-Absicherung**: Ein Mensch definiert Problem und Constraints; die KI entwirft, implementiert, testet und dokumentiert die komplette Lösung.
+**Die Regel:** KIs schlagen vor. KIs grillen sich gegenseitig. In den Code kommt nichts, weil ein Modell das sagt — sondern nur, wenn die Kreuzprüfung nicht gebrochen hat *und* das Sysadmin-Bauchgefühl eines Menschen "ja, so verteidigt man Infrastruktur wirklich" gesagt hat. Ein clever klingender Vorschlag, der einen der beiden Filter nicht überlebt, fliegt raus — egal, welches Modell ihn vorgeschlagen hat.
+
+Das hier ist ein Experiment in **KI-gestützter, menschlich kuratierter Infrastruktur-Absicherung**. Mehrere KIs, keine davon allein die Architektin; ein Mensch mit dem Veto und der operativen Verantwortung.
 
 ---
 

@@ -12,11 +12,13 @@
 
 ## About This Project
 
-**Idea & Infrastructure:** [sgtsilver](https://github.com/sgtsilver) — who wanted to secure a Loxone Miniserver without keeping a VPN connected around the clock, and provided the hardware, network context, and real-world constraints to make it happen.
+**Idea, hardware, and the final call:** [sgtsilver](https://github.com/sgtsilver) — IT systems administrator. Knows how attackers actually behave, knows how to defend infrastructure against them, doesn't write code. Brought the network, the Miniserver, the real-world constraints, and the operational instinct to tell apart a genuinely sound design from one that only sounds clever.
 
-**Design & Implementation:** [Kimi](https://www.kimi.com) ([Moonshot AI](https://www.moonshot.ai)) — who researched Loxone Gen 1 vulnerabilities, architected the six-layer defense stack, wrote all code, and produced the test suite and documentation. Every line of shell script, every nftables rule, and every sysctl parameter was selected and validated by an AI systems engineer working from first principles.
+**Design and implementation: a rotating panel of AIs.** [Kimi](https://www.kimi.com) ([Moonshot AI](https://www.moonshot.ai)) did the original architecture and most of the code. [Claude](https://claude.com) ([Anthropic](https://www.anthropic.com)) reviews, fact-checks, finds and fixes bugs, and contributes follow-on work (the v1.3.4 supply-chain and kernel-hardening release among others). Other models (GPT, Gemini, etc.) get pulled in to second-guess specific decisions when the stakes warrant it.
 
-This is an experiment in **AI-led infrastructure hardening**: a human defines the problem and the constraints; the AI designs, implements, tests, and documents the complete solution.
+**The rule:** AIs propose. AIs cross-examine each other. Nothing lands in the codebase because one model said it should — it lands because the cross-examination didn't break it *and* a human sysadmin's gut said "yes, that's how you actually defend infrastructure." A clever-sounding suggestion that doesn't survive either filter gets dropped, no matter which model proposed it.
+
+This is an experiment in **AI-assisted, human-curated infrastructure hardening**. Multiple AIs, none of them the sole architect; one human with the veto and the operational responsibility.
 
 ---
 
