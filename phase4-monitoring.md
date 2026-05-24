@@ -1,8 +1,10 @@
 # Phase 4 — Monitoring, Tuning & Maintenance
 
+> ⚠️ **Substrate note:** This runbook was originally written for an LXC-based deployment and still uses `LXC` / `pct` terminology in places. **LoxProx is now VM-only** — `deploy.sh` aborts on LXC by default because several defenses (kernel sysctls, Fragnesia mitigation, auditd, AppArmor enforcement, nftables) cannot be applied from inside a container. For a new deployment, substitute "Gateway VM" wherever you see "Gateway LXC", and use `qm config <vmid>` on Proxmox instead of `pct config <ctid>` for the host-side backup step. The monitoring commands inside the gateway itself are substrate-agnostic.
+
 ## Daily Checks (First Week After Cutover)
 
-Run these inside the Security Gateway LXC daily:
+Run these inside the Security Gateway VM daily:
 
 ```bash
 # View blocked IPs

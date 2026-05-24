@@ -62,7 +62,7 @@ Stack:
 
 Deploy: one script (`deploy.sh`, ~1265 lines, idempotent). Validate: 50+ automated checks. Grade: A- across CIS Debian 12, OWASP Top 10, and OWASP IoT Top 10.
 
-LAN bypasses the gateway entirely — only internet-facing traffic is hardened. Runs on a 1 vCPU / 512MB VM or a Raspberry Pi 4.
+LAN bypasses the gateway entirely — only internet-facing traffic is hardened. Runs on a 1 vCPU / 1 GB VM (2 vCPU / 2 GB recommended for attack headroom) or a Raspberry Pi 4. **VM-only — LXC unsupported**, because several kernel-level defenses (sysctls including the Fragnesia mitigation, auditd, AppArmor enforcement, nftables) cannot be applied from inside a container and would silently no-op.
 
 Non-commercial licensed. Would love feedback from anyone running CrowdSec on low-resource gateways.
 

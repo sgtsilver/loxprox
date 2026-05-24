@@ -2,7 +2,10 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 # Loxone Miniserver Gen 1 — Security Gateway Deployment Script
 # ═══════════════════════════════════════════════════════════════════════════════
-# Target: fresh Debian 12 (Bookworm) VM on Proxmox — 1 vCPU, 512 MB RAM, 5 GB disk
+# Target: fresh Debian 12 (Bookworm) VM on Proxmox — 1 vCPU / 1 GB RAM minimum,
+#         2 vCPU / 2 GB recommended, 5 GB disk. VM only — LXC is refused at runtime
+#         (kernel sysctls, auditd, AppArmor enforce, nftables silently no-op in
+#         unprivileged containers). Override with ALLOW_LXC=1 at your own risk.
 #
 # Usage:
 #   1. Run set-static-ip.sh first if the VM has no static IP yet.
@@ -337,9 +340,61 @@ preflight() {
         warn "This script targets Debian 12 (Bookworm). Detected OS may differ — continuing."
     fi
 
-    # VM check (not LXC)
+    # Substrate check — VM only, LXC unsupported.
+    #
+    # Several gateway defenses silently degrade or no-op in an unprivileged
+    # Proxmox LXC because they touch host-kernel state the container cannot
+    # write to:
+    #   - kernel.unprivileged_userns_clone (Fragnesia / CVE-2026-46300 mitigation)
+    #   - kernel.dmesg_restrict, kernel.kptr_restrict, kernel.randomize_va_space
+    #   - fs.protected_hardlinks, fs.protected_symlinks
+    #   - auditd (one audit consumer per kernel, owned by the host)
+    #   - AppArmor profile enforcement (host owns the profile namespace)
+    #   - nftables (requires capabilities not granted to unprivileged LXC)
+    #
+    # In LXC, sysctl writes fail with EPERM and the script's `|| warn` swallows
+    # the error — the deployment looks green but the documented posture is not
+    # delivered. Refuse to deploy by default. Operators who knowingly accept
+    # the reduced posture can set ALLOW_LXC=1.
     if systemd-detect-virt --container &>/dev/null; then
-        warn "Running inside a container. This script is designed for a VM. Some features may not work correctly."
+        if [[ "${ALLOW_LXC:-0}" == "1" ]]; then
+            warn "Running inside a container with ALLOW_LXC=1 — proceeding with reduced security posture."
+            warn "The following will silently fail or no-op (script will continue past them):"
+            warn "  • kernel.unprivileged_userns_clone = 0  (Fragnesia / CVE-2026-46300 mitigation)"
+            warn "  • kernel.dmesg_restrict, kernel.kptr_restrict, kernel.randomize_va_space"
+            warn "  • fs.protected_hardlinks, fs.protected_symlinks"
+            warn "  • auditd rule loading (one audit consumer per kernel, owned by the host)"
+            warn "  • aa-enforce of the nginx AppArmor profile (host owns profile namespace)"
+            warn "  • nftables (depends on container caps; unprivileged LXC typically rejects table create)"
+            warn "Documented posture (CIS Debian 12, OWASP IoT Top 10) does NOT apply in this configuration."
+        else
+            error "Container substrate detected (LXC / systemd-nspawn). This deployment is VM-only."
+            error ""
+            error "Why this matters:"
+            error "  An LXC container shares the host's kernel. Several gateway defenses write to"
+            error "  host-kernel state (sysctls in /proc/sys/kernel/*, fs.protected_*) or claim a"
+            error "  per-kernel resource (the audit netlink socket has exactly one consumer, owned"
+            error "  by the host). From inside an unprivileged container these writes return EPERM,"
+            error "  but this script's sysctl loader uses '|| warn' and continues — so the deploy"
+            error "  finishes green while the actual posture is degraded."
+            error ""
+            error "What specifically would silently NOT be applied in an LXC:"
+            error "  • kernel.unprivileged_userns_clone = 0 — the Fragnesia (CVE-2026-46300) mitigation"
+            error "    this gateway documents. EPERM from inside the container; must be set on the host."
+            error "  • kernel.dmesg_restrict / kptr_restrict / randomize_va_space — host kernel concerns,"
+            error "    not writable from a container namespace."
+            error "  • auditd config-tampering rules (nftables.conf, nginx, sshd, sudoers) — augenrules"
+            error "    --load needs CAP_AUDIT_CONTROL and exclusive access to the audit netlink socket,"
+            error "    which the host owns."
+            error "  • AppArmor nginx profile enforcement — aa-enforce loads profiles into the host's"
+            error "    AppArmor subsystem; the container cannot do this for itself."
+            error "  • nftables — unprivileged LXC default capability set rejects creating the inet"
+            error "    filter table; even when it works, policy lives only in the container's netns."
+            error ""
+            error "Fix: re-create the target as a Debian 12 VM (qm create, not pct create on Proxmox)."
+            error "Override (NOT recommended for an internet-facing gateway): ALLOW_LXC=1 ./deploy.sh"
+            exit 1
+        fi
     fi
 
     info "Checking connectivity to Loxone ($LOXONE_IP:$LOXONE_PORT)..."
