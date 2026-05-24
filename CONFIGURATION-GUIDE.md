@@ -59,7 +59,9 @@ curl -I http://$LOXONE_IP:$LOXONE_PORT/
 
 ### `GATEWAY_IP` — This VM's Static IP
 
-**What it is:** The IP address of the machine running this gateway script (the VM or LXC you just created).
+**What it is:** The IP address of the VM running this gateway script.
+
+> **Note:** LoxProx is a **VM-only** deployment. `deploy.sh` aborts inside an LXC by default because several defenses (kernel sysctls, Fragnesia mitigation, auditd, AppArmor enforcement, nftables) cannot be applied from inside a container and would silently no-op. See the README's *Hardware Requirements* section for the full reasoning, or `ALLOW_LXC=1` to bypass at your own risk.
 
 **Why it matters:** The router forwards external port 1080 to this IP. If this IP changes (DHCP), the port forwarding breaks and your Loxone becomes unreachable from the internet.
 

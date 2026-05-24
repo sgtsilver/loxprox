@@ -102,7 +102,8 @@ loxprox/
 
 ## Schnellstart
 
-1. **Lege eine Debian-12-VM oder einen LXC an** (mindestens 1 vCPU, 512 MB RAM, 5 GB Disk).
+1. **Lege eine Debian-12-VM an** (mindestens 1 vCPU, 1 GB RAM, 5 GB Disk — empfohlen: 2 vCPU, 2 GB RAM).
+   > ⚠️ **Nur VM — kein LXC.** Mehrere Verteidigungsschichten (Kernel-Sysctls inkl. der Fragnesia-Mitigation, auditd, AppArmor-Enforcement, nftables in unprivilegierten Containern) lassen sich aus einem LXC heraus nicht anwenden und werden vom Deploy-Script stillschweigend übersprungen. Das Ergebnis sieht grün aus, liefert aber die dokumentierte Sicherheits-Posture nicht. Siehe Abschnitt [Hardware-Anforderungen](#hardware-anforderungen) und `CHANGELOG.md` für Details. Wer die reduzierte Posture bewusst akzeptiert, kann das Script mit `ALLOW_LXC=1 sudo ./deploy.sh` aufrufen.
 2. **Statische IP setzen:** Kopiere `set-static-ip.sh` in die Ziel-VM und führe es dort aus.
 3. **Kopiere `deploy.sh`**, `detect-loxone.sh` und `.env.example` in die Ziel-VM.
 4. **Finde deinen Loxone:** `chmod +x detect-loxone.sh && ./detect-loxone.sh`
@@ -142,12 +143,24 @@ Das Deploy-Script ist **idempotent** — kannst du gefahrlos erneut laufen lasse
 
 | Resource | Minimum | Empfohlen |
 |----------|---------|-----------|
-| CPU | 1 Core | 1–2 Cores |
-| RAM | 512 MB | 1 GB |
+| CPU | 1 vCPU | **2 vCPU** |
+| RAM | **1 GB** | **2 GB** |
 | Disk | 5 GB | 10 GB |
-| OS | Debian 12 (Bookworm) 64-bit | Debian 12 oder Ubuntu 22.04 LTS |
+| OS | Debian 12 (Bookworm) 64-bit | Debian 12 |
 
-Die Referenz-Installation läuft auf einem **1 vCPU, 512 MB RAM Proxmox-LXC** mit Luft nach oben. Der gesamte Security-Stack (nginx + CrowdSec + AppSec + Bouncer) frisst bei normaler Home-Automation-Last etwa **100–150 MB RAM**.
+Die Referenz-Installation läuft auf einer **Proxmox-VM mit 1 vCPU und 1 GB RAM** und liegt im normalen Betrieb bei **~850 MB RSS**. Der Stack selbst (nginx + CrowdSec + AppSec + Bouncer) verbraucht im Leerlauf 100–150 MB; den Rest holen sich Debian-Basis und Page-Cache.
+
+**Warum 2 vCPU / 2 GB empfohlen sind:** CrowdSecs Leaky-Bucket-Speicher skaliert mit der Anzahl gleichzeitig aktiver Angreifer-IPs — 256 IPs ≈ 150 MB, 15 000 IPs ≈ 1,2–1,5 GB ([Quelle](https://www.crowdsec.net/blog/how-to-process-billions-daily-events-with-crowdsec)). Bei einem breit gestreuten Scan (viele unique Quell-IPs) wächst der RAM-Bedarf entsprechend. AppSec WAF kostet pro Request rund **5 ms / 50 mc CPU** mit dem aktivierten Virtual-Patching-Ruleset ([Quelle](https://docs.crowdsec.net/docs/appsec/benchmark/)) — eine zweite vCPU lässt den Kernel `nginx` für legitime Nutzer responsiv halten, während der Bouncer in den ersten 30–60 Sekunden eines Angriffs aufholt und die Angreifer schon auf nftables-Ebene gedroppt werden. 1 vCPU / 1 GB funktionieren bei reinem Home-Automation-Traffic einwandfrei; die empfohlene Konfiguration ist die Reserve, die im Angriffsfall den Unterschied macht.
+
+> ⚠️ **Substrate: VM, nicht LXC.** LoxProx ist ein VM-only Deployment. In einem unprivilegierten Proxmox-LXC schlagen mehrere Härtungs-Schritte ohne Fehlermeldung fehl, weil sie auf Host-Kernel-State schreiben, den der Container nicht erreichen kann:
+>
+> - `kernel.unprivileged_userns_clone = 0` — die in diesem Projekt dokumentierte **Fragnesia/CVE-2026-46300-Mitigation** läuft in EPERM und greift nicht. Diese Knob ist global, nicht per-netns.
+> - `kernel.dmesg_restrict`, `kernel.kptr_restrict`, `kernel.randomize_va_space`, `fs.protected_*` — alle host-weit, vom Container aus nicht beschreibbar.
+> - **auditd** — der Kernel hat **genau einen** Audit-Consumer pro Netlink-Socket, und der gehört dem Host. `augenrules --load` schlägt fehl; die Config-Tamper-Detection für nftables/nginx/sshd/sudoers ist damit weg.
+> - **AppArmor-Enforcement** — `aa-enforce` lädt Profile in das AppArmor-Subsystem des Hosts; der Container hat darauf keinen Zugriff.
+> - **nftables** — das Default-Capability-Set eines unprivilegierten LXC lässt das Anlegen der `inet filter`-Tabelle nicht zu.
+>
+> Das Deploy-Script erkennt LXC-Substrat und bricht **standardmäßig ab**. Wer die degradierte Posture bewusst akzeptiert, kann mit `ALLOW_LXC=1 sudo ./deploy.sh` deployen — die dokumentierte CIS-Debian-12- und OWASP-IoT-Top-10-Posture gilt dann nicht mehr.
 
 ### Raspberry Pi
 
@@ -197,7 +210,7 @@ Ein Pi 3 oder Pi 4 schafft das mit Reserve. Pi 2 läuft eventuell mit 64-bit-Ker
 | Slowloris / Slow-Read | aggressive nginx-Timeouts (10–15 s) |
 | Config-Manipulation | auditd + AppArmor |
 
-**Nicht abgedeckt:** Volumetrischer DDoS (Leitungssättigung). Ein 512-MB-RAM-Gateway kann eine pipe-füllende Attacke nicht abfangen. Dafür brauchst du ISP-Scrubbing oder einen Cloud-Service.
+**Nicht abgedeckt:** Volumetrischer DDoS (Leitungssättigung). Ein 1–2-GB-Gateway kann eine pipe-füllende Attacke nicht abfangen. Dafür brauchst du ISP-Scrubbing oder einen Cloud-Service.
 
 ---
 

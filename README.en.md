@@ -102,7 +102,8 @@ loxprox/
 
 ## Quick Start
 
-1. **Create a Debian 12 VM or LXC** (1 vCPU, 512MB RAM, 5GB disk minimum).
+1. **Create a Debian 12 VM** (1 vCPU, 512MB RAM, 5GB disk minimum).
+   > ⚠️ **VM only — no LXC.** Several gateway defenses (kernel sysctls including the Fragnesia mitigation, auditd, AppArmor enforcement, nftables in unprivileged containers) cannot be applied from inside an LXC and are silently skipped by `deploy.sh`. The deployment looks green but does not deliver the documented security posture. See [Hardware Requirements](#hardware-requirements) and `CHANGELOG.md` for details. Operators who knowingly accept the reduced posture can deploy with `ALLOW_LXC=1 sudo ./deploy.sh`.
 2. **Set static IP:** Copy and run `set-static-ip.sh` inside the target.
 3. **Copy `deploy.sh`**, `detect-loxone.sh`, and `.env.example` into the target.
 4. **Find your Loxone:** `chmod +x detect-loxone.sh && ./detect-loxone.sh`
@@ -142,12 +143,24 @@ The deploy script is **idempotent** — safe to re-run.
 
 | Resource | Minimum | Recommended |
 |----------|---------|-------------|
-| CPU | 1 core | 1-2 cores |
-| RAM | 512 MB | 1 GB |
+| CPU | 1 vCPU | **2 vCPU** |
+| RAM | **1 GB** | **2 GB** |
 | Disk | 5 GB | 10 GB |
-| OS | Debian 12 (Bookworm) 64-bit | Debian 12 or Ubuntu 22.04 LTS |
+| OS | Debian 12 (Bookworm) 64-bit | Debian 12 |
 
-The reference deployment runs on a **1 vCPU, 512MB RAM Proxmox LXC** with headroom to spare. The entire security stack (nginx + CrowdSec + AppSec + bouncer) consumes approximately **100–150 MB RAM** under normal home-automation traffic loads.
+The reference deployment runs on a **Proxmox VM with 1 vCPU and 1 GB RAM**, sitting at **~850 MB RSS** under normal operation. The stack itself (nginx + CrowdSec + AppSec + bouncer) consumes 100–150 MB at idle; the rest is Debian base and page cache.
+
+**Why 2 vCPU / 2 GB is recommended:** CrowdSec's leaky-bucket memory scales with the number of distinct active attacker IPs — 256 IPs ≈ 150 MB, 15,000 IPs ≈ 1.2–1.5 GB ([source](https://www.crowdsec.net/blog/how-to-process-billions-daily-events-with-crowdsec)). A wide-cardinality scan (many unique source IPs) blows up RAM accordingly. The AppSec WAF costs roughly **5 ms / 50 millicores of CPU per request** with the Virtual Patching ruleset enabled ([source](https://docs.crowdsec.net/docs/appsec/benchmark/)) — a second vCPU lets the kernel keep `nginx` responsive for legitimate users during the first 30–60 seconds of an attack, before the bouncer catches up and starts dropping attackers at the nftables layer. 1 vCPU / 1 GB is fine for steady-state home-automation traffic; the recommended sizing is the headroom that matters under attack.
+
+> ⚠️ **Substrate: VM, not LXC.** LoxProx is a VM-only deployment. Inside an unprivileged Proxmox LXC, several hardening steps silently fail because they write to host-kernel state the container cannot reach:
+>
+> - `kernel.unprivileged_userns_clone = 0` — the **Fragnesia / CVE-2026-46300 mitigation** documented elsewhere in this project returns `EPERM` and does not take effect. This knob is global, not per-netns.
+> - `kernel.dmesg_restrict`, `kernel.kptr_restrict`, `kernel.randomize_va_space`, `fs.protected_*` — all host-wide, not writable from a container namespace.
+> - **auditd** — the kernel has **exactly one** audit consumer per netlink socket, owned by the host. `augenrules --load` fails; the config-tamper detection for `nftables`/`nginx`/`sshd`/`sudoers` is gone.
+> - **AppArmor enforcement** — `aa-enforce` loads profiles into the host's AppArmor subsystem; the container cannot do this for itself.
+> - **nftables** — the default capability set of an unprivileged LXC rejects creation of the `inet filter` table.
+>
+> `deploy.sh` detects an LXC substrate and **aborts by default**. Operators who knowingly accept the degraded posture can deploy with `ALLOW_LXC=1 sudo ./deploy.sh` — the documented CIS Debian 12 and OWASP IoT Top 10 posture no longer applies in that configuration.
 
 ### Raspberry Pi Viability
 
@@ -197,7 +210,7 @@ A Pi 3 or Pi 4 handles this with room to spare. A Pi 2 may work with a 64-bit ke
 | Slowloris / slow-read | nginx aggressive timeouts (10–15s) |
 | Config tampering | auditd + AppArmor |
 
-**Not mitigated:** Volumetric DDoS (link saturation). A 512MB RAM gateway cannot absorb a pipe-filling attack. For that, you need ISP-level scrubbing or a cloud service.
+**Not mitigated:** Volumetric DDoS (link saturation). A 1–2 GB gateway cannot absorb a pipe-filling attack. For that, you need ISP-level scrubbing or a cloud service.
 
 ---
 
