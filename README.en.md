@@ -25,7 +25,7 @@ This is an experiment in **AI-assisted, human-curated infrastructure hardening**
 ## The Problem
 
 The Loxone Miniserver Gen 1 is **legacy first-generation hardware** with:
-- ❌ No HTTPS/TLS support (CPU too weak for SSL)
+- ❌ No HTTPS/TLS support on the Miniserver itself (CPU too weak for SSL) — as of v1.6.0 the gateway can optionally terminate TLS on `:1080` toward the public side, covering the no-TLS device behind it
 - ❌ No native rate limiting
 - ❌ No IP-based access control
 - ❌ No audit logging
@@ -123,6 +123,8 @@ loxprox/
 The deploy script is **idempotent and upgrade-safe**: `git pull && sudo bash deploy.sh` just works. Operator edits to `/etc/nginx/sites-available/loxone` (e.g. a WebSocket block) survive every redeploy.
 
 > **Upgrading from v1.4.x?** Run `sudo bash deploy.sh --bootstrap-config` once — it reads back your current values from live nftables / nginx / CrowdSec and writes them to `/etc/loxprox/deploy.conf`. Full walkthrough in `docs/UPGRADE-v1.4-to-v1.6.md`.
+
+> **Optional: HTTPS on `:1080`.** As of v1.6.0 the gateway can terminate TLS via `acme.sh` + HTTP-01 — off by default, enable with `ENABLE_TLS="true"` in `/etc/loxprox/deploy.conf`. Requires a public DNS name plus an additional router forward `WAN:80 → gateway:80` for ACME validation. Full runbook: `docs/TLS-SETUP.md`.
 
 > **SSH bootstrap:** On first run the script checks for an existing `authorized_keys`. If none exists it **won't lock you out** — instead it shows an interactive menu: paste your public key (with fingerprint confirmation), show help for creating one (`ssh-keygen` on macOS/Linux/Windows), keep password auth for now (loud warning banner on every login), or abort. Non-interactive deploys fall back to soft mode automatically. After `ssh-copy-id`, run `sudo bash deploy.sh --finalize-ssh` to swap to the hard profile. Full details in `CONFIGURATION-GUIDE.md` → "SSH Key Bootstrap".
 
