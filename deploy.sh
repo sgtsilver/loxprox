@@ -19,132 +19,57 @@
 set -euo pipefail
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# CONFIGURATION — Edit ALL values below before running
+# CONFIGURATION
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #
-# QUICK START:
-#   1. Run ./detect-loxone.sh to auto-find your Miniserver
-#   2. Fill in the 6 required values marked with [REQUIRED]
-#   3. Review the optional values and adjust if needed
-#   4. Save and run: sudo ./deploy.sh
+# Per-host configuration lives in /etc/loxprox/deploy.conf — NOT in this script.
+# Upgrading no longer requires re-editing deploy.sh every time.
+#
+# First install:
+#     sudo install -d -m 0750 /etc/loxprox
+#     sudo cp deploy.conf.example /etc/loxprox/deploy.conf
+#     sudo $EDITOR /etc/loxprox/deploy.conf      # fill in the [REQUIRED] values
+#     sudo ./deploy.sh
+#
+# Upgrading from v1.4.0 or earlier (no /etc/loxprox/deploy.conf yet):
+#     sudo ./deploy.sh --bootstrap-config        # extracts your live values
+#     sudo ./deploy.sh                           # normal run, sources the file
+#
+# Running deploy.sh without a deploy.conf and without an existing install is
+# refused on purpose — that situation used to silently use placeholder values
+# (192.168.1.100 etc.) and brick fresh-VM operators who forgot to edit the
+# script. The error message points to deploy.conf.example.
 #
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# REQUIRED — Network & Target Device
-# ═══════════════════════════════════════════════════════════════════════════════
+# Default initializations — sourcing deploy.conf overrides these. The
+# `${VAR-default}` form expands to VAR if set (any value including empty),
+# otherwise default. Lets the integration test suite pre-set values via
+# `export`/assignment before sourcing the script. Portable across bash 3.2+
+# (the `[[ -v VAR ]]` test would be cleaner but requires bash 4.2).
+LOXONE_IP="${LOXONE_IP-}"
+LOXONE_PORT="${LOXONE_PORT-80}"
+GATEWAY_IP="${GATEWAY_IP-}"
+LAN_SUBNET="${LAN_SUBNET-}"
+declare -p SSH_ALLOWED_SUBNETS &>/dev/null || SSH_ALLOWED_SUBNETS=()
+RATE_LIMIT_REQ_PER_SEC="${RATE_LIMIT_REQ_PER_SEC-10}"
+RATE_LIMIT_BURST="${RATE_LIMIT_BURST-100}"
+RATE_LIMIT_CONN_PER_IP="${RATE_LIMIT_CONN_PER_IP-20}"
+PROXY_CONNECT_TIMEOUT="${PROXY_CONNECT_TIMEOUT-10}"
+PROXY_SEND_TIMEOUT="${PROXY_SEND_TIMEOUT-15}"
+PROXY_READ_TIMEOUT="${PROXY_READ_TIMEOUT-15}"
+CLIENT_BODY_TIMEOUT="${CLIENT_BODY_TIMEOUT-10}"
+CLIENT_HEADER_TIMEOUT="${CLIENT_HEADER_TIMEOUT-10}"
+ENABLE_APPSEC="${ENABLE_APPSEC-true}"
+APPSEC_MODE="${APPSEC_MODE-enforce}"
+declare -p CROWDSEC_WHITELIST_IPS &>/dev/null || CROWDSEC_WHITELIST_IPS=()
+DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL-}"
+ALERT_EMAIL="${ALERT_EMAIL-}"
+AUTOREBOOT_TIME="${AUTOREBOOT_TIME-03:00}"
 
-# [REQUIRED] Loxone Miniserver IP address
-#   How to find: Run ./detect-loxone.sh on this machine, or check your router's
-#   DHCP lease table for a device named "Loxone" or with MAC starting EE:E0:00
-#   Example: "192.168.1.100"
-LOXONE_IP="192.168.1.100"
-
-# [REQUIRED] Loxone port (Gen 1 = 80, Gen 2 = usually 80 with HTTPS redirect)
-#   This is the port the Miniserver listens on INSIDE your LAN.
-#   Do NOT change this unless you reconfigured the Miniserver itself.
-LOXONE_PORT="80"
-
-# [REQUIRED] This gateway's static IP address
-#   This VM/LXC must have a static IP so router port forwarding doesn't break.
-#   Example: "192.168.1.50"
-#   How to set: Run ./set-static-ip.sh BEFORE this script if needed.
-GATEWAY_IP="192.168.1.50"
-
-# [REQUIRED] Your LAN subnet (CIDR notation)
-#   This is the network range that can reach SSH and is whitelisted in CrowdSec.
-#   Example: "192.168.1.0/24"
-#   How to find: ip route | grep default → check your interface's network mask
-LAN_SUBNET="192.168.1.0/24"
-
-# [REQUIRED] SSH allowed subnets (space-separated list inside quotes)
-#   Only IPs from these networks can connect via SSH.
-#   NEVER add 0.0.0.0/0 here — that exposes SSH to the entire internet.
-#   Add your home LAN, a site-to-site VPN, and any jump boxes.
-#   Example: ("192.168.1.0/24" "192.168.100.0/24" "10.8.0.0/24")
-SSH_ALLOWED_SUBNETS=("192.168.1.0/24" "10.0.0.0/24")
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# OPTIONAL — Rate Limiting (defaults are safe for home automation)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# Nginx rate limits — how many requests per second each IP can make
-#   10 req/s with burst 100 is tuned for Loxone's web UI (it loads many assets).
-#   Lower this if you see abuse; raise it if legitimate users get 503 errors.
-RATE_LIMIT_REQ_PER_SEC="10"
-RATE_LIMIT_BURST="100"
-
-# Maximum concurrent connections per IP
-#   20 is generous for a home setup. Prevents connection exhaustion attacks.
-RATE_LIMIT_CONN_PER_IP="20"
-
-# Proxy timeouts — how long nginx waits for the Miniserver to respond
-#   These values protect against slowloris attacks (attackers hold connections
-#   open to exhaust resources). Do not increase above 30s.
-PROXY_CONNECT_TIMEOUT="10"
-PROXY_SEND_TIMEOUT="15"
-PROXY_READ_TIMEOUT="15"
-CLIENT_BODY_TIMEOUT="10"
-CLIENT_HEADER_TIMEOUT="10"
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# OPTIONAL — CrowdSec AppSec WAF
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# Enable the CrowdSec AppSec Web Application Firewall
-#   true  = Every HTTP request is inspected for CVE exploit patterns before
-#           reaching the Loxone. Blocks known attack tools automatically.
-#   false = Skip AppSec (not recommended).
-ENABLE_APPSEC="true"
-
-# AppSec operating mode
-#   "monitor" — AppSec logs suspicious requests but does NOT block them.
-#               Use this for the first week to verify no false positives.
-#   "enforce" — AppSec blocks matched requests with HTTP 403.
-#               Use this after you're confident the rules work for your setup.
-#   Switching modes: change the value and re-run ./deploy.sh (idempotent).
-APPSEC_MODE="enforce"
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# OPTIONAL — CrowdSec Whitelist (trusted IPs that can never be banned)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# IPs and CIDR ranges that CrowdSec will NEVER block, even under attack.
-#   Add your home LAN, VPN endpoints, uptime monitoring services, etc.
-#   Format: "1.2.3.4" for single IPs, "192.168.1.0/24" for ranges.
-#   Lines starting with # are ignored.
-CROWDSEC_WHITELIST_IPS=(
-    "192.168.1.0/24"      # [REQUIRED] your local LAN
-    "10.0.0.0/24"         # [optional] site-to-site / VPN network
-    # "203.0.113.45"      # [optional] uptime monitoring service
-    # "198.51.100.0/24"   # [optional] cloud provider IP range
-)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# OPTIONAL — Alerting
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# Discord webhook URL for real-time security alerts
-#   Get a webhook URL from your Discord server:
-#   1. Open Discord → Server Settings → Integrations → Webhooks
-#   2. Create a webhook, copy the URL, paste it here.
-#   3. Leave empty "" to disable Discord alerts entirely.
-#   The script /opt/loxprox/discord-alert.sh uses this URL.
-DISCORD_WEBHOOK_URL=""
-
-# Email address for nginx error spike alerts (leave empty to skip)
-#   Requires mailutils to be installed. Sends an email if nginx error log
-#   grows by more than 100 lines in 15 minutes.
-ALERT_EMAIL=""
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# OPTIONAL — Maintenance
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# Time for automatic reboot after kernel security updates
-#   Format: 24-hour clock, local time.
-#   Example: "03:00" = 3 AM. Set to a time when no one uses the Loxone.
-AUTOREBOOT_TIME="03:00"
+# Operator config file path. Override via env (LOXPROX_DEPLOY_CONF=/path) for
+# testing only — production callers should use the default.
+LOXPROX_DEPLOY_CONF="${LOXPROX_DEPLOY_CONF:-/etc/loxprox/deploy.conf}"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # INTERNALS — Do not edit below
@@ -159,6 +84,9 @@ CROWDSEC_NGINX_ACQUIS="${CROWDSEC_NGINX_ACQUIS:-/etc/crowdsec/acquis.d/nginx.yam
 CROWDSEC_SSH_ACQUIS="${CROWDSEC_SSH_ACQUIS:-/etc/crowdsec/acquis.d/ssh.yaml}"
 CROWDSEC_APPSEC_ACQUIS="${CROWDSEC_APPSEC_ACQUIS:-/etc/crowdsec/acquis.d/appsec.yaml}"
 NGINX_APPSEC_INCLUDE="${NGINX_APPSEC_INCLUDE:-/etc/nginx/crowdsec-appsec.conf}"
+# v1.5.0 — http-scope AppSec audit-log plumbing (map + log_format). Owned by
+# deploy.sh, regenerated every run when ENABLE_APPSEC=true.
+NGINX_APPSEC_AUDIT_CONF="${NGINX_APPSEC_AUDIT_CONF:-/etc/nginx/conf.d/loxprox-appsec.conf}"
 SYSCTL_CONF="${SYSCTL_CONF:-/etc/sysctl.d/99-security-gateway.conf}"
 NFTABLES_CONF="${NFTABLES_CONF:-/etc/nftables.conf}"
 LOGROTATE_CONF="${LOGROTATE_CONF:-/etc/logrotate.d/loxone-nginx}"
@@ -216,6 +144,220 @@ validate_network() {
     fi
     error "Invalid CIDR: $cidr"
     return 1
+}
+
+# ─── Configuration loader ────────────────────────────────────────────────────
+#
+# v1.5.0 split: REQUIRED/OPTIONAL values live in /etc/loxprox/deploy.conf, not
+# in this script. The loader is permissive about the file's existence and
+# returns 1 instead of exiting, so main() can decide how to react (offer the
+# operator a bootstrap path versus refuse with a clear message).
+#
+_loxprox_load_config() {
+    if [[ ! -f "$LOXPROX_DEPLOY_CONF" ]]; then
+        return 1
+    fi
+    # shellcheck disable=SC1090
+    source "$LOXPROX_DEPLOY_CONF"
+    return 0
+}
+
+# Returns 0 if signals of a previous LoxProx install are present on the box.
+# Used by main() to distinguish "fresh VM, operator forgot to edit config"
+# from "existing install upgrading to v1.5.0 for the first time."
+_loxprox_detect_live_install() {
+    [[ -f "$NGINX_SITE" ]] && return 0
+    [[ -d /opt/loxprox && -n "$(ls -A /opt/loxprox 2>/dev/null)" ]] && return 0
+    [[ -f /etc/audit/rules.d/99-gateway.rules ]] && return 0
+    return 1
+}
+
+# Extracts a deploy.conf candidate from the live state of an existing install
+# and writes it to $1. Returns 0 on success, 1 if any REQUIRED value could not
+# be recovered.
+#
+# Source of truth for each value:
+#   LOXONE_IP / PORT       — /etc/nginx/sites-available/loxone (upstream block)
+#   GATEWAY_IP             — `hostname -I` primary address
+#   LAN_SUBNET             — first kernel-proto link-scope route
+#   SSH_ALLOWED_SUBNETS    — /etc/nftables.conf "tcp dport 22 ip saddr {...}"
+#   ENABLE_APPSEC          — presence of `auth_request /crowdsec-appsec` in nginx site
+#   APPSEC_MODE            — /etc/crowdsec/acquis.d/appsec.yaml `mode:` key
+#   CROWDSEC_WHITELIST_IPS — /etc/crowdsec/parsers/s02-enrich/whitelist-loxone.yaml
+#   DISCORD_WEBHOOK_URL    — /etc/loxprox/config.env (runtime config, separate file)
+#
+# Rate limits, timeouts, and AUTOREBOOT_TIME are NOT extracted — they're written
+# as repo defaults and the operator can edit deploy.conf afterwards if they
+# diverged from the defaults. The repo defaults match what every deploy from
+# v1.0 through v1.4 used.
+_loxprox_extract_config_from_live_state() {
+    local out="$1"
+    local loxone_ip="" loxone_port="80"
+    local gateway_ip="" lan_subnet=""
+    local ssh_subnets_arr=()
+    local enable_appsec="false" appsec_mode="enforce"
+    local webhook=""
+    local whitelist_lines=()
+
+    if [[ -f "$NGINX_SITE" ]]; then
+        local upstream_line
+        upstream_line=$(grep -oE 'server[[:space:]]+[0-9.]+:[0-9]+' "$NGINX_SITE" | head -1 | awk '{print $2}')
+        if [[ -n "$upstream_line" ]]; then
+            loxone_ip="${upstream_line%:*}"
+            loxone_port="${upstream_line#*:}"
+        fi
+        if grep -q 'auth_request /crowdsec-appsec' "$NGINX_SITE"; then
+            enable_appsec="true"
+        fi
+    fi
+
+    if [[ -f "$NFTABLES_CONF" ]]; then
+        local ssh_set
+        ssh_set=$(grep -oE 'tcp dport 22 ip saddr \{[^}]+\}' "$NFTABLES_CONF" | head -1 \
+                  | sed -E 's/.*\{[[:space:]]*//; s/[[:space:]]*\}.*//; s/[[:space:]]+//g')
+        if [[ -n "$ssh_set" ]]; then
+            local oldIFS="$IFS"; IFS=','
+            local cidr
+            for cidr in $ssh_set; do
+                [[ -n "$cidr" ]] && ssh_subnets_arr+=("$cidr")
+            done
+            IFS="$oldIFS"
+        fi
+    fi
+
+    gateway_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    lan_subnet=$(ip route 2>/dev/null | awk '/proto kernel/ && /scope link/{print $1; exit}')
+
+    if [[ "$enable_appsec" == "true" && -f /etc/crowdsec/acquis.d/appsec.yaml ]]; then
+        local mode_line
+        mode_line=$(grep -E '^\s*mode:\s*' /etc/crowdsec/acquis.d/appsec.yaml | head -1)
+        if [[ "$mode_line" =~ monitor ]]; then
+            appsec_mode="monitor"
+        fi
+    fi
+
+    if [[ -f /etc/loxprox/config.env ]]; then
+        webhook=$(awk -F'=' '/^DISCORD_WEBHOOK_URL=/{
+            v=$2; gsub(/^[ "\047]+|[ "\047]+$/, "", v); print v; exit
+        }' /etc/loxprox/config.env)
+    fi
+
+    if [[ -f /etc/crowdsec/parsers/s02-enrich/whitelist-loxone.yaml ]]; then
+        local wl_line
+        while IFS= read -r wl_line; do
+            [[ -n "$wl_line" ]] && whitelist_lines+=("$wl_line")
+        done < <(awk '/^[[:space:]]*-[[:space:]]+/{
+            gsub(/^[[:space:]]*-[[:space:]]*"?|"?[[:space:]]*$/, "");
+            print
+        }' /etc/crowdsec/parsers/s02-enrich/whitelist-loxone.yaml)
+    fi
+
+    local missing=()
+    [[ -z "$loxone_ip" ]] && missing+=("LOXONE_IP")
+    [[ -z "$gateway_ip" ]] && missing+=("GATEWAY_IP")
+    [[ -z "$lan_subnet" ]] && missing+=("LAN_SUBNET")
+    [[ ${#ssh_subnets_arr[@]} -eq 0 ]] && missing+=("SSH_ALLOWED_SUBNETS")
+    if (( ${#missing[@]} > 0 )); then
+        error "Could not extract from live state: ${missing[*]}"
+        error "Live state is incomplete — you'll have to write deploy.conf by hand."
+        error "Copy deploy.conf.example to $LOXPROX_DEPLOY_CONF and fill in the values."
+        return 1
+    fi
+
+    {
+        echo "# Generated by deploy.sh --bootstrap-config on $(date -Iseconds)"
+        echo "# Extracted from the live state of an existing LoxProx install."
+        echo "# Review every value before re-running deploy.sh — these are best-effort"
+        echo "# reads from /etc/nginx, /etc/nftables.conf, and /etc/crowdsec."
+        echo
+        echo "LOXONE_IP=\"$loxone_ip\""
+        echo "LOXONE_PORT=\"$loxone_port\""
+        echo "GATEWAY_IP=\"$gateway_ip\""
+        echo "LAN_SUBNET=\"$lan_subnet\""
+        printf 'SSH_ALLOWED_SUBNETS=('
+        local s
+        for s in "${ssh_subnets_arr[@]}"; do
+            printf ' "%s"' "$s"
+        done
+        printf ' )\n'
+        echo
+        echo "# Defaults preserved; the live nginx config still uses these. Adjust"
+        echo "# only if you want to change the rate-limiting posture."
+        echo "RATE_LIMIT_REQ_PER_SEC=\"10\""
+        echo "RATE_LIMIT_BURST=\"100\""
+        echo "RATE_LIMIT_CONN_PER_IP=\"20\""
+        echo "PROXY_CONNECT_TIMEOUT=\"10\""
+        echo "PROXY_SEND_TIMEOUT=\"15\""
+        echo "PROXY_READ_TIMEOUT=\"15\""
+        echo "CLIENT_BODY_TIMEOUT=\"10\""
+        echo "CLIENT_HEADER_TIMEOUT=\"10\""
+        echo
+        echo "ENABLE_APPSEC=\"$enable_appsec\""
+        echo "APPSEC_MODE=\"$appsec_mode\""
+        echo
+        echo "CROWDSEC_WHITELIST_IPS=("
+        local w
+        if (( ${#whitelist_lines[@]} > 0 )); then
+            for w in "${whitelist_lines[@]}"; do
+                echo "    \"$w\""
+            done
+        else
+            echo "    \"$lan_subnet\"   # fallback — extracted LAN_SUBNET"
+        fi
+        echo ")"
+        echo
+        echo "DISCORD_WEBHOOK_URL=\"$webhook\""
+        echo "ALERT_EMAIL=\"\""
+        echo "AUTOREBOOT_TIME=\"03:00\""
+    } > "$out"
+    return 0
+}
+
+# Orchestrates --bootstrap-config: detect live install, extract values, show
+# the candidate file, ask for confirmation, install at $LOXPROX_DEPLOY_CONF.
+# Honors $LOXPROX_BOOTSTRAP_YES for non-interactive use.
+_loxprox_bootstrap_config_interactive() {
+    banner "Bootstrap deploy.conf from live state"
+    check_root
+
+    if ! _loxprox_detect_live_install; then
+        error "No existing LoxProx install detected on this host."
+        error "Bootstrap is for upgrading existing installs. For a fresh VM:"
+        error "  sudo install -d -m 0750 /etc/loxprox"
+        error "  sudo cp deploy.conf.example $LOXPROX_DEPLOY_CONF"
+        error "  sudo \$EDITOR $LOXPROX_DEPLOY_CONF"
+        return 1
+    fi
+
+    install -d -m 0750 -o root -g root "$(dirname "$LOXPROX_DEPLOY_CONF")"
+    local candidate
+    candidate=$(mktemp -t loxprox-deploy-conf-XXXXXX)
+    # shellcheck disable=SC2064
+    trap "rm -f '$candidate'" RETURN
+
+    if ! _loxprox_extract_config_from_live_state "$candidate"; then
+        return 1
+    fi
+
+    info "Extracted candidate deploy.conf — review below:"
+    echo
+    sed 's/^/    /' "$candidate"
+    echo
+
+    local confirm="y"
+    if [[ -t 0 && -t 1 && -z "${LOXPROX_BOOTSTRAP_YES:-}" ]]; then
+        read -r -p "Write this to $LOXPROX_DEPLOY_CONF? [y/N] " confirm
+    fi
+    if [[ "${confirm,,}" != "y" ]]; then
+        warn "Aborted — no file written. Candidate left at $candidate for inspection."
+        trap - RETURN
+        return 1
+    fi
+
+    [[ -f "$LOXPROX_DEPLOY_CONF" ]] && cp -a "$LOXPROX_DEPLOY_CONF" "$LOXPROX_DEPLOY_CONF.bak-$(date +%Y%m%d-%H%M%S)"
+    install -m 0640 -o root -g root "$candidate" "$LOXPROX_DEPLOY_CONF"
+    ok "Wrote $LOXPROX_DEPLOY_CONF (0640 root). Now run: sudo bash deploy.sh"
+    return 0
 }
 
 # ─── GPG cross-verification ──────────────────────────────────────────────────
@@ -595,19 +737,48 @@ install_nginx() {
 
 configure_nginx() {
     banner "Configuring Nginx"
-    backup_file "$NGINX_SITE"
     rm -f /etc/nginx/sites-enabled/default
 
-    local appsec_include="" appsec_auth="" appsec_http_extras="" appsec_access_log=""
-    if [[ "$ENABLE_APPSEC" == "true" ]]; then
-        # Placeholder include — will be overwritten with real bouncer key after CrowdSec setup
-        appsec_include="    include ${NGINX_APPSEC_INCLUDE};"
-        appsec_auth='
+    # ── http-scope AppSec audit-log plumbing ─────────────────────────────────
+    # Owned by deploy.sh, regenerated every run when ENABLE_APPSEC=true,
+    # deleted when false. Lives outside the site file so hand-edits to the
+    # site (WebSocket blocks, custom locations, etc.) survive future upgrades.
+    # v1.5.0 originally tried to move the AppSec map + log_format out of the
+    # site file into /etc/nginx/conf.d/loxprox-appsec.conf so future AppSec
+    # features could land without touching the operator-customizable site.
+    # That fails nginx -t on Debian 12: `auth_request_set $appsec_action ...`
+    # is the directive that registers `$appsec_action` with nginx's variable
+    # subsystem, and it lives inside the location block. The map (or any
+    # `if=$appsec_action` reference) requires the variable to be already
+    # registered at parse time — which it isn't if it sits in a conf.d file
+    # that nginx loads before sites-enabled/. So in v1.5.0 the map and
+    # log_format stay inline in the site file (same as v1.4.0), and the only
+    # http-scope helper file we own is removed if it lingers from an earlier
+    # v1.5.0 dev iteration.
+    rm -f "$NGINX_APPSEC_AUDIT_CONF"
+
+    # ── Site config ──────────────────────────────────────────────────────────
+    # Write the site file ONLY if it does not already exist. Operator
+    # hand-edits (WebSocket locations, custom proxy_set_header lines, etc.)
+    # are preserved across every future `deploy.sh` run. Set
+    # LOXPROX_FORCE_REGEN_NGINX=1 to override and regenerate from template.
+    if [[ -f "$NGINX_SITE" ]] && [[ "${LOXPROX_FORCE_REGEN_NGINX:-0}" != "1" ]]; then
+        info "Site config $NGINX_SITE exists — preserving operator edits."
+        info "  Force regeneration with: LOXPROX_FORCE_REGEN_NGINX=1 sudo bash deploy.sh"
+    else
+        backup_file "$NGINX_SITE"
+
+        local appsec_include="" appsec_auth="" appsec_http_extras="" appsec_access_log=""
+        if [[ "$ENABLE_APPSEC" == "true" ]]; then
+            appsec_include="    include ${NGINX_APPSEC_INCLUDE};"
+            appsec_auth='
         auth_request      /crowdsec-appsec;
         auth_request_set  $appsec_action $upstream_http_x_crowdsec_action;'
-        # AppSec audit log — only blocked requests are logged for offline forensics.
-        # gateway-monitor.sh:check_appsec_detections() tails this file.
-        appsec_http_extras='map $appsec_action $appsec_blocked {
+            # Map registers $appsec_blocked at http scope so the access_log
+            # `if=$appsec_blocked` directive can resolve it at parse time.
+            # Keeping map + log_format inline (rather than in conf.d/) — see
+            # the comment above about why nginx rejects the split.
+            appsec_http_extras='map $appsec_action $appsec_blocked {
     default       0;
     "deny"        1;
     "ban"         1;
@@ -617,10 +788,10 @@ log_format appsec_evt '\''$time_iso8601 $remote_addr "$request" '\''
                       '\''appsec=$appsec_action status=$status '\''
                       '\''ua="$http_user_agent" xff="$http_x_forwarded_for"'\'';
 '
-        appsec_access_log='    access_log /var/log/nginx/appsec-detections.log appsec_evt if=$appsec_blocked;'
-    fi
+            appsec_access_log='    access_log /var/log/nginx/appsec-detections.log appsec_evt if=$appsec_blocked;'
+        fi
 
-    cat > "$NGINX_SITE" <<EOF
+        cat > "$NGINX_SITE" <<EOF
 # Loxone Miniserver Gen 1 — Security Gateway
 # Generated by deploy.sh on $(date -Iseconds)
 
@@ -682,6 +853,7 @@ ${appsec_auth}
     }
 }
 EOF
+    fi
 
     # Create placeholder AppSec include so nginx -t passes before CrowdSec is ready
     if [[ "$ENABLE_APPSEC" == "true" ]]; then
@@ -690,7 +862,7 @@ EOF
 
     ln -sf "$NGINX_SITE" "$NGINX_ENABLED"
     nginx -t 2>&1 | tee -a "$LOG_FILE"
-    systemctl restart nginx
+    systemctl reload nginx 2>/dev/null || systemctl restart nginx
     systemctl enable nginx
     ok "Nginx running on :1080."
 }
@@ -1741,6 +1913,14 @@ main() {
     mkdir -p "$(dirname "$LOG_FILE")"
     touch "$LOG_FILE"
 
+    # Re-entry point: extract deploy.conf from the live state of an existing
+    # install (v1.4.0 → v1.5.0 upgrade path). Does NOT proceed to deploy —
+    # operator reviews the file, then runs `sudo bash deploy.sh` normally.
+    if [[ "${1:-}" == "--bootstrap-config" ]]; then
+        _loxprox_bootstrap_config_interactive
+        exit $?
+    fi
+
     # Re-entry point for the SSH hardening bootstrap. Used after the operator
     # installs an authorized_keys entry on a box that was deployed without one
     # (SOFT mode). Swaps the soft drop-in for the hard one and removes the
@@ -1753,6 +1933,35 @@ main() {
 
     banner "LoxProx — Debian 12 VM Deploy"
     info "Log: $LOG_FILE"
+
+    # Load per-host configuration. Refuse to use silent placeholder defaults —
+    # that footgun bricked operators who forgot to edit deploy.sh in v1.4 and
+    # earlier (nginx pointed at 192.168.1.100, nftables allowed 192.168.1.0/24,
+    # whole gateway broken on first run).
+    if ! _loxprox_load_config; then
+        if _loxprox_detect_live_install; then
+            if [[ -t 0 && -t 1 ]]; then
+                error "No $LOXPROX_DEPLOY_CONF found, but an existing LoxProx install is detected."
+                error "First run on this host since the v1.5.0 split. Bootstrap your config:"
+                error "    sudo bash deploy.sh --bootstrap-config"
+                error "Then re-run sudo bash deploy.sh."
+                exit 1
+            else
+                warn "Non-interactive deploy without $LOXPROX_DEPLOY_CONF — auto-bootstrapping from live state."
+                LOXPROX_BOOTSTRAP_YES=1 _loxprox_bootstrap_config_interactive || exit 1
+                _loxprox_load_config || { error "Bootstrap wrote the file but loading still failed."; exit 1; }
+            fi
+        else
+            error "No $LOXPROX_DEPLOY_CONF and no existing LoxProx install detected."
+            error "This looks like a fresh VM. Create your config file:"
+            error "    sudo install -d -m 0750 /etc/loxprox"
+            error "    sudo cp ${SCRIPT_DIR:-.}/deploy.conf.example $LOXPROX_DEPLOY_CONF"
+            error "    sudo \$EDITOR $LOXPROX_DEPLOY_CONF      # fill in [REQUIRED] values"
+            error "Then re-run sudo bash deploy.sh."
+            exit 1
+        fi
+    fi
+    info "Configuration loaded from $LOXPROX_DEPLOY_CONF"
 
     preflight
     apply_sysctls
