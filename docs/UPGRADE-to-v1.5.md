@@ -1,6 +1,6 @@
-# Upgrading LoxProx v1.4.x → v1.6.0
+# Upgrading LoxProx v1.3.x → v1.5.0
 
-v1.6.0 moves the REQUIRED configuration values out of `deploy.sh` into a
+v1.5.0 moves the REQUIRED configuration values out of `deploy.sh` into a
 dedicated file at `/etc/loxprox/deploy.conf`. **You must do a one-time
 bootstrap on any existing install** before re-running `deploy.sh`, or the
 new safety check refuses to proceed.
@@ -19,18 +19,18 @@ demonstrated the failure mode on 2026-05-26: the hand-edited copy of
 `deploy.sh` would have rewritten nftables with `192.168.1.0/24` and locked
 the LAN out of the gateway.
 
-v1.6.0 fixes this for good: values live in `/etc/loxprox/deploy.conf`,
+v1.5.0 fixes this for good: values live in `/etc/loxprox/deploy.conf`,
 which `deploy.sh` sources but never touches. Upgrades are just
 `git pull && sudo bash deploy.sh`.
 
 ---
 
-## Upgrade path for existing installs (v1.4.x → v1.6.0)
+## Upgrade path for existing installs (v1.3.x → v1.5.0)
 
 Three commands. The first one is the only new step you'll ever do.
 
 ```bash
-git pull                                       # or download the v1.6.0 tarball
+git pull                                       # or download the v1.5.0 tarball
 
 sudo bash deploy.sh --bootstrap-config         # extract live values → deploy.conf
 sudo $EDITOR /etc/loxprox/deploy.conf          # review (highly recommended)
@@ -87,19 +87,19 @@ to live at the top of `deploy.sh` — no new conventions to learn.
 
 ---
 
-## What v1.6.0 also changes (non-breaking)
+## What v1.5.0 also changes (non-breaking)
 
 - **`/etc/nginx/sites-available/loxone` is preserved on every redeploy.**
   WebSocket location blocks and other operator hand-edits no longer get
   overwritten. Use `LOXPROX_FORCE_REGEN_NGINX=1 sudo bash deploy.sh` to
   regenerate from the template if you ever need to.
-- **AppSec map + log_format stay inline in the site config** (same as v1.4.0). A `conf.d/loxprox-appsec.conf` split was attempted and reverted — nginx rejects it because `$appsec_action` is registered by `auth_request_set` inside the location block, and any earlier reference fails parse-time validation. v1.6.0 cleans up the conf.d file if a v1.6.0-rc dev build wrote it.
+- **AppSec map + log_format stay inline in the site config** (same as v1.4.0). A `conf.d/loxprox-appsec.conf` split was attempted and reverted — nginx rejects it because `$appsec_action` is registered by `auth_request_set` inside the location block, and any earlier reference fails parse-time validation. v1.5.0 cleans up the conf.d file if a v1.5.0-rc dev build wrote it.
 - **`systemctl reload nginx`** (was `restart`) — graceful, preserves
   established upstream keepalives to the Miniserver.
 
 ---
 
-## Fresh-VM install (new in v1.6.0 wording)
+## Fresh-VM install (new in v1.5.0 wording)
 
 ```bash
 # 1. Set up the VM (1 GB+ RAM, 1 vCPU+, Debian 12, static IP).
