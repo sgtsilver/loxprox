@@ -321,6 +321,79 @@ DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/123456789/abcdefghijklmnop
 
 ---
 
+## Optional TLS (HTTPS on :1080) — what `deploy.sh` does when you opt in
+
+LoxProx v1.6.0 adds optional HTTPS termination on the gateway via `acme.sh` + HTTP-01. Off by default — the gateway keeps speaking plain HTTP on `:1080` until you set `ENABLE_TLS="true"` in `/etc/loxprox/deploy.conf` and re-run the deploy. Toggling back off is just as clean (cert files are kept so flipping forward again is fast).
+
+The full operator runbook lives in [`docs/TLS-SETUP.md`](docs/TLS-SETUP.md). This section is the short version: which keys to set, what the prerequisites are, and how the re-entry flags work.
+
+### Threat model — why this is opt-in, not default
+
+The gateway already shields the no-TLS Miniserver behind it; for many home deployments plain HTTP on `:1080` over a router port-forward is the established setup and works fine. Enabling TLS widens the public surface by one extra listener (`:80`, scoped to `/.well-known/acme-challenge/` plus a 301 redirect) and introduces an ACME renewal dependency. Worth it for anyone who wants HTTPS in the URL bar of the Loxone web UI; not mandatory.
+
+### Prerequisites — once, before flipping `ENABLE_TLS=true`
+
+1. **Public DNS** — `TLS_DOMAIN` must resolve publicly to your router's WAN IP **before** the deploy. The ACME server validates it by connecting to `http://<TLS_DOMAIN>/.well-known/acme-challenge/<token>`. A dynamic-DNS hostname (`selfhost.eu`, `ddnss.de`, Cloudflare, etc.) or a static A record at your registrar both work.
+2. **Router forward `WAN:80 → gateway:80`** — in addition to the existing `WAN:1080 → gateway:1080` forward. This is **only** used for ACME validation; the gateway's `:80` listener answers exactly `/.well-known/acme-challenge/*` and 301s everything else to `https://<TLS_DOMAIN>:1080$request_uri`.
+
+### Config keys (all optional, defaults are sane)
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `ENABLE_TLS` | `"false"` | Master toggle. Flip to `"true"` to opt in. |
+| `TLS_DOMAIN` | `""` | Fully-qualified public hostname (e.g. `loxprox.example.com`). Required when `ENABLE_TLS=true`; refused with a clear error if missing or non-FQDN. |
+| `TLS_EMAIL` | `""` | Registered with the ACME provider. |
+| `TLS_ACME_SERVER` | `"letsencrypt"` | Also accepts `letsencrypt_test` (staging — use first while debugging), `zerossl`, `buypass`, `buypass_test`, `sslcom`, or a full directory URL. |
+| `TLS_ACME_EXTRA` | `""` | Passthrough to `acme.sh --issue` (e.g. `--keylength ec-256`). |
+
+**Example:**
+
+```bash
+ENABLE_TLS="true"
+TLS_DOMAIN="loxprox.example.com"
+TLS_EMAIL="you@example.com"
+TLS_ACME_SERVER="letsencrypt"
+TLS_ACME_EXTRA=""
+```
+
+### What happens on `sudo bash deploy.sh` with `ENABLE_TLS=true`
+
+1. `acme.sh` is installed from a SHA256-pinned GitHub release tarball — no `curl | bash`.
+2. A small `/etc/nginx/conf.d/loxprox-acme.conf` is written: `:80` `default_server` that serves only `/.well-known/acme-challenge/` from `/var/www/acme/` and 301s everything else to `https://$host:1080$request_uri`.
+3. The cert is issued (or renewed) via `acme.sh --issue --webroot --server $TLS_ACME_SERVER`. "Cert still valid, skipped" is treated as success.
+4. The cert is installed at `/etc/loxprox/tls/{fullchain.pem,privkey.pem}` (mode `0640 root`), with `--reloadcmd "systemctl reload nginx"` recorded for the renewal cron.
+5. The existing site file is mutated between explicit markers (`# LOXPROX-TLS-BEGIN` / `# LOXPROX-TLS-END`) and `listen 1080;` is swapped for `listen 1080 ssl;`. Operator hand-edits outside the marker block (WebSocket location, custom headers) are untouched. The strict regex on the listen line refuses anything other than canonical `listen 1080;` — no silent mutation.
+6. The auto-renewal cron is **verified** after every TLS-enabled deploy (not assumed). Missing? It is restored from `acme.sh --install-cronjob` and the exact cron line plus manual-renewal recipe is logged.
+
+### Toggle-off behavior (`ENABLE_TLS="false"`)
+
+Set `ENABLE_TLS="false"` and re-run `sudo bash deploy.sh`. The script:
+
+- Strips the marker block from the site file.
+- Reverts the listen line to plain `listen 1080;`.
+- Removes the `:80` ACME listener.
+- Cancels the per-domain renewal in `acme.sh`.
+- **Keeps** cert files under `/etc/loxprox/tls/` so re-enabling later doesn't pay re-issuance time.
+
+### Re-entry flags
+
+```bash
+# Force-renew right now (acme.sh --renew … --force):
+sudo bash deploy.sh --renew-tls
+
+# Full nuke — site revert, conf.d listener removed, acme.sh uninstalled,
+# /etc/loxprox/tls/ deleted, cron cancelled. Operator action remaining:
+# remove the WAN:80 → gateway:80 router forward.
+sudo bash deploy.sh --remove-tls
+```
+
+### Pointers
+
+- **Full TLS runbook:** [`docs/TLS-SETUP.md`](docs/TLS-SETUP.md)
+- **Upgrade walkthrough (v1.4 → v1.6):** [`docs/UPGRADE-v1.4-to-v1.6.md`](docs/UPGRADE-v1.4-to-v1.6.md)
+
+---
+
 ## Troubleshooting
 
 ### "I don't know my Loxone's IP"
