@@ -745,23 +745,38 @@ configure_nginx() {
     # site (WebSocket blocks, custom locations, etc.) survive future upgrades.
     local appsec_conf="$NGINX_APPSEC_AUDIT_CONF"
     mkdir -p "$(dirname "$appsec_conf")"
+    # Note: no `map` directive here even though it would be the natural
+    # primitive. `map $appsec_action ...` at http scope fails nginx -t with
+    # `unknown "appsec_action" variable` because conf.d/ files are parsed
+    # before sites-enabled/, and `$appsec_action` is only registered when
+    # nginx encounters the `auth_request_set` inside the location block.
+    # The conditional `access_log` inside `server {}` uses `if=$appsec_action`
+    # directly — nginx's standard `if=$var` semantics treat an empty string as
+    # "skip", which is exactly what happens when AppSec allows (no
+    # X-Crowdsec-Action header → empty $upstream_http_x_crowdsec_action →
+    # empty $appsec_action).
+    #
+    # On a live v1.4.0 install patched via the original surgical migration,
+    # `log_format appsec_evt` may already exist inline in the site file. nginx
+    # rejects duplicate log_format names, so we skip writing the conf.d
+    # version in that case — the site's inline copy keeps working until the
+    # operator regenerates with LOXPROX_FORCE_REGEN_NGINX=1.
     if [[ "$ENABLE_APPSEC" == "true" ]]; then
-        cat > "$appsec_conf" <<'NGINX_APPSEC'
+        if [[ -f "$NGINX_SITE" ]] && grep -q 'log_format[[:space:]]\+appsec_evt' "$NGINX_SITE"; then
+            info "Site file already defines log_format appsec_evt (legacy v1.4.0 patch) — leaving conf.d empty."
+            rm -f "$appsec_conf"
+        else
+            cat > "$appsec_conf" <<'NGINX_APPSEC'
 # LoxProx — AppSec audit-log plumbing (http scope).
 # Owned by deploy.sh — do not edit by hand; this file is overwritten on every
 # `sudo bash deploy.sh` when ENABLE_APPSEC=true (and deleted when false).
 # Consumed by /var/log/nginx/appsec-detections.log → gateway-monitor.sh.
-map $appsec_action $appsec_blocked {
-    default       0;
-    "deny"        1;
-    "ban"         1;
-    "captcha"     1;
-}
 log_format appsec_evt '$time_iso8601 $remote_addr "$request" '
                       'appsec=$appsec_action status=$status '
                       'ua="$http_user_agent" xff="$http_x_forwarded_for"';
 NGINX_APPSEC
-        chmod 0644 "$appsec_conf"
+            chmod 0644 "$appsec_conf"
+        fi
     else
         rm -f "$appsec_conf"
     fi
@@ -783,7 +798,11 @@ NGINX_APPSEC
             appsec_auth='
         auth_request      /crowdsec-appsec;
         auth_request_set  $appsec_action $upstream_http_x_crowdsec_action;'
-            appsec_access_log='    access_log /var/log/nginx/appsec-detections.log appsec_evt if=$appsec_blocked;'
+            # if=$appsec_action — fires for any non-empty action ("deny", "ban",
+            # "captcha"). When AppSec allows, $appsec_action is empty (no
+            # X-Crowdsec-Action header in the subrequest response), and the
+            # standard nginx `if=` semantics treat empty as "skip".
+            appsec_access_log='    access_log /var/log/nginx/appsec-detections.log appsec_evt if=$appsec_action;'
         fi
 
         cat > "$NGINX_SITE" <<EOF
