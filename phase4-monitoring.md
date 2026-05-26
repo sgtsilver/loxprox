@@ -95,13 +95,13 @@ systemctl reload crowdsec
 
 ---
 
-## If TLS is enabled (v1.6.0+)
+## If TLS is enabled (v1.5.0+)
 
 Only relevant when `ENABLE_TLS="true"` in `/etc/loxprox/deploy.conf`. Skip otherwise.
 
 ### Verify the renewal cron survives
 
-`acme.sh` installs a daily cron in **root's** crontab on first issuance. It survives reboots, but a manual `crontab -e` mishap could wipe it. The v1.6.0 `_loxprox_ensure_acme_cron` step re-asserts it after every TLS-enabled deploy, but check periodically:
+`acme.sh` installs a daily cron in **root's** crontab on first issuance. It survives reboots, but a manual `crontab -e` mishap could wipe it. The v1.5.0 `_loxprox_ensure_acme_cron` step re-asserts it after every TLS-enabled deploy, but check periodically:
 
 ```bash
 crontab -l | grep acme.sh
@@ -238,7 +238,7 @@ If you run a home monitoring stack, ship nginx logs to Loki/Grafana for dashboar
 - [ ] Verify SSH banner is **not** showing the red "password auth still enabled" warning. If it is: install a public key (`ssh-copy-id root@<gateway>`) and run `sudo bash deploy.sh --finalize-ssh` to swap from SOFT to HARD profile.
 - [ ] Sanity-check AppSec detections: `tail /var/log/nginx/appsec-detections.log` — should grow under attack and stay empty under normal traffic.
 - [ ] **If `ENABLE_TLS=true`:** check cert expiry — `sudo /root/.acme.sh/acme.sh --list`. Should show > 30 days remaining; `acme.sh`'s daily cron renews automatically inside the 30-day window.
-- [ ] **If `ENABLE_TLS=true`:** verify the auto-renewal cron is still in root's crontab — `crontab -l | grep acme.sh`. If missing, re-run `sudo bash deploy.sh` (the v1.6.0 `_loxprox_ensure_acme_cron` step re-installs it).
+- [ ] **If `ENABLE_TLS=true`:** verify the auto-renewal cron is still in root's crontab — `crontab -l | grep acme.sh`. If missing, re-run `sudo bash deploy.sh` (the v1.5.0 `_loxprox_ensure_acme_cron` step re-installs it).
 
 ---
 
