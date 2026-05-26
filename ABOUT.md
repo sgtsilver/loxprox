@@ -1,3 +1,5 @@
+**Language:** [Deutsch](ABOUT.de.md) · English
+
 # About LoxProx
 
 Pick the length that fits your context.

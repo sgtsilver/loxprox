@@ -1,3 +1,5 @@
+**Language:** [Deutsch](phase3-cutover.de.md) · English
+
 # Phase 3 — Cutover to Security Gateway
 
 > ⚠️ **Substrate note:** This runbook was originally written for an LXC-based deployment and still uses `LXC` / `pct` terminology in places. **LoxProx is now VM-only** — `deploy.sh` aborts on LXC by default because several defenses (kernel sysctls, Fragnesia mitigation, auditd, AppArmor enforcement, nftables) cannot be applied from inside a container. For a new deployment, substitute "Gateway VM" wherever you see "Gateway LXC" and use `qm` instead of `pct` on Proxmox. The cutover steps below are substrate-agnostic.

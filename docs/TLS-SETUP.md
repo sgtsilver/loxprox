@@ -1,3 +1,5 @@
+**Language:** [Deutsch](TLS-SETUP.de.md) · English
+
 # LoxProx TLS — Optional HTTPS on :1080
 
 LoxProx v1.5.0 adds optional HTTPS termination on the gateway itself, via
