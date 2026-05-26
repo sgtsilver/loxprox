@@ -1,10 +1,10 @@
 # Configuration Guide
 
-This document explains every value LoxProx needs. As of v1.6.0, those values live in `/etc/loxprox/deploy.conf` (not at the top of `deploy.sh` like in v1.4 and earlier — see `docs/UPGRADE-v1.4-to-v1.6.md` if you're migrating).
+This document explains every value LoxProx needs. As of v1.5.0, those values live in `/etc/loxprox/deploy.conf` (not at the top of `deploy.sh` like in v1.4 and earlier — see `docs/UPGRADE-to-v1.5.md` if you're migrating).
 
 ---
 
-## TL;DR: Three-Step Setup (v1.6.0+)
+## TL;DR: Three-Step Setup (v1.5.0+)
 
 ```bash
 # Step 1: Find your Loxone automatically
@@ -21,7 +21,7 @@ sudo bash deploy.sh
 
 `deploy.sh` sources `/etc/loxprox/deploy.conf` at startup. It refuses to run if the file is missing AND no existing install is detected, so you can't accidentally deploy with the placeholder values that ship in the example.
 
-**Upgrading from v1.4.x?** Run `sudo bash deploy.sh --bootstrap-config` once. It reads back your current values from live nftables / nginx / CrowdSec state and writes them into `/etc/loxprox/deploy.conf` for you. Full walkthrough: [`docs/UPGRADE-v1.4-to-v1.6.md`](docs/UPGRADE-v1.4-to-v1.6.md).
+**Upgrading from v1.3.x?** Run `sudo bash deploy.sh --bootstrap-config` once. It reads back your current values from live nftables / nginx / CrowdSec state and writes them into `/etc/loxprox/deploy.conf` for you. Full walkthrough: [`docs/UPGRADE-to-v1.5.md`](docs/UPGRADE-to-v1.5.md).
 
 ---
 
@@ -323,7 +323,7 @@ DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/123456789/abcdefghijklmnop
 
 ## Optional TLS (HTTPS on :1080) — what `deploy.sh` does when you opt in
 
-LoxProx v1.6.0 adds optional HTTPS termination on the gateway via `acme.sh` + HTTP-01. Off by default — the gateway keeps speaking plain HTTP on `:1080` until you set `ENABLE_TLS="true"` in `/etc/loxprox/deploy.conf` and re-run the deploy. Toggling back off is just as clean (cert files are kept so flipping forward again is fast).
+LoxProx v1.5.0 adds optional HTTPS termination on the gateway via `acme.sh` + HTTP-01. Off by default — the gateway keeps speaking plain HTTP on `:1080` until you set `ENABLE_TLS="true"` in `/etc/loxprox/deploy.conf` and re-run the deploy. Toggling back off is just as clean (cert files are kept so flipping forward again is fast).
 
 The full operator runbook lives in [`docs/TLS-SETUP.md`](docs/TLS-SETUP.md). This section is the short version: which keys to set, what the prerequisites are, and how the re-entry flags work.
 
@@ -390,7 +390,7 @@ sudo bash deploy.sh --remove-tls
 ### Pointers
 
 - **Full TLS runbook:** [`docs/TLS-SETUP.md`](docs/TLS-SETUP.md)
-- **Upgrade walkthrough (v1.4 → v1.6):** [`docs/UPGRADE-v1.4-to-v1.6.md`](docs/UPGRADE-v1.4-to-v1.6.md)
+- **Upgrade walkthrough (v1.3.x → v1.5):** [`docs/UPGRADE-to-v1.5.md`](docs/UPGRADE-to-v1.5.md)
 
 ---
 
