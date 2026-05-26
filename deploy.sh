@@ -206,7 +206,13 @@ _loxprox_extract_config_from_live_state() {
             loxone_ip="${upstream_line%:*}"
             loxone_port="${upstream_line#*:}"
         fi
-        if grep -q 'auth_request /crowdsec-appsec' "$NGINX_SITE"; then
+        # Whitespace-tolerant. Live nginx configs often have aligned columns
+        # (`auth_request      /crowdsec-appsec;`), which a literal single-space
+        # match misses — that bug shipped in v1.5.0 and the maintainer's own
+        # upgrade-from-v1.4.0 hit it (ENABLE_APPSEC=false was extracted from a
+        # VM that obviously had AppSec on, because of the column alignment in
+        # its hand-edited site config). Fixed in v1.5.1.
+        if grep -qE 'auth_request[[:space:]]+/crowdsec-appsec' "$NGINX_SITE"; then
             enable_appsec="true"
         fi
     fi

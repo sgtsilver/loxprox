@@ -384,6 +384,11 @@ test_extract_config_from_live_state() {
     mkdir -p "$(dirname "$NGINX_SITE")" "$(dirname "$NFTABLES_CONF")" \
              "$MOCK_ROOT/etc/crowdsec/acquis.d" "$MOCK_ROOT/etc/crowdsec/parsers/s02-enrich"
 
+    # Note the aligned-column whitespace in `auth_request      /crowdsec-appsec;`
+    # — that's how real hand-edited nginx configs look. v1.5.0 shipped a
+    # literal-single-space match here and the maintainer's own upgrade
+    # from v1.4.0 misread the site as ENABLE_APPSEC=false. v1.5.1 makes the
+    # extractor whitespace-tolerant; this fixture pins the behaviour.
     cat > "$NGINX_SITE" <<'NGINX_FIXTURE'
 upstream loxone_backend {
     server 192.168.178.20:80;
@@ -393,7 +398,7 @@ server {
     listen 1080;
     location /crowdsec-appsec { internal; }
     location / {
-        auth_request /crowdsec-appsec;
+        auth_request      /crowdsec-appsec;
         proxy_pass http://loxone_backend;
     }
 }
