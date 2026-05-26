@@ -10,6 +10,12 @@ config.json
 # accident.
 deploy.conf
 
+# Local deployment artifacts — operator's production-specific files (real
+# IPs, hostnames, webhook URLs, etc.). The repo's deploy.conf.example is the
+# public template; the populated copies live in local-deployment/ for
+# scp/rsync to the live VM. Anything in this dir is private by default.
+local-deployment/
+
 # Runtime files
 *.pid
 *.sock

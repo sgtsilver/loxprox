@@ -133,6 +133,64 @@ DISCORD_WEBHOOK_URL=""
 ALERT_EMAIL=""
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# OPTIONAL — TLS (HTTPS on the gateway via ACME / acme.sh)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# When enabled, deploy.sh installs acme.sh, requests a public certificate for
+# TLS_DOMAIN via HTTP-01, installs it at /etc/loxprox/tls/, and switches the
+# nginx :1080 listener from plain HTTP to HTTPS. Renewal runs via acme.sh's
+# default cron (~daily) and reloads nginx automatically.
+#
+# Toggle anytime: edit `ENABLE_TLS`, re-run `sudo bash deploy.sh`. Off→on
+# installs + mutates the site; on→off reverts the site mutation and disables
+# the renewal cron. Cert files at /etc/loxprox/tls/ are kept so a later
+# re-enable doesn't have to re-issue. Use `sudo bash deploy.sh --remove-tls`
+# to fully nuke (cert files, acme.sh state, conf.d).
+#
+# Prerequisites (operator action, BEFORE setting ENABLE_TLS=true):
+#   1. A public DNS A record pointing TLS_DOMAIN at your router's WAN IP.
+#      (Dynamic DNS providers like selfhost.eu are fine — make sure the
+#      hostname resolves before you flip the switch.)
+#   2. A router port forward `WAN:80 → gateway:80` in addition to the
+#      existing 1080 forward. The :80 listener on the gateway answers ONLY
+#      `/.well-known/acme-challenge/` requests (everything else gets a 301
+#      to https://$TLS_DOMAIN:1080$request_uri). The widened public surface
+#      is just the challenge directory — same threat profile as any normal
+#      Let's Encrypt setup.
+#
+# Manual operations:
+#   sudo bash deploy.sh --renew-tls    # force renewal now (acme.sh --renew)
+#   sudo bash deploy.sh --remove-tls   # full removal — cert + state + cron
+#
+
+# Enable HTTPS on :1080. Default: false (plain HTTP).
+ENABLE_TLS="false"
+
+# Fully-qualified domain name the cert is issued for.
+#   Must already resolve publicly to your router's WAN IP.
+#   Example: "dewia71.selfhost.eu"
+TLS_DOMAIN=""
+
+# Account email registered with the ACME provider. Required by Let's Encrypt;
+# some providers (ZeroSSL) require it for account creation.
+TLS_EMAIL=""
+
+# ACME server. Accepts: letsencrypt, letsencrypt_test, zerossl, buypass,
+# buypass_test, sslcom, or a full ACME directory URL.
+#   - "letsencrypt"      → Let's Encrypt production (recommended)
+#   - "letsencrypt_test" → Let's Encrypt staging (use during initial setup
+#                          to avoid hitting rate limits while debugging)
+#   - "zerossl"          → ZeroSSL production (default in upstream acme.sh)
+TLS_ACME_SERVER="letsencrypt"
+
+# Extra arguments passed through to `acme.sh --issue`. Empty by default.
+#   Examples:
+#     "--keylength ec-256"       # request an ECDSA cert instead of RSA
+#     "--debug"                  # noisy logs during issuance
+#     "--days 60"                # custom renewal threshold
+TLS_ACME_EXTRA=""
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # OPTIONAL — Maintenance
 # ═══════════════════════════════════════════════════════════════════════════════
 

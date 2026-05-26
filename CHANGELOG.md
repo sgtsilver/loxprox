@@ -6,56 +6,81 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [1.5.1] — 2026-05-26
+## [1.6.0] — 2026-05-26
 
-### Fixed
+Three changes that landed together in one release window: per-host config separated from `deploy.sh` (closing the lock-yourself-out footgun that bit the maintainer's own production VM earlier in the same day), nginx site preservation across upgrades, and optional HTTPS via `acme.sh` HTTP-01.
 
-- **`deploy.sh --bootstrap-config` misreads `ENABLE_APPSEC=false` on hand-aligned nginx configs.** The extractor used `grep -q 'auth_request /crowdsec-appsec'` — a literal single-space match. Real-world nginx configs often have aligned columns (`auth_request      /crowdsec-appsec;`), and the v1.4.0 → v1.5.0 surgical-patch'd site on `loxprox-wiener` uses exactly that style. Result: an AppSec-enabled gateway gets extracted as `ENABLE_APPSEC="false"`, and the subsequent `sudo bash deploy.sh` would skip the AppSec hub collection install and stop registering the bouncer — leaving the still-active `auth_request` in the preserved site config pointing at a non-running upstream. Caught and corrected manually during the maintainer's own v1.5.0 deploy on 2026-05-26. The regex is now `grep -qE 'auth_request[[:space:]]+/crowdsec-appsec'`. Test fixture updated to use aligned whitespace so the regression can't sneak back in.
-
-## [1.5.0] — 2026-05-26
-
-> **Upgrade-path overhaul.** v1.4 and earlier shipped REQUIRED configuration values inline in `deploy.sh` (`LOXONE_IP="192.168.1.100"` at line 47, …). Operators were expected to edit the script before running it, and to keep their edited copy somewhere safe — because re-running the repo's `deploy.sh` would rewrite nftables / nginx with the upstream placeholders. That bricked the maintainer's own production VM during the v1.4.0 deploy on 2026-05-26 (the edited `deploy.sh` was never persisted; only `192.168.1.x` placeholders remained on disk). v1.5.0 splits configuration from code so that path is closed for good.
+> **Why one release for all three:** the config-separation work was originally cut as v1.5.0 / v1.5.1 — back-to-back releases hours apart, the second one fixing a regex bug found by the live deploy of the first. Two big-version releases on the same day was sloppier than warranted; consolidating into v1.6.0 + retiring those tags is the cleaner record. The engineering history of "we tried a conf.d split for AppSec http-scope plumbing and reverted it in the same branch" is preserved below because future readers may want to know why we *don't* have it.
 
 ### Changed (breaking — requires one-time migration)
 
 - **Per-host configuration moved to `/etc/loxprox/deploy.conf`** (mode 0640 root). `deploy.sh` no longer carries inline REQUIRED defaults. The tracked template `deploy.conf.example` lives at the repo root; `.gitignore` excludes the populated `deploy.conf` so an accidental copy into the repo never gets committed.
-- **`deploy.sh` refuses to run if no config file is present and no live install is detected.** Fresh-VM operators who forget to copy the example get a clear error pointing to `deploy.conf.example` instead of a silently-broken deploy with upstream placeholders. The previous footgun is no longer reachable.
-- **Idempotent upgrades.** `git pull && sudo bash deploy.sh` now actually works the way the README has always claimed — no more re-editing the script every release. The whole point of this version.
+- **`deploy.sh` refuses to run if no config file is present and no live install is detected.** Fresh-VM operators who forget to copy the example get a clear error pointing to `deploy.conf.example` instead of a silently-broken deploy with upstream placeholders. The previous footgun — `LOXONE_IP="192.168.1.100"` shipped inline at line 47 of `deploy.sh`, requiring every operator to edit the script before running and keep that edited copy somewhere safe — bricked the maintainer's own production VM during the v1.4.0 deploy. No more reachable in v1.6.0.
+- **Idempotent upgrades.** `git pull && sudo bash deploy.sh` now actually works the way the README has always claimed — no more re-editing the script every release.
 
-### Added
+### Added — config bootstrap from existing installs
 
 - **`sudo bash deploy.sh --bootstrap-config`** — for upgrading existing v1.4.0 (and earlier) installs that don't yet have `/etc/loxprox/deploy.conf`. Reads back the operator's current production values from live state:
     - `LOXONE_IP` / `LOXONE_PORT` from `/etc/nginx/sites-available/loxone` (`upstream` block)
     - `GATEWAY_IP` from `hostname -I` (primary interface)
     - `LAN_SUBNET` from `ip route` (first `proto kernel scope link` route)
     - `SSH_ALLOWED_SUBNETS` from `/etc/nftables.conf` (`tcp dport 22 ip saddr {…}` set)
-    - `ENABLE_APPSEC` from the presence of `auth_request /crowdsec-appsec` in the nginx site
+    - `ENABLE_APPSEC` from the presence of `auth_request /crowdsec-appsec` in the nginx site (whitespace-tolerant regex — aligned-column nginx configs like `auth_request      /crowdsec-appsec;` parse correctly)
     - `APPSEC_MODE` from `/etc/crowdsec/acquis.d/appsec.yaml`
     - `CROWDSEC_WHITELIST_IPS` from `/etc/crowdsec/parsers/s02-enrich/whitelist-loxone.yaml`
     - `DISCORD_WEBHOOK_URL` from `/etc/loxprox/config.env`
-  Writes the candidate to a temp file, prints it for review, asks for confirmation, then installs it at `/etc/loxprox/deploy.conf` (with a `.bak-<timestamp>` of any prior file). Non-interactive mode (`LOXPROX_BOOTSTRAP_YES=1`) writes without prompting — used by the auto-fallback path when `deploy.sh` is run without a tty.
+  Writes the candidate to a temp file, prints it for review, asks for confirmation, then installs at `/etc/loxprox/deploy.conf` (with a `.bak-<timestamp>` of any prior file). Non-interactive mode (`LOXPROX_BOOTSTRAP_YES=1`) writes without prompting — used by the auto-fallback path when `deploy.sh` is run without a tty.
 
-- **Auto-bootstrap fallback for non-interactive deploys.** If `deploy.sh` runs without a tty (`!isatty(stdin) || !isatty(stdout)`), no config file exists, and a live install IS detected, it auto-runs `--bootstrap-config` (no prompt) and proceeds. Ansible / CI pipelines no longer need a two-step invocation.
+- **Auto-bootstrap fallback for non-interactive deploys.** If `deploy.sh` runs without a tty, no config exists, and a live install IS detected, it auto-runs `--bootstrap-config` (no prompt) and proceeds. Ansible / CI pipelines no longer need a two-step invocation.
 
 ### Changed — nginx config now resists hand-edits
 
-- **`configure_nginx()` preserves `/etc/nginx/sites-available/loxone` if it already exists.** WebSocket location blocks, custom `proxy_set_header` lines, and other operator hand-edits no longer get nuked on every redeploy. Set `LOXPROX_FORCE_REGEN_NGINX=1` to override and regenerate from the template. (The maintainer's own production site has had a hand-edited WebSocket block since 2026-05-09 — preserving it is the actual point of the change.)
-- **AppSec map + log_format stay inline in the site file.** A `/etc/nginx/conf.d/loxprox-appsec.conf` split was attempted (and rolled back in the same release) because nginx rejects it: `auth_request_set $appsec_action $upstream_http_x_crowdsec_action` is what registers `$appsec_action` with nginx's variable subsystem, and that directive lives inside the location block. Any earlier reference to `$appsec_action` — including in an http-scope `if=` clause or another conf.d file — fails parse-time validation with `unknown "appsec_action" variable`. The map and `log_format appsec_evt` therefore stay where they were placed by the v1.4.0 surgical patch (same file as the `auth_request_set`). A leftover `/etc/nginx/conf.d/loxprox-appsec.conf` from any v1.5.0-rc dev iteration is removed on every deploy.
-- **nginx is now reloaded (`systemctl reload`) instead of restarted** when the config changes during a deploy. Restart kept connections open via SO_REUSEPORT but burned established `keepalive` to the Miniserver; reload is graceful. Falls back to restart if reload fails.
+- **`configure_nginx()` preserves `/etc/nginx/sites-available/loxone` if it already exists.** WebSocket location blocks, custom `proxy_set_header` lines, and other operator hand-edits no longer get nuked on every redeploy. Set `LOXPROX_FORCE_REGEN_NGINX=1` to override and regenerate from template. (The maintainer's own production site has had a hand-edited WebSocket block since 2026-05-09 — preserving it is the actual point of the change.)
+- **AppSec map + log_format stay inline in the site file.** A `/etc/nginx/conf.d/loxprox-appsec.conf` split was attempted (and reverted in the same branch) because nginx rejects it: `auth_request_set $appsec_action $upstream_http_x_crowdsec_action` is what registers `$appsec_action` with nginx's variable subsystem, and that directive lives inside the location block. Any earlier reference to `$appsec_action` — including in an http-scope `if=` clause or another conf.d file — fails parse-time validation with `unknown "appsec_action" variable`. The map and `log_format appsec_evt` therefore stay where they were placed by the v1.4.0 surgical patch (same file as the `auth_request_set`). A leftover `/etc/nginx/conf.d/loxprox-appsec.conf` from any dev iteration is removed on every deploy.
+- **nginx reloaded (`systemctl reload`) instead of restarted** when the config changes during a deploy. Restart kept connections open via SO_REUSEPORT but burned established `keepalive` to the Miniserver; reload is graceful. Falls back to restart if reload fails.
+
+### Added — optional HTTPS on :1080 via `acme.sh` + HTTP-01
+
+Off by default. Toggle is a `deploy.conf` edit + `sudo bash deploy.sh` re-run; the on→off path is just as clean as off→on. Cert files survive a disable so flipping back doesn't pay re-issuance time.
+
+- **New `deploy.conf` keys** (all optional, sane defaults):
+    - `ENABLE_TLS="false"` — master toggle.
+    - `TLS_DOMAIN=""` — fully-qualified public hostname (e.g. `loxprox.example.com`). Required when `ENABLE_TLS=true`; refused with a clear error if missing or non-FQDN.
+    - `TLS_EMAIL=""` — registered with the ACME provider.
+    - `TLS_ACME_SERVER="letsencrypt"` — also accepts `letsencrypt_test` (staging), `zerossl`, `buypass`, `buypass_test`, `sslcom`, or a full directory URL.
+    - `TLS_ACME_EXTRA=""` — passthrough to `acme.sh --issue` (e.g. `--keylength ec-256`).
+- **`setup_tls()` orchestrator** in `deploy.sh`:
+    - Installs `acme.sh ${ACMESH_VER}` from a **SHA256-pinned GitHub release tarball** — no `curl | bash`. The pin (`ACMESH_VER="3.1.3"`, `ACMESH_SHA256="efd12b…"`) lives at the top of the script; refresh procedure documented inline.
+    - Writes `/etc/nginx/conf.d/loxprox-acme.conf` — a small `:80` `default_server` that serves only `/.well-known/acme-challenge/` from `/var/www/acme/` and 301s everything else to `https://$host:1080$request_uri`. The widened public surface is just the challenge directory.
+    - Issues (or renews) the cert via `acme.sh --issue --webroot --server $TLS_ACME_SERVER`. `acme.sh`'s "cert still valid, skipped" exit code 2 is treated as success.
+    - Installs the cert at `/etc/loxprox/tls/{fullchain.pem,privkey.pem}` (`0640 root`) with `--reloadcmd "systemctl reload nginx"` recorded for the renewal cron.
+    - **Mutates the nginx site** between explicit markers (`# LOXPROX-TLS-BEGIN` / `# LOXPROX-TLS-END`) and swaps `listen 1080;` ↔ `listen 1080 ssl;`. This is the one deviation from the site-preservation rule above; operator hand-edits outside the marker block (WebSocket location, custom headers, etc.) are untouched. Strict regex on the listen line: anything other than the canonical `listen 1080;` is refused with a warning, never silently mutated.
+    - **Auto-renewal cron is verified after every TLS-enabled deploy.** `acme.sh`'s `--install` creates the daily cron; `_loxprox_ensure_acme_cron` re-asserts it exists, restores it via `--install-cronjob` if missing, and logs the exact cron line + the manual-renewal recipe. No silent assumption that auto-renewal "just works."
+    - awk (not sed) for both the enable and disable mutations — BSD sed (macOS) and GNU sed (Linux) disagree on `\n` expansion and `\+` support; awk handles it uniformly.
+- **`sudo bash deploy.sh --renew-tls`** — manual force-renew (`acme.sh --renew … --force`).
+- **`sudo bash deploy.sh --remove-tls`** — full nuke: site revert, conf.d listener removed, `acme.sh --uninstall`, `/etc/loxprox/tls/` deleted, cron cancelled. Operator action remaining: remove the `WAN:80 → gateway:80` router forward.
+
+### Disable path (`ENABLE_TLS=false`)
+
+- Strips the marker block from the site, reverts the listen line to plain `listen 1080;`, removes the ACME `:80` listener, cancels the per-domain renewal in `acme.sh`. Cert files at `/etc/loxprox/tls/` are kept — re-enable is fast.
 
 ### Tests
 
-- New `test_deploy_integration.sh` cases (90 assertions total, was 64):
-    - `_loxprox_load_config` — sources from a fixture deploy.conf, verifies LOXONE_IP / GATEWAY_IP / SSH_ALLOWED_SUBNETS / ENABLE_APPSEC, returns 1 when the file is absent.
+- 114 deploy-integration assertions (was 64). New cases cover:
+    - `_loxprox_load_config` — sources from a fixture `deploy.conf`, verifies LOXONE_IP / GATEWAY_IP / SSH_ALLOWED_SUBNETS / ENABLE_APPSEC, returns 1 when the file is absent.
     - `_loxprox_detect_live_install` — true on populated mock root (`NGINX_SITE` exists), false on empty.
-    - `_loxprox_extract_config_from_live_state` — extracts the seven critical values from fixture nginx + nftables + crowdsec files, returns 1 on empty state.
-    - `configure_nginx` preservation behavior — operator sentinel + WebSocket block survive a redeploy by default; `LOXPROX_FORCE_REGEN_NGINX=1` regenerates from template; `/etc/nginx/conf.d/loxprox-appsec.conf` is rewritten when `ENABLE_APPSEC=true` and removed when `false`.
-- pytest progressive-ban suite unchanged: 22/22 green.
-- shellcheck `-S warning` clean on `deploy.sh` after the refactor.
+    - `_loxprox_extract_config_from_live_state` — extracts the seven critical values from fixture nginx + nftables + crowdsec files (whitespace-tolerant on the AppSec detection regex), returns 1 on empty state.
+    - `configure_nginx` preservation — operator sentinel + WebSocket block survive a redeploy by default; `LOXPROX_FORCE_REGEN_NGINX=1` regenerates from template with map + log_format + conditional access_log inline.
+    - `_loxprox_tls_validate_config` — refuses empty `TLS_DOMAIN`, refuses non-FQDN, accepts FQDN.
+    - `_loxprox_site_enable_tls` + `_loxprox_site_disable_tls` round-trip: enable → markers + ssl listen + cert directives + HSTS header → disable → marker block stripped + listen reverted → enable again → identical output. Re-enable and re-disable are byte-identical no-ops (hash compared).
+    - Refusal path: `listen [::]:1080;` (operator hand-edit) is detected and rejected without touching the site.
+    - `_loxprox_write_acme_listener` writes the conf.d block with the right contents.
+- pytest progressive-ban suite unchanged: 22/22.
+- shellcheck `-S warning` clean.
 
 ### Operator action
 
-**v1.4.0 → v1.5.0 upgrade (existing install):**
+**v1.4.0 → v1.6.0 upgrade (existing install):**
 
 ```bash
 git pull
@@ -73,11 +98,25 @@ sudo $EDITOR /etc/loxprox/deploy.conf         # fill [REQUIRED] values
 sudo bash deploy.sh
 ```
 
-See `docs/UPGRADE-v1.4-to-v1.5.md` for the full one-page walkthrough.
+**Enable HTTPS (after the upgrade settles):**
+
+```bash
+# 1. Add a router forward: WAN:80 → gateway:80
+# 2. Point public DNS at your WAN IP for TLS_DOMAIN
+# 3. Edit /etc/loxprox/deploy.conf:
+#      ENABLE_TLS="true"
+#      TLS_DOMAIN="loxprox.example.com"
+#      TLS_EMAIL="you@example.com"
+sudo bash deploy.sh
+```
+
+**Toggle TLS off:** `ENABLE_TLS="false"` in `deploy.conf`, `sudo bash deploy.sh`. Cert kept, site reverted.
+
+Full upgrade walkthrough: [`docs/UPGRADE-v1.4-to-v1.6.md`](docs/UPGRADE-v1.4-to-v1.6.md). TLS runbook: [`docs/TLS-SETUP.md`](docs/TLS-SETUP.md).
 
 ## [1.4.0] — 2026-05-26
 
-> **Live VM (`loxprox-wiener`, 192.168.178.252) updated on 2026-05-26 at 18:22 CEST via surgical patches**, not a full `deploy.sh` re-run. Reason: the production VM's originally-deployed `deploy.sh` was edited inline with production values (`LOXONE_IP=192.168.178.20`, `SSH_ALLOWED_SUBNETS=("192.168.178.0/24" "192.168.100.0/24")`, …) and that edited copy was never persisted — running the repo's `deploy.sh` would have rewritten nftables with `192.168.1.0/24` and locked out the entire LAN. Pre-deploy backup at `/root/loxprox-backups/v1.4.0-pre-20260526-182129/`. One LOW finding (`/tmp` mount hardening) was skipped because `tmp.mount` is not present on this Debian 12 VM — recorded in `phase4-monitoring.md` as deferred work.
+> **The maintainer's production VM was updated on 2026-05-26 at 18:22 CEST via surgical patches**, not a full `deploy.sh` re-run. Reason: the production VM's originally-deployed `deploy.sh` was edited inline with production-specific values (Miniserver IP, gateway IP, SSH-allowed subnets) and that edited copy was never persisted — running the repo's `deploy.sh` as-is would have rewritten nftables with the upstream placeholder subnets and locked out the LAN. Pre-deploy backup at `/root/loxprox-backups/v1.4.0-pre-20260526-182129/`. One LOW finding (`/tmp` mount hardening) was skipped because `tmp.mount` is not present on this Debian 12 VM — recorded in `phase4-monitoring.md` as deferred work. Specific IPs/hostname omitted from this entry by v1.6.0 retroactive scrub.
 
 ### Security (skills-audit follow-up — `audits/2026-05-23-skills-audit.md`)
 
