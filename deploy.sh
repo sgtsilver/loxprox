@@ -66,6 +66,11 @@ declare -p CROWDSEC_WHITELIST_IPS &>/dev/null || CROWDSEC_WHITELIST_IPS=()
 DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL-}"
 ALERT_EMAIL="${ALERT_EMAIL-}"
 AUTOREBOOT_TIME="${AUTOREBOOT_TIME-03:00}"
+ENABLE_TLS="${ENABLE_TLS-false}"
+TLS_DOMAIN="${TLS_DOMAIN-}"
+TLS_EMAIL="${TLS_EMAIL-}"
+TLS_ACME_SERVER="${TLS_ACME_SERVER-letsencrypt}"
+TLS_ACME_EXTRA="${TLS_ACME_EXTRA-}"
 
 # Operator config file path. Override via env (LOXPROX_DEPLOY_CONF=/path) for
 # testing only — production callers should use the default.
@@ -84,9 +89,26 @@ CROWDSEC_NGINX_ACQUIS="${CROWDSEC_NGINX_ACQUIS:-/etc/crowdsec/acquis.d/nginx.yam
 CROWDSEC_SSH_ACQUIS="${CROWDSEC_SSH_ACQUIS:-/etc/crowdsec/acquis.d/ssh.yaml}"
 CROWDSEC_APPSEC_ACQUIS="${CROWDSEC_APPSEC_ACQUIS:-/etc/crowdsec/acquis.d/appsec.yaml}"
 NGINX_APPSEC_INCLUDE="${NGINX_APPSEC_INCLUDE:-/etc/nginx/crowdsec-appsec.conf}"
-# v1.5.0 — http-scope AppSec audit-log plumbing (map + log_format). Owned by
-# deploy.sh, regenerated every run when ENABLE_APPSEC=true.
+# v1.6.0 cleanup target. A v1.5.0-dev iteration moved http-scope AppSec
+# map + log_format here; that split was reverted (nginx rejects it — see
+# configure_nginx for the parse-order explanation). Path is retained so
+# `rm -f "$NGINX_APPSEC_AUDIT_CONF"` in configure_nginx can clean up any
+# leftover file from dev iterations or downgraded installs.
 NGINX_APPSEC_AUDIT_CONF="${NGINX_APPSEC_AUDIT_CONF:-/etc/nginx/conf.d/loxprox-appsec.conf}"
+# v1.6.0 — optional TLS via acme.sh + HTTP-01.
+NGINX_ACME_CONF="${NGINX_ACME_CONF:-/etc/nginx/conf.d/loxprox-acme.conf}"
+LOXPROX_TLS_DIR="${LOXPROX_TLS_DIR:-/etc/loxprox/tls}"
+ACME_HOME="${ACME_HOME:-/root/.acme.sh}"
+ACME_WEBROOT="${ACME_WEBROOT:-/var/www/acme}"
+# acme.sh pinned version + tarball SHA256. Update both together when bumping.
+# Refresh procedure:
+#   curl -sLI https://github.com/acmesh-official/acme.sh/releases/latest   # latest tag
+#   curl -sLO https://github.com/acmesh-official/acme.sh/archive/refs/tags/<ver>.tar.gz
+#   sha256sum <ver>.tar.gz
+# The pin protects against tarball substitution between upstream's release
+# moment and a fresh install.
+ACMESH_VER="${ACMESH_VER:-3.1.3}"
+ACMESH_SHA256="${ACMESH_SHA256:-efd12b265252f8875269960b6b31830731ccce2b3e6ff8e7ecfbee21fde35ab4}"
 SYSCTL_CONF="${SYSCTL_CONF:-/etc/sysctl.d/99-security-gateway.conf}"
 NFTABLES_CONF="${NFTABLES_CONF:-/etc/nftables.conf}"
 LOGROTATE_CONF="${LOGROTATE_CONF:-/etc/logrotate.d/loxone-nginx}"
@@ -148,7 +170,7 @@ validate_network() {
 
 # ─── Configuration loader ────────────────────────────────────────────────────
 #
-# v1.5.0 split: REQUIRED/OPTIONAL values live in /etc/loxprox/deploy.conf, not
+# v1.6.0 split: REQUIRED/OPTIONAL values live in /etc/loxprox/deploy.conf, not
 # in this script. The loader is permissive about the file's existence and
 # returns 1 instead of exiting, so main() can decide how to react (offer the
 # operator a bootstrap path versus refuse with a clear message).
@@ -164,7 +186,7 @@ _loxprox_load_config() {
 
 # Returns 0 if signals of a previous LoxProx install are present on the box.
 # Used by main() to distinguish "fresh VM, operator forgot to edit config"
-# from "existing install upgrading to v1.5.0 for the first time."
+# from "existing install upgrading to v1.6.0 for the first time."
 _loxprox_detect_live_install() {
     [[ -f "$NGINX_SITE" ]] && return 0
     [[ -d /opt/loxprox && -n "$(ls -A /opt/loxprox 2>/dev/null)" ]] && return 0
@@ -208,7 +230,7 @@ _loxprox_extract_config_from_live_state() {
         fi
         # Whitespace-tolerant. Live nginx configs often have aligned columns
         # (`auth_request      /crowdsec-appsec;`), which a literal single-space
-        # match misses — that bug shipped in v1.5.0 and the maintainer's own
+        # match misses — that bug existed in the v1.5.0-dev branch (rolled into v1.6.0) and the maintainer's own
         # upgrade-from-v1.4.0 hit it (ENABLE_APPSEC=false was extracted from a
         # VM that obviously had AppSec on, because of the column alignment in
         # its hand-edited site config). Fixed in v1.5.1.
@@ -956,6 +978,381 @@ EOF
     systemctl daemon-reload
     systemctl restart nginx
     ok "Nginx systemd hardening applied."
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TLS (v1.6.0) — optional HTTPS on :1080 via acme.sh + HTTP-01
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Toggle-friendly by design. The operator flips ENABLE_TLS in deploy.conf and
+# re-runs `sudo bash deploy.sh`; setup_tls() reads the desired state, computes
+# the minimal diff against the current state, and applies it.
+#
+#   ENABLE_TLS=true   → install acme.sh if missing, write the ACME challenge
+#                       listener on :80, issue (or renew) the cert, install
+#                       cert files at $LOXPROX_TLS_DIR, mutate the nginx site
+#                       so the :1080 listener becomes `listen 1080 ssl;` with
+#                       the right ssl_certificate directives + HSTS header.
+#   ENABLE_TLS=false  → revert the site mutation, remove the ACME listener,
+#                       cancel the renewal cron. Cert files at
+#                       $LOXPROX_TLS_DIR are KEPT so a later toggle doesn't
+#                       have to re-issue. `--remove-tls` does the full nuke.
+#
+# Site mutation is bounded by markers so it's reversible and predictable:
+#     # LOXPROX-TLS-BEGIN
+#     ssl_certificate     /etc/loxprox/tls/fullchain.pem;
+#     ssl_certificate_key /etc/loxprox/tls/privkey.pem;
+#     ssl_protocols       TLSv1.3 TLSv1.2;
+#     ssl_ciphers         HIGH:!aNULL:!MD5;
+#     add_header          Strict-Transport-Security "max-age=31536000" always;
+#     # LOXPROX-TLS-END
+# The listen directive is swapped via a strict-pattern sed:
+#     `listen 1080;`    ↔    `listen 1080 ssl;`
+# If the operator has hand-edited the listen line into something else
+# (e.g. `listen [::]:1080;`), setup_tls() refuses to touch it and warns.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_LOXPROX_TLS_BEGIN_MARKER="# LOXPROX-TLS-BEGIN"
+_LOXPROX_TLS_END_MARKER="# LOXPROX-TLS-END"
+
+_loxprox_install_acme_sh() {
+    if [[ -x "$ACME_HOME/acme.sh" ]]; then
+        info "acme.sh already installed at $ACME_HOME"
+        return 0
+    fi
+    info "Installing acme.sh ${ACMESH_VER} (SHA256-pinned tarball, no curl|bash)..."
+    apt-get install -y socat curl >/dev/null
+
+    local tmp tarball extract_dir
+    tmp=$(mktemp -d -t loxprox-acmesh.XXXXXX) || return 1
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmp'" RETURN
+
+    tarball="$tmp/acme.sh-${ACMESH_VER}.tar.gz"
+    if ! curl -fsSL -o "$tarball" "https://github.com/acmesh-official/acme.sh/archive/refs/tags/${ACMESH_VER}.tar.gz"; then
+        error "Failed to download acme.sh ${ACMESH_VER}"
+        return 1
+    fi
+
+    local computed
+    computed=$(sha256sum "$tarball" | awk '{print $1}')
+    if [[ "$computed" != "$ACMESH_SHA256" ]]; then
+        error "acme.sh tarball SHA256 mismatch — refusing to install."
+        error "  expected: $ACMESH_SHA256"
+        error "  got:      $computed"
+        error "If acme.sh has released a new version, update ACMESH_VER + ACMESH_SHA256 in deploy.sh."
+        return 1
+    fi
+    info "Tarball SHA256 verified."
+
+    tar -xzf "$tarball" -C "$tmp"
+    extract_dir="$tmp/acme.sh-${ACMESH_VER}"
+    [[ -d "$extract_dir" ]] || { error "Extract dir $extract_dir not found"; return 1; }
+
+    # acme.sh --install creates $ACME_HOME, drops a cron entry, sets default CA.
+    # --noprofile keeps it out of operator shells; we invoke via absolute path.
+    (
+        cd "$extract_dir"
+        ./acme.sh --install \
+            --home "$ACME_HOME" \
+            --accountemail "${TLS_EMAIL:-noreply@invalid}" \
+            --noprofile \
+            >> "$LOG_FILE" 2>&1
+    )
+    [[ -x "$ACME_HOME/acme.sh" ]] || { error "acme.sh install did not produce $ACME_HOME/acme.sh"; return 1; }
+    ok "acme.sh ${ACMESH_VER} installed at $ACME_HOME"
+}
+
+_loxprox_write_acme_listener() {
+    # On the production VM this runs as root; in the test suite we may not
+    # be root, so soften the failure modes (mkdir -p + chmod, not install).
+    mkdir -p "$ACME_WEBROOT/.well-known/acme-challenge"
+    chmod 0755 "$ACME_WEBROOT" "$ACME_WEBROOT/.well-known" "$ACME_WEBROOT/.well-known/acme-challenge" 2>/dev/null || true
+    mkdir -p "$(dirname "$NGINX_ACME_CONF")"
+
+    cat > "$NGINX_ACME_CONF" <<EOF
+# LoxProx — ACME HTTP-01 challenge listener (v1.6.0).
+# Owned by deploy.sh — overwritten on every TLS-enabled deploy, removed on
+# disable. Operator router must forward WAN:80 → ${GATEWAY_IP}:80 for ACME
+# validation. Everything other than /.well-known/acme-challenge/ on :80 gets
+# a permanent 301 to https://\$host:1080\$request_uri.
+server {
+    listen      80 default_server;
+    listen      [::]:80 default_server;
+    server_name _;
+
+    # ACME HTTP-01 challenge directory — read by the ACME validator.
+    location ^~ /.well-known/acme-challenge/ {
+        root                $ACME_WEBROOT;
+        default_type        "text/plain";
+        try_files           \$uri =404;
+    }
+
+    # Everything else: redirect to HTTPS on :1080. Keeps the :80 surface
+    # tiny — only the challenge directory serves real content.
+    location / {
+        return 301 https://\$host:1080\$request_uri;
+    }
+}
+EOF
+    chmod 0644 "$NGINX_ACME_CONF"
+}
+
+_loxprox_acme_issue() {
+    info "Requesting cert for $TLS_DOMAIN from $TLS_ACME_SERVER via HTTP-01..."
+    # acme.sh --issue is idempotent: returns 0 if cert already valid + not
+    # near expiry, re-issues otherwise. Suppress its banner; log to LOG_FILE.
+    if ! "$ACME_HOME/acme.sh" --issue \
+        --webroot "$ACME_WEBROOT" \
+        -d "$TLS_DOMAIN" \
+        --server "$TLS_ACME_SERVER" \
+        --accountemail "${TLS_EMAIL:-noreply@invalid}" \
+        ${TLS_ACME_EXTRA} \
+        >> "$LOG_FILE" 2>&1
+    then
+        local rc=$?
+        # acme.sh returns 2 when the cert is "skipped — not near expiry yet"
+        # — that's success from the operator's POV. Treat only !=2 as failure.
+        if [[ $rc -ne 2 ]]; then
+            error "acme.sh --issue failed (rc=$rc). See $LOG_FILE for details."
+            error "Common causes: WAN:80 not forwarded to gateway:80, DNS A record"
+            error "for $TLS_DOMAIN not pointing at your WAN IP, or ACME rate limit."
+            return 1
+        fi
+        info "Cert already valid; acme.sh skipped re-issue."
+    fi
+}
+
+_loxprox_acme_install_cert() {
+    install -d -m 0750 -o root -g root "$LOXPROX_TLS_DIR"
+    # --install-cert writes (or re-writes) the cert files at deterministic
+    # paths AND records the reload command. acme.sh's cron auto-renewer uses
+    # the same paths + reloadcmd on every successful renewal.
+    "$ACME_HOME/acme.sh" --install-cert \
+        -d "$TLS_DOMAIN" \
+        --fullchain-file "$LOXPROX_TLS_DIR/fullchain.pem" \
+        --key-file       "$LOXPROX_TLS_DIR/privkey.pem" \
+        --reloadcmd      "systemctl reload nginx" \
+        >> "$LOG_FILE" 2>&1
+    chmod 0640 "$LOXPROX_TLS_DIR/fullchain.pem" "$LOXPROX_TLS_DIR/privkey.pem"
+    chown root:root "$LOXPROX_TLS_DIR/fullchain.pem" "$LOXPROX_TLS_DIR/privkey.pem"
+}
+
+_loxprox_ensure_acme_cron() {
+    # acme.sh's --install step writes a daily cron line for root that runs
+    # `acme.sh --cron`, which checks every installed cert and renews anything
+    # within ~30 days of expiry. The --reloadcmd recorded by --install-cert
+    # above is automatically called by the cron on successful renewal.
+    #
+    # Operators occasionally clean up crontabs and accidentally remove the
+    # acme.sh entry. Verify it's present after every TLS-enabled deploy and
+    # reinstall via --install-cronjob if missing. Logged either way so the
+    # operator can see "auto-renew is on" without grepping crontab.
+    local cron_line
+    cron_line=$(crontab -l 2>/dev/null | grep -F "$ACME_HOME/acme.sh --cron" | head -1)
+    if [[ -z "$cron_line" ]]; then
+        warn "acme.sh cron line missing from root crontab — restoring."
+        "$ACME_HOME/acme.sh" --install-cronjob >> "$LOG_FILE" 2>&1 || warn "acme.sh --install-cronjob failed"
+        cron_line=$(crontab -l 2>/dev/null | grep -F "$ACME_HOME/acme.sh --cron" | head -1)
+    fi
+    if [[ -n "$cron_line" ]]; then
+        ok "Auto-renewal cron active: $cron_line"
+        info "  acme.sh checks every cert daily; certs within 30 days of expiry get renewed."
+        info "  On successful renewal: nginx is reloaded via the recorded --reloadcmd."
+        info "  Force a renewal anytime: sudo bash deploy.sh --renew-tls"
+    else
+        error "Could not establish acme.sh cron — auto-renewal will NOT happen."
+        error "Run manually: $ACME_HOME/acme.sh --install-cronjob"
+    fi
+}
+
+_loxprox_site_in_tls_mode() {
+    [[ -f "$NGINX_SITE" ]] || return 1
+    grep -q "$_LOXPROX_TLS_BEGIN_MARKER" "$NGINX_SITE"
+}
+
+_loxprox_site_enable_tls() {
+    if _loxprox_site_in_tls_mode; then
+        info "Site $NGINX_SITE already in TLS mode — no mutation needed."
+        return 0
+    fi
+    # Strict pattern: only match the canonical `listen 1080;` line we ship.
+    # Anything else (operator hand-edits like `listen [::]:1080;`) is treated
+    # as out-of-bounds and refused — better to fail loudly than half-mutate.
+    if ! grep -qE '^[[:space:]]*listen[[:space:]]+1080[[:space:]]*;[[:space:]]*$' "$NGINX_SITE"; then
+        error "Site $NGINX_SITE does not contain the canonical 'listen 1080;' line."
+        error "Either the operator has hand-edited it to a non-standard form, or the file is corrupted."
+        error "Aborting TLS site mutation. Fix the listen line manually, then re-run deploy.sh."
+        return 1
+    fi
+    backup_file "$NGINX_SITE"
+    # awk, not sed: BSD sed (macOS) and GNU sed (Linux) disagree on multi-line
+    # replacement semantics (\n expansion, \+ support). awk handles inserted
+    # newlines uniformly. The match captures the per-line indent so the
+    # inserted directives align with the original `listen` indentation.
+    local tmp
+    tmp=$(mktemp -t loxprox-site.XXXXXX) || return 1
+    awk -v tls_begin="$_LOXPROX_TLS_BEGIN_MARKER" \
+        -v tls_end="$_LOXPROX_TLS_END_MARKER" \
+        -v tls_dir="$LOXPROX_TLS_DIR" '
+        match($0, /^[[:space:]]*listen[[:space:]]+1080[[:space:]]*;[[:space:]]*$/) {
+            # Extract leading whitespace as the indent string.
+            indent = $0
+            sub(/listen.*/, "", indent)
+            printf "%slisten 1080 ssl;\n", indent
+            printf "%s%s\n", indent, tls_begin
+            printf "%s    ssl_certificate     %s/fullchain.pem;\n", indent, tls_dir
+            printf "%s    ssl_certificate_key %s/privkey.pem;\n", indent, tls_dir
+            printf "%s    ssl_protocols       TLSv1.3 TLSv1.2;\n", indent
+            printf "%s    ssl_prefer_server_ciphers off;\n", indent
+            printf "%s    ssl_session_cache   shared:loxprox_ssl:10m;\n", indent
+            printf "%s    ssl_session_timeout 1d;\n", indent
+            printf "%s    add_header          Strict-Transport-Security \"max-age=31536000\" always;\n", indent
+            printf "%s%s\n", indent, tls_end
+            next
+        }
+        { print }
+    ' "$NGINX_SITE" > "$tmp"
+    if [[ ! -s "$tmp" ]]; then
+        error "awk produced empty output; refusing to clobber $NGINX_SITE."
+        rm -f "$tmp"
+        return 1
+    fi
+    mv "$tmp" "$NGINX_SITE"
+    chmod 0644 "$NGINX_SITE"
+    info "Site mutated → listen 1080 ssl + cert directives between markers."
+}
+
+_loxprox_site_disable_tls() {
+    if ! _loxprox_site_in_tls_mode; then
+        info "Site $NGINX_SITE is not in TLS mode — nothing to revert."
+        return 0
+    fi
+    backup_file "$NGINX_SITE"
+    local tmp
+    tmp=$(mktemp -t loxprox-site.XXXXXX) || return 1
+    # Strip everything between (and including) the markers, then revert the
+    # listen directive. awk for the same portability reason as enable.
+    awk -v tls_begin="$_LOXPROX_TLS_BEGIN_MARKER" \
+        -v tls_end="$_LOXPROX_TLS_END_MARKER" '
+        index($0, tls_begin) > 0 { in_block = 1; next }
+        index($0, tls_end)   > 0 { in_block = 0; next }
+        in_block { next }
+        match($0, /^[[:space:]]*listen[[:space:]]+1080[[:space:]]+ssl[[:space:]]*;[[:space:]]*$/) {
+            indent = $0
+            sub(/listen.*/, "", indent)
+            printf "%slisten 1080;\n", indent
+            next
+        }
+        { print }
+    ' "$NGINX_SITE" > "$tmp"
+    if [[ ! -s "$tmp" ]]; then
+        error "awk produced empty output; refusing to clobber $NGINX_SITE."
+        rm -f "$tmp"
+        return 1
+    fi
+    mv "$tmp" "$NGINX_SITE"
+    chmod 0644 "$NGINX_SITE"
+    info "Site reverted → listen 1080 (plain), marker block stripped."
+}
+
+_loxprox_tls_validate_config() {
+    if [[ -z "$TLS_DOMAIN" ]]; then
+        error "ENABLE_TLS=true but TLS_DOMAIN is empty."
+        error "Set TLS_DOMAIN in $LOXPROX_DEPLOY_CONF to a fully-qualified public hostname."
+        return 1
+    fi
+    # acme.sh refuses raw IPs; sanity-check that TLS_DOMAIN has at least one dot.
+    if [[ "$TLS_DOMAIN" != *.* ]]; then
+        error "TLS_DOMAIN=$TLS_DOMAIN does not look like an FQDN (no dots)."
+        return 1
+    fi
+    return 0
+}
+
+setup_tls() {
+    case "${ENABLE_TLS,,}" in
+        true|yes|1)
+            banner "TLS — enable (acme.sh + HTTP-01)"
+            _loxprox_tls_validate_config || return 1
+            _loxprox_install_acme_sh || return 1
+            _loxprox_write_acme_listener
+            # Reload nginx so the :80 challenge listener is live before the
+            # ACME server probes it. systemctl reload is graceful and keeps
+            # the :1080 backend traffic flowing.
+            if ! nginx -t >> "$LOG_FILE" 2>&1; then
+                error "nginx -t failed after writing $NGINX_ACME_CONF; rolling back."
+                rm -f "$NGINX_ACME_CONF"
+                return 1
+            fi
+            systemctl reload nginx
+            _loxprox_acme_issue || return 1
+            _loxprox_acme_install_cert
+            _loxprox_ensure_acme_cron
+            _loxprox_site_enable_tls || return 1
+            if ! nginx -t >> "$LOG_FILE" 2>&1; then
+                error "nginx -t failed after TLS site mutation; reverting."
+                _loxprox_site_disable_tls
+                nginx -t && systemctl reload nginx
+                return 1
+            fi
+            systemctl reload nginx
+            ok "HTTPS active on :1080 for $TLS_DOMAIN. Renewal cron handled by acme.sh."
+            ok "  Test from outside the LAN: curl -vI https://$TLS_DOMAIN:1080/"
+            ;;
+        false|no|0|"")
+            # Only act if there's anything to undo — keeps re-runs of a
+            # never-TLS-enabled host quiet.
+            if _loxprox_site_in_tls_mode || [[ -f "$NGINX_ACME_CONF" ]]; then
+                banner "TLS — disable (revert site, remove ACME listener)"
+                _loxprox_site_disable_tls
+                rm -f "$NGINX_ACME_CONF"
+                if [[ -x "$ACME_HOME/acme.sh" && -n "${TLS_DOMAIN:-}" ]]; then
+                    "$ACME_HOME/acme.sh" --remove -d "$TLS_DOMAIN" >> "$LOG_FILE" 2>&1 || true
+                fi
+                if nginx -t >> "$LOG_FILE" 2>&1; then
+                    systemctl reload nginx
+                    ok "TLS disabled. Cert files kept at $LOXPROX_TLS_DIR (use --remove-tls to nuke)."
+                else
+                    error "nginx -t failed after disable — inspect $NGINX_SITE manually."
+                    return 1
+                fi
+            fi
+            ;;
+        *)
+            error "Invalid ENABLE_TLS value: '$ENABLE_TLS' (expected true/false)."
+            return 1
+            ;;
+    esac
+}
+
+# Manual force-renew entrypoint (--renew-tls).
+_loxprox_tls_renew() {
+    banner "TLS — manual renewal"
+    [[ -x "$ACME_HOME/acme.sh" ]] || { error "acme.sh not installed; run deploy.sh with ENABLE_TLS=true first."; return 1; }
+    [[ -n "$TLS_DOMAIN" ]] || { error "TLS_DOMAIN empty in $LOXPROX_DEPLOY_CONF"; return 1; }
+    "$ACME_HOME/acme.sh" --renew -d "$TLS_DOMAIN" --force >> "$LOG_FILE" 2>&1 || {
+        error "acme.sh --renew failed for $TLS_DOMAIN. See $LOG_FILE."
+        return 1
+    }
+    ok "Cert renewed for $TLS_DOMAIN. acme.sh's --reloadcmd already reloaded nginx."
+}
+
+# Full TLS nuke (--remove-tls): revert site, remove conf.d, cert files,
+# acme.sh state, cron. Intentionally invasive — only run when you mean it.
+_loxprox_tls_remove() {
+    banner "TLS — full removal"
+    _loxprox_site_disable_tls
+    rm -f "$NGINX_ACME_CONF"
+    nginx -t >> "$LOG_FILE" 2>&1 && systemctl reload nginx || warn "nginx -t failed during removal; inspect site config."
+    if [[ -x "$ACME_HOME/acme.sh" ]]; then
+        [[ -n "${TLS_DOMAIN:-}" ]] && "$ACME_HOME/acme.sh" --remove -d "$TLS_DOMAIN" >> "$LOG_FILE" 2>&1 || true
+        "$ACME_HOME/acme.sh" --uninstall >> "$LOG_FILE" 2>&1 || true
+        rm -rf "$ACME_HOME"
+    fi
+    rm -rf "$LOXPROX_TLS_DIR"
+    ok "TLS fully removed: site reverted, acme.sh uninstalled, $LOXPROX_TLS_DIR deleted."
+    ok "Operator: also remove the WAN:80 → gateway:80 router forward (no longer needed)."
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1920,7 +2317,7 @@ main() {
     touch "$LOG_FILE"
 
     # Re-entry point: extract deploy.conf from the live state of an existing
-    # install (v1.4.0 → v1.5.0 upgrade path). Does NOT proceed to deploy —
+    # install (v1.4.0 → v1.6.0 upgrade path). Does NOT proceed to deploy —
     # operator reviews the file, then runs `sudo bash deploy.sh` normally.
     if [[ "${1:-}" == "--bootstrap-config" ]]; then
         _loxprox_bootstrap_config_interactive
@@ -1937,6 +2334,18 @@ main() {
         exit 0
     fi
 
+    # v1.6.0 — TLS re-entry points. --renew-tls forces an acme.sh renewal;
+    # --remove-tls does a full nuke (site revert + cert + acme.sh + cron).
+    # Both require deploy.conf to be loaded so they know TLS_DOMAIN.
+    if [[ "${1:-}" == "--renew-tls" || "${1:-}" == "--remove-tls" ]]; then
+        _loxprox_load_config || { error "Need $LOXPROX_DEPLOY_CONF to know TLS_DOMAIN"; exit 1; }
+        case "$1" in
+            --renew-tls)  _loxprox_tls_renew  ;;
+            --remove-tls) _loxprox_tls_remove ;;
+        esac
+        exit $?
+    fi
+
     banner "LoxProx — Debian 12 VM Deploy"
     info "Log: $LOG_FILE"
 
@@ -1948,7 +2357,7 @@ main() {
         if _loxprox_detect_live_install; then
             if [[ -t 0 && -t 1 ]]; then
                 error "No $LOXPROX_DEPLOY_CONF found, but an existing LoxProx install is detected."
-                error "First run on this host since the v1.5.0 split. Bootstrap your config:"
+                error "First run on this host since the v1.6.0 config split. Bootstrap your config:"
                 error "    sudo bash deploy.sh --bootstrap-config"
                 error "Then re-run sudo bash deploy.sh."
                 exit 1
@@ -1990,6 +2399,7 @@ main() {
     configure_crowdsec
     configure_appsec_nginx
     setup_apparmor
+    setup_tls
     setup_ssh_hardening
     setup_unattended_upgrades
     setup_auditd
