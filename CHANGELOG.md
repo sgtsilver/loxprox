@@ -6,75 +6,40 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [1.6.2] — 2026-05-26
+## [1.5.0] — 2026-05-26
 
-### Fixed
+Everything from a single intense day: the skills-audit response (SSH hardening, auditd persistence-vector coverage, AppSec audit log, `/tmp` TOCTOU, progressive-ban CAPI filter), the SSH bootstrap flow that solves the lock-yourself-out chicken-and-egg, per-host configuration separated from `deploy.sh` (closing the inline-edit footgun that bricked the maintainer's own VM mid-day), nginx site preservation across upgrades, and optional HTTPS on `:1080` via `acme.sh` + HTTP-01 — plus the three live-deploy fixes that surfaced when the maintainer dogfooded the TLS path on production.
 
-- **`listen 1080 ssl` now answers plain-HTTP clients with a 301 redirect to HTTPS** instead of returning the default `400 "The plain HTTP request was sent to HTTPS port"`. Found within minutes of switching the maintainer's production VM to HTTPS: the Loxone iOS app was configured for `http://gateway:1080`, the gateway is now `listen 1080 ssl`, and every API call (`/jdev/cfg/api?cacheBstr=…`) got a 400. CrowdSec's `http-probing` scenario interprets a burst of 400s as scanning activity and bans the client IP — Loxone clients trip into a self-ban loop within seconds.
+> **Why one big release:** by 21:30 CEST the day had produced six tagged releases (v1.4.0 morning, v1.5.0+v1.5.1 afternoon, v1.6.0+v1.6.1+v1.6.2 evening). That's sloppy. Tags and GitHub releases for all of them were deleted in two consolidation passes; this single v1.5.0 entry is the record. The engineering history (multiple Ezio-style audit-driven fixes, the conf.d-split attempt + revert, the whitespace-regex bug found by the maintainer's own production-VM bootstrap, the firewall-blocking-own-listener footgun, the `if ! cmd; then rc=$?` bash trap, the Loxone-iOS-app self-ban loop from cleartext requests hitting `listen 1080 ssl`) is preserved below and in inline code comments. Future readers may want to know what was tried and why something is shaped the way it is.
 
-    nginx's internal status code for this case is `497`. Bare `error_page 497 https://…` does not actually redirect (verified on Debian 12 nginx 1.22.1). The reliable form is a named location:
+The previously-released v1.4.0 (skills-audit response) was consolidated into this entry on the same day — the audit findings are in the **Security** section below.
 
-    ```nginx
-    error_page 497 = @loxprox_https_redirect;
-    location @loxprox_https_redirect {
-        return 301 https://$host:1080$request_uri;
-    }
-    ```
+### Security (skills audit — `audits/2026-05-23-skills-audit.md`)
 
-    Added inside the v1.6.0 TLS marker block in `configure_nginx()` → `_loxprox_site_enable_tls()`. Lands automatically on every TLS-enabled deploy from v1.6.2 onward. Sites mutated by v1.6.0/v1.6.1 don't get the redirect on re-deploy unless the marker block is regenerated; the simplest fix on those installs is `sudo bash deploy.sh --remove-tls && sudo bash deploy.sh` to recycle the marker block.
+- **HIGH — SSH daemon hardened by `deploy.sh`.** New `setup_ssh_hardening()` writes `/etc/ssh/sshd_config.d/99-loxprox.conf` with the CIS Debian 12 §5.2 settings: `PermitRootLogin no`, `PasswordAuthentication no`, `PubkeyAuthentication yes`, `MaxAuthTries 4`, `LogLevel VERBOSE`, `ClientAliveInterval 300`, agent/X11/TCP-forward all off. nftables already drops `:22` from anything outside `SSH_ALLOWED_SUBNETS`, so this finding only ever mattered against a compromised LAN host trying to brute-force the gateway from inside the perimeter — but stock Debian shipped `PasswordAuthentication yes`, leaving that window open. Closed now.
+- **MED — auditd persistence-vector coverage.** `setup_auditd()` now also watches `/etc/ld.so.preload` + `ld.so.conf{,.d/}` (T1574.006 LD_PRELOAD hijack), `/etc/systemd/system/` + `/lib/systemd/system/` + `/usr/lib/systemd/system/` (T1543.002 unit drops), `/etc/profile{,.d/}` + `/etc/bash.bashrc` + `/root/.bashrc` + `.bash_profile` + `.profile` (T1546.004 shell init), `/root/.ssh/` plus any `/home/<user>/.ssh/` for UID≥1000 (T1098.004 SSH backdoor keys), and the four periodic cron dirs + `/etc/anacrontab` (T1053.003).
+- **MED — progressive-ban no longer inflates offense count from CAPI/AppSec.** `progressive-ban.py` was building the per-IP offense counter from every decision in `cscli decisions list -a` regardless of `origin`. An IP that appeared once on the CAPI community blocklist plus once on a local cscli ban was treated as a 2nd-offense local repeat → instant escalation to 24h, defeating the intended "punish proven-local repeats" policy. Counter is now filtered to `origin == "cscli"` only. Regression test `test_capi_history_does_not_inflate_local_offense_count` added.
+- **MED — AppSec detections actually get written to disk.** `gateway-monitor.sh:check_appsec_detections()` had been tailing `/var/log/nginx/appsec-detections.log` since v1.x, but nothing ever wrote that file — CrowdSec AppSec returns decisions to nginx via `auth_request`, and nginx was not logging the body. `configure_nginx()` now emits a `map $appsec_action $appsec_blocked` + `log_format appsec_evt` + conditional `access_log` so blocked requests get a parseable per-IP audit trail.
+- **LOW — `/tmp` TOCTOU surface closed in monitoring scripts.** `gateway-backup.sh` previously used a predictable `/tmp/${BACKUP_NAME}` work dir; replaced with `mktemp -d` + `trap rm -rf EXIT`. `discord-alert.sh` circuit-breaker state moved from `/tmp/loxprox-discord-cb` to `${LOXPROX_STATE_DIR:-/var/lib/loxprox}/discord-cb` (0750 root).
+- **LOW — `/tmp` mounted nosuid,nodev,noexec (CIS §1.1.2).** New `setup_tmp_mount()` writes a `tmp.mount.d` drop-in with `mode=1777,strictatime,nosuid,nodev,noexec` and enables `tmp.mount`. Warns and continues on systems without a `tmp.mount` unit (manual `/etc/fstab` then required).
 
-### Notes
+### Added — SSH bootstrap flow (chicken-and-egg solved)
 
-- This is a transitional grace, not the final story. Loxone iOS/Android/Mac clients that follow HTTP 301 redirects will continue to work without configuration change. Clients that don't (some embedded Loxone Touch UIs, older firmware) will still need their connection URL updated from `http://` to `https://`.
-- CrowdSec's `http-probing` scenario stays as-is — once cleartext clients are migrated to HTTPS, no 400 storm is generated and the scenario doesn't fire on legitimate Loxone traffic.
+`setup_ssh_hardening()` detects whether any `authorized_keys` is present (root + UID≥1000 users) **before** disabling password auth. Without this, the HIGH fix above would have bricked any first-time deploy run over a password-only SSH session.
 
-## [1.6.1] — 2026-05-26
-
-Two fixes caught by the first live TLS deploy on the maintainer's production VM.
-
-### Fixed
-
-- **`setup_firewall()` now opens `:80` in nftables when `ENABLE_TLS=true`.** v1.6.0 wrote the nginx `:80` ACME challenge listener but left the nftables input chain at default-drop with no `:80` accept rule — Let's Encrypt's external probe always timed out with "Timeout during connect (likely firewall problem)" regardless of whether the router forward was in place. The listener answered correctly on `127.0.0.1:80` (loopback bypasses the input chain) but every WAN-arriving SYN to `:80` was silently dropped by the gateway itself. v1.6.1 adds:
-    ```nftables
-    # ACME HTTP-01 + HTTPS-on-1080 301 redirector (v1.6.1)
-    tcp dport 80 accept
-    ```
-    inside `chain input`, gated on `ENABLE_TLS=true`. When TLS is disabled, the conf.d ACME listener is removed AND the firewall rule is omitted — `:80` returns to its v1.5/v1.6.0 closed state.
-
-- **`_loxprox_acme_issue` now reports the correct exit code on failure.** v1.6.0's `if ! cmd; then rc=$?; ...; fi` pattern always captured `rc=0` because, inside the `then` branch, `$?` is the result of the `!` operator (0 or 1), not the original command. Operators saw `acme.sh --issue failed (rc=0)` no matter what acme.sh actually returned. v1.6.1 captures rc OUTSIDE the conditional:
-    ```bash
-    local rc=0
-    "$ACME_HOME/acme.sh" --issue … || rc=$?
-    case "$rc" in
-        0) ok "Cert issued for $TLS_DOMAIN." ;;
-        2) info "Cert already valid; acme.sh skipped re-issue." ;;
-        *) error "acme.sh --issue failed (rc=$rc) …"; return 1 ;;
-    esac
-    ```
-    The error message also got an ordered diagnostic checklist (nftables first, then router forward, then DNS, then rate limit) since the actual order of "most likely causes" on a fresh deploy is now nftables-first.
-
-### Tests
-
-- Unchanged from v1.6.0 (114 deploy-integration assertions, 22 pytest, 11 scanner). The new nftables rule is conditionally interpolated into the existing setup_firewall heredoc; no test rewrite needed.
-- shellcheck `-S warning` clean.
-
-### Operator action
-
-**Existing v1.6.0 installs with TLS planned:** re-run `sudo bash deploy.sh` — `setup_firewall()` re-runs idempotently and the new `:80` rule lands in `/etc/nftables.conf`. The acme.sh state from any v1.6.0 attempt is preserved.
-
-**Already running v1.6.0 with TLS enabled and working:** no action — v1.6.0 + manual `nft add` is functionally identical to v1.6.1. The deploy.sh fix matters next time you re-run `deploy.sh`.
-
-## [1.6.0] — 2026-05-26
-
-Three changes that landed together in one release window: per-host config separated from `deploy.sh` (closing the lock-yourself-out footgun that bit the maintainer's own production VM earlier in the same day), nginx site preservation across upgrades, and optional HTTPS via `acme.sh` HTTP-01.
-
-> **Why one release for all three:** the config-separation work was originally cut as v1.5.0 / v1.5.1 — back-to-back releases hours apart, the second one fixing a regex bug found by the live deploy of the first. Two big-version releases on the same day was sloppier than warranted; consolidating into v1.6.0 + retiring those tags is the cleaner record. The engineering history of "we tried a conf.d split for AppSec http-scope plumbing and reverted it in the same branch" is preserved below because future readers may want to know why we *don't* have it.
+- **Interactive deploy (tty):** four-option menu — `[P]` paste your public key (validated by prefix + `ssh-keygen -l -f` round-trip, echoed back with fingerprint, requires explicit `y` to install at `/root/.ssh/authorized_keys` mode 0600), `[H]` show help (exact `ssh-keygen -t ed25519` + `cat ~/.ssh/id_ed25519.pub` invocations for macOS/Linux/Windows + Google search terms), `[K]` keep password auth + loud login banner, `[A]` abort.
+- **Non-interactive (no tty):** falls back automatically to `[K]` mode so Ansible/CI/unattended runs never brick the box.
+- **Soft mode** (`[K]` or no-tty) ships a different sshd drop-in that keeps `PasswordAuthentication yes` but still sets `MaxAuthTries 4`, `LogLevel VERBOSE`, key-pref, no forwarding; and installs `/etc/update-motd.d/99-loxprox-ssh-warn` — a red banner on every login until `/var/lib/loxprox/ssh-keys-missing` is removed.
+- **`sudo bash deploy.sh --finalize-ssh`** — new re-entry point; rechecks keys, swaps soft→hard drop-in, removes nag, reloads sshd. Run after `ssh-copy-id root@<gateway>`.
+- **Private keys are never generated on the server.** The paste flow only accepts a pre-existing public key.
 
 ### Changed (breaking — requires one-time migration)
 
 - **Per-host configuration moved to `/etc/loxprox/deploy.conf`** (mode 0640 root). `deploy.sh` no longer carries inline REQUIRED defaults. The tracked template `deploy.conf.example` lives at the repo root; `.gitignore` excludes the populated `deploy.conf` so an accidental copy into the repo never gets committed.
-- **`deploy.sh` refuses to run if no config file is present and no live install is detected.** Fresh-VM operators who forget to copy the example get a clear error pointing to `deploy.conf.example` instead of a silently-broken deploy with upstream placeholders. The previous footgun — `LOXONE_IP="192.168.1.100"` shipped inline at line 47 of `deploy.sh`, requiring every operator to edit the script before running and keep that edited copy somewhere safe — bricked the maintainer's own production VM during the v1.4.0 deploy. No more reachable in v1.6.0.
+- **`deploy.sh` refuses to run if no config file is present and no live install is detected.** Fresh-VM operators who forget to copy the example get a clear error pointing to `deploy.conf.example` instead of a silently-broken deploy with upstream placeholders. The previous footgun — `LOXONE_IP="192.168.1.100"` shipped inline at line 47 of `deploy.sh`, requiring every operator to edit the script before running and keep that edited copy somewhere safe — bricked the maintainer's own production VM during the morning's skills-audit deploy. No longer reachable.
 - **Idempotent upgrades.** `git pull && sudo bash deploy.sh` now actually works the way the README has always claimed — no more re-editing the script every release.
+- **Supported substrate narrowed to VM-only.** `deploy.sh` refuses to run inside a container (LXC / systemd-nspawn) unless `ALLOW_LXC=1` is set explicitly. Several gateway defenses — the Fragnesia (CVE-2026-46300) mitigation, `kernel.dmesg_restrict` / `kptr_restrict` / `randomize_va_space`, auditd rule loading, AppArmor profile enforcement, nftables table creation — either no-op or return EPERM from inside an unprivileged container. The previous "warn and continue" behavior made the deploy look green while the actual posture was degraded. New behavior aborts with an explicit explanation. Operators who knowingly accept the reduced posture can opt in with `ALLOW_LXC=1`; the CIS Debian 12 / OWASP IoT Top 10 posture claims do not apply in that configuration.
+- **Minimum hardware: 1 GB RAM / 1 vCPU minimum (was 512 MB / 1 core); 2 GB RAM / 2 vCPU recommended.** The previous 512 MB was fiction — reference VM sits at ~850 MB RSS idle. CrowdSec leaky-bucket memory scales linearly with active attacker IPs (256 IPs ≈ 150 MB, 15k IPs ≈ 1.2–1.5 GB). AppSec WAF + Virtual Patching adds ~5 ms / ~50 millicores per request. A second vCPU gives the scheduler room to keep nginx responsive while AppSec catches up during a wide-cardinality scan.
 
 ### Added — config bootstrap from existing installs
 
@@ -87,15 +52,14 @@ Three changes that landed together in one release window: per-host config separa
     - `APPSEC_MODE` from `/etc/crowdsec/acquis.d/appsec.yaml`
     - `CROWDSEC_WHITELIST_IPS` from `/etc/crowdsec/parsers/s02-enrich/whitelist-loxone.yaml`
     - `DISCORD_WEBHOOK_URL` from `/etc/loxprox/config.env`
-  Writes the candidate to a temp file, prints it for review, asks for confirmation, then installs at `/etc/loxprox/deploy.conf` (with a `.bak-<timestamp>` of any prior file). Non-interactive mode (`LOXPROX_BOOTSTRAP_YES=1`) writes without prompting — used by the auto-fallback path when `deploy.sh` is run without a tty.
-
+  Writes the candidate to a temp file, prints it for review, asks for confirmation, then installs at `/etc/loxprox/deploy.conf` (with a `.bak-<timestamp>` of any prior file). Non-interactive mode (`LOXPROX_BOOTSTRAP_YES=1`) writes without prompting.
 - **Auto-bootstrap fallback for non-interactive deploys.** If `deploy.sh` runs without a tty, no config exists, and a live install IS detected, it auto-runs `--bootstrap-config` (no prompt) and proceeds. Ansible / CI pipelines no longer need a two-step invocation.
 
 ### Changed — nginx config now resists hand-edits
 
-- **`configure_nginx()` preserves `/etc/nginx/sites-available/loxone` if it already exists.** WebSocket location blocks, custom `proxy_set_header` lines, and other operator hand-edits no longer get nuked on every redeploy. Set `LOXPROX_FORCE_REGEN_NGINX=1` to override and regenerate from template. (The maintainer's own production site has had a hand-edited WebSocket block since 2026-05-09 — preserving it is the actual point of the change.)
-- **AppSec map + log_format stay inline in the site file.** A `/etc/nginx/conf.d/loxprox-appsec.conf` split was attempted (and reverted in the same branch) because nginx rejects it: `auth_request_set $appsec_action $upstream_http_x_crowdsec_action` is what registers `$appsec_action` with nginx's variable subsystem, and that directive lives inside the location block. Any earlier reference to `$appsec_action` — including in an http-scope `if=` clause or another conf.d file — fails parse-time validation with `unknown "appsec_action" variable`. The map and `log_format appsec_evt` therefore stay where they were placed by the v1.4.0 surgical patch (same file as the `auth_request_set`). A leftover `/etc/nginx/conf.d/loxprox-appsec.conf` from any dev iteration is removed on every deploy.
-- **nginx reloaded (`systemctl reload`) instead of restarted** when the config changes during a deploy. Restart kept connections open via SO_REUSEPORT but burned established `keepalive` to the Miniserver; reload is graceful. Falls back to restart if reload fails.
+- **`configure_nginx()` preserves `/etc/nginx/sites-available/loxone` if it already exists.** WebSocket location blocks, custom `proxy_set_header` lines, and other operator hand-edits no longer get nuked on every redeploy. Set `LOXPROX_FORCE_REGEN_NGINX=1` to override and regenerate from template.
+- **AppSec map + log_format stay inline in the site file.** A `/etc/nginx/conf.d/loxprox-appsec.conf` split was attempted (and reverted in the same branch) because nginx rejects it: `auth_request_set $appsec_action $upstream_http_x_crowdsec_action` is what registers `$appsec_action` with nginx's variable subsystem, and that directive lives inside the location block. Any earlier reference to `$appsec_action` — including in an http-scope `if=` clause or another conf.d file — fails parse-time validation with `unknown "appsec_action" variable`. The map and `log_format appsec_evt` therefore stay where they were placed by the v1.4.0 surgical patch (same file as the `auth_request_set`). A leftover `/etc/nginx/conf.d/loxprox-appsec.conf` from any dev iteration is `rm -f`'d on every deploy.
+- **nginx reloaded (`systemctl reload`) instead of restarted** when the config changes during a deploy. Restart burned established `keepalive` to the Miniserver; reload is graceful. Falls back to restart if reload fails.
 
 ### Added — optional HTTPS on :1080 via `acme.sh` + HTTP-01
 
@@ -108,27 +72,27 @@ Off by default. Toggle is a `deploy.conf` edit + `sudo bash deploy.sh` re-run; t
     - `TLS_ACME_SERVER="letsencrypt"` — also accepts `letsencrypt_test` (staging), `zerossl`, `buypass`, `buypass_test`, `sslcom`, or a full directory URL.
     - `TLS_ACME_EXTRA=""` — passthrough to `acme.sh --issue` (e.g. `--keylength ec-256`).
 - **`setup_tls()` orchestrator** in `deploy.sh`:
-    - Installs `acme.sh ${ACMESH_VER}` from a **SHA256-pinned GitHub release tarball** — no `curl | bash`. The pin (`ACMESH_VER="3.1.3"`, `ACMESH_SHA256="efd12b…"`) lives at the top of the script; refresh procedure documented inline.
+    - Installs `acme.sh 3.1.3` from a **SHA256-pinned GitHub release tarball** — no `curl | bash`. The pin (`ACMESH_VER`, `ACMESH_SHA256`) lives at the top of the script; refresh procedure documented inline.
     - Writes `/etc/nginx/conf.d/loxprox-acme.conf` — a small `:80` `default_server` that serves only `/.well-known/acme-challenge/` from `/var/www/acme/` and 301s everything else to `https://$host:1080$request_uri`. The widened public surface is just the challenge directory.
-    - Issues (or renews) the cert via `acme.sh --issue --webroot --server $TLS_ACME_SERVER`. `acme.sh`'s "cert still valid, skipped" exit code 2 is treated as success.
+    - **Opens `:80` in nftables** when `ENABLE_TLS=true` (a v1.6.1 follow-up — v1.6.0 wrote the listener but the default-drop firewall silently swallowed Let's Encrypt's external probe). When TLS is disabled, the rule is omitted and `:80` returns to closed.
+    - Issues (or renews) the cert via `acme.sh --issue --webroot --server $TLS_ACME_SERVER`. The `--issue` exit code is captured **outside** the `if` (a v1.6.1 follow-up — the `if ! cmd; then rc=$?; fi` pattern always captured the negation result `0`, so operators saw `acme.sh --issue failed (rc=0)` on every real failure). `case "$rc"` now handles `0`, `2` (skipped — cert still valid), and other-as-error.
     - Installs the cert at `/etc/loxprox/tls/{fullchain.pem,privkey.pem}` (`0640 root`) with `--reloadcmd "systemctl reload nginx"` recorded for the renewal cron.
-    - **Mutates the nginx site** between explicit markers (`# LOXPROX-TLS-BEGIN` / `# LOXPROX-TLS-END`) and swaps `listen 1080;` ↔ `listen 1080 ssl;`. This is the one deviation from the site-preservation rule above; operator hand-edits outside the marker block (WebSocket location, custom headers, etc.) are untouched. Strict regex on the listen line: anything other than the canonical `listen 1080;` is refused with a warning, never silently mutated.
-    - **Auto-renewal cron is verified after every TLS-enabled deploy.** `acme.sh`'s `--install` creates the daily cron; `_loxprox_ensure_acme_cron` re-asserts it exists, restores it via `--install-cronjob` if missing, and logs the exact cron line + the manual-renewal recipe. No silent assumption that auto-renewal "just works."
+    - **Mutates the nginx site** between explicit markers (`# LOXPROX-TLS-BEGIN` / `# LOXPROX-TLS-END`) and swaps `listen 1080;` ↔ `listen 1080 ssl;`. This is the one deviation from the site-preservation rule above; operator hand-edits outside the marker block are untouched. Strict regex on the listen line: anything other than the canonical `listen 1080;` is refused with a warning, never silently mutated.
+    - **Inside the marker block: `error_page 497` → named-location 301 redirect** (a v1.6.2 follow-up — without it, any plain-HTTP client hitting `:1080 ssl` got nginx's default `400 "The plain HTTP request was sent to HTTPS port"`, which CrowdSec's `http-probing` scenario interprets as scanning and bans the client IP. The Loxone iOS app trips this within seconds when its connection URL is still `http://`). The bare `error_page 497 https://…` form does NOT redirect on nginx 1.22.1 (Debian 12) — the working pattern is `error_page 497 = @loxprox_https_redirect;` plus a named location returning a 301. Clients that follow redirects are unaffected; ones that don't (the Loxone app, notably) still need their connection URL updated from `http://` to `https://`, but the gateway no longer triggers the ban loop while the operator is migrating.
+    - **Auto-renewal cron is verified after every TLS-enabled deploy.** `acme.sh`'s `--install` creates the daily cron; `_loxprox_ensure_acme_cron` re-asserts it exists, restores it via `--install-cronjob` if missing, and logs the exact cron line + the manual-renewal recipe.
     - awk (not sed) for both the enable and disable mutations — BSD sed (macOS) and GNU sed (Linux) disagree on `\n` expansion and `\+` support; awk handles it uniformly.
 - **`sudo bash deploy.sh --renew-tls`** — manual force-renew (`acme.sh --renew … --force`).
 - **`sudo bash deploy.sh --remove-tls`** — full nuke: site revert, conf.d listener removed, `acme.sh --uninstall`, `/etc/loxprox/tls/` deleted, cron cancelled. Operator action remaining: remove the `WAN:80 → gateway:80` router forward.
 
 ### Disable path (`ENABLE_TLS=false`)
 
-- Strips the marker block from the site, reverts the listen line to plain `listen 1080;`, removes the ACME `:80` listener, cancels the per-domain renewal in `acme.sh`. Cert files at `/etc/loxprox/tls/` are kept — re-enable is fast.
+- Strips the marker block from the site, reverts the listen line to plain `listen 1080;`, removes the ACME `:80` listener, drops the `:80` nftables rule, cancels the per-domain renewal in `acme.sh`. Cert files at `/etc/loxprox/tls/` are kept — re-enable is fast.
 
 ### Tests
 
-- 114 deploy-integration assertions (was 64). New cases cover:
-    - `_loxprox_load_config` — sources from a fixture `deploy.conf`, verifies LOXONE_IP / GATEWAY_IP / SSH_ALLOWED_SUBNETS / ENABLE_APPSEC, returns 1 when the file is absent.
-    - `_loxprox_detect_live_install` — true on populated mock root (`NGINX_SITE` exists), false on empty.
-    - `_loxprox_extract_config_from_live_state` — extracts the seven critical values from fixture nginx + nftables + crowdsec files (whitespace-tolerant on the AppSec detection regex), returns 1 on empty state.
-    - `configure_nginx` preservation — operator sentinel + WebSocket block survive a redeploy by default; `LOXPROX_FORCE_REGEN_NGINX=1` regenerates from template with map + log_format + conditional access_log inline.
+- 114 deploy-integration assertions (was 64 pre-v1.6). New cases cover:
+    - `_loxprox_load_config`, `_loxprox_detect_live_install`, `_loxprox_extract_config_from_live_state` (positive + empty-fixture negative).
+    - `configure_nginx` preservation — operator sentinel + WebSocket block survive a redeploy by default; `LOXPROX_FORCE_REGEN_NGINX=1` regenerates from template.
     - `_loxprox_tls_validate_config` — refuses empty `TLS_DOMAIN`, refuses non-FQDN, accepts FQDN.
     - `_loxprox_site_enable_tls` + `_loxprox_site_disable_tls` round-trip: enable → markers + ssl listen + cert directives + HSTS header → disable → marker block stripped + listen reverted → enable again → identical output. Re-enable and re-disable are byte-identical no-ops (hash compared).
     - Refusal path: `listen [::]:1080;` (operator hand-edit) is detected and rejected without touching the site.
@@ -136,9 +100,17 @@ Off by default. Toggle is a `deploy.conf` edit + `sudo bash deploy.sh` re-run; t
 - pytest progressive-ban suite unchanged: 22/22.
 - shellcheck `-S warning` clean.
 
+### Live verification on the maintainer's production VM (2026-05-26)
+
+- Bootstrap: `--bootstrap-config` extracted the seven critical values from live state (after the whitespace-regex fix; aligned-column `auth_request      /crowdsec-appsec;` was the trigger that exposed the bug).
+- Staging issuance: succeeded against `letsencrypt_test` once the `:80` nftables rule was in place.
+- Production issuance: cert from Let's Encrypt E7 intermediate, valid 2026-05-26 → 2026-08-24, browser-trusted from an external Hetzner host (`TLS_verify 0`, no `-k`).
+- Auto-renewal cron: `0 0 * * * "/root/.acme.sh"/acme.sh --cron ...` present.
+- End-to-end: Loxone iOS app on 5G connecting through `https://dewia71.selfhost.eu:1080` after the operator added `:1080` to the URL in the app's connection settings.
+
 ### Operator action
 
-**v1.4.0 → v1.6.0 upgrade (existing install):**
+**v1.3.4 → v1.5.0 upgrade (existing install):**
 
 ```bash
 git pull
@@ -156,7 +128,7 @@ sudo $EDITOR /etc/loxprox/deploy.conf         # fill [REQUIRED] values
 sudo bash deploy.sh
 ```
 
-**Enable HTTPS (after the upgrade settles):**
+**Enable HTTPS:**
 
 ```bash
 # 1. Add a router forward: WAN:80 → gateway:80
@@ -165,50 +137,30 @@ sudo bash deploy.sh
 #      ENABLE_TLS="true"
 #      TLS_DOMAIN="loxprox.example.com"
 #      TLS_EMAIL="you@example.com"
+#      TLS_ACME_SERVER="letsencrypt_test"   # staging first; switch to "letsencrypt" once validated
 sudo bash deploy.sh
 ```
 
-**Toggle TLS off:** `ENABLE_TLS="false"` in `deploy.conf`, `sudo bash deploy.sh`. Cert kept, site reverted.
+**Toggle TLS off:** `ENABLE_TLS="false"` in `deploy.conf`, `sudo bash deploy.sh`. Cert kept, site reverted, `:80` nftables rule dropped.
 
-Full upgrade walkthrough: [`docs/UPGRADE-v1.4-to-v1.6.md`](docs/UPGRADE-v1.4-to-v1.6.md). TLS runbook: [`docs/TLS-SETUP.md`](docs/TLS-SETUP.md).
+**For clients still on `http://`:** the v1.6.2 redirect prevents the ban-loop while you migrate. Update each client's connection URL to `https://<hostname>:1080`. The Loxone iOS/Android apps preserve port in their UI separately from scheme — verify `:1080` is still present after switching to `https`.
 
-## [1.4.0] — 2026-05-26
+Full upgrade walkthrough: [`docs/UPGRADE-to-v1.5.md`](docs/UPGRADE-to-v1.5.md). TLS runbook: [`docs/TLS-SETUP.md`](docs/TLS-SETUP.md).
 
-> **The maintainer's production VM was updated on 2026-05-26 at 18:22 CEST via surgical patches**, not a full `deploy.sh` re-run. Reason: the production VM's originally-deployed `deploy.sh` was edited inline with production-specific values (Miniserver IP, gateway IP, SSH-allowed subnets) and that edited copy was never persisted — running the repo's `deploy.sh` as-is would have rewritten nftables with the upstream placeholder subnets and locked out the LAN. Pre-deploy backup at `/root/loxprox-backups/v1.4.0-pre-20260526-182129/`. One LOW finding (`/tmp` mount hardening) was skipped because `tmp.mount` is not present on this Debian 12 VM — recorded in `phase4-monitoring.md` as deferred work. Specific IPs/hostname omitted from this entry by v1.6.0 retroactive scrub.
+### Retired tags (deleted, consolidated into v1.5.0)
 
-### Security (skills-audit follow-up — `audits/2026-05-23-skills-audit.md`)
+Six tags + GitHub releases were created during today's iteration and then deleted in two consolidation passes:
 
-- **HIGH — SSH daemon now hardened by `deploy.sh`.** New `setup_ssh_hardening()` writes `/etc/ssh/sshd_config.d/99-loxprox.conf` with the CIS Debian 12 §5.2 settings: `PermitRootLogin no`, `PasswordAuthentication no`, `PubkeyAuthentication yes`, `MaxAuthTries 4`, `LogLevel VERBOSE`, `ClientAliveInterval 300`, agent/X11/TCP-forward all off. nftables already drops `:22` from anything outside `SSH_ALLOWED_SUBNETS`, so this finding only ever mattered against a compromised LAN host trying to brute-force the gateway from inside the perimeter — but stock Debian shipped `PasswordAuthentication yes`, leaving that window open. Closed now. Verify from a second terminal before logging out.
+| Tag (deleted) | Why it existed |
+|---|---|
+| `v1.4.0` | Skills-audit response (SSH §5.2, auditd persistence, AppSec log, /tmp, SSH bootstrap). Folded into v1.5.0's **Security** + **Added — SSH bootstrap flow** sections. |
+| `v1.5.0` (first cut) | Config-separation + auto-bootstrap upgrade path. Folded in. |
+| `v1.5.1` | Whitespace regex bug found by live `--bootstrap-config` on the maintainer's site. Fix folded in. |
+| `v1.6.0` | Optional TLS via acme.sh + HTTP-01. Folded in. |
+| `v1.6.1` | nftables `:80` open when ENABLE_TLS=true + `acme.sh` rc=0 reporting fix. Folded in. |
+| `v1.6.2` | `error_page 497 → @named-location 301` to stop the Loxone-iOS-app ban loop. Folded in. |
 
-- **MED — auditd persistence-vector coverage.** `setup_auditd()` now also watches `/etc/ld.so.preload` + `ld.so.conf{,.d/}` (T1574.006 LD_PRELOAD hijack), `/etc/systemd/system/` + `/lib/systemd/system/` + `/usr/lib/systemd/system/` (T1543.002 unit drops), `/etc/profile{,.d/}` + `/etc/bash.bashrc` + `/root/.bashrc` + `.bash_profile` + `.profile` (T1546.004 shell init), `/root/.ssh/` plus any `/home/<user>/.ssh/` for UID≥1000 (T1098.004 SSH backdoor keys), and the four periodic cron dirs + `/etc/anacrontab` (T1053.003).
-
-- **MED — progressive-ban no longer inflates offense count from CAPI/AppSec.** `progressive-ban.py` was building the per-IP offense counter from every decision in `cscli decisions list -a` regardless of `origin`. An IP that appeared once on the CAPI community blocklist plus once on a local cscli ban was treated as a 2nd-offense local repeat → instant escalation to 24h, defeating the intended "punish proven-local repeats" policy. Counter is now filtered to `origin == "cscli"` only. Regression test `test_capi_history_does_not_inflate_local_offense_count` added.
-
-- **MED — AppSec detections actually get written to disk.** `gateway-monitor.sh:check_appsec_detections()` had been tailing `/var/log/nginx/appsec-detections.log` since v1.x, but nothing ever wrote that file — CrowdSec AppSec returns decisions to nginx via `auth_request`, and nginx was not logging the body. `configure_nginx()` now emits a `map $appsec_action $appsec_blocked` + `log_format appsec_evt` (http scope, gated on `ENABLE_APPSEC=true`) and a conditional `access_log /var/log/nginx/appsec-detections.log appsec_evt if=$appsec_blocked` so blocked requests get a parseable per-IP audit trail.
-
-- **LOW — `/tmp` TOCTOU surface closed in monitoring scripts.** `gateway-backup.sh` previously used a predictable `/tmp/${BACKUP_NAME}` work dir; replaced with `mktemp -d` + `trap rm -rf EXIT`. `discord-alert.sh` circuit-breaker state moved from `/tmp/loxprox-discord-cb` to `${LOXPROX_STATE_DIR:-/var/lib/loxprox}/discord-cb` (0750 root). Closes symlink-race pre-staging from a hostile non-root LAN host.
-
-- **LOW — `/tmp` mounted nosuid,nodev,noexec (CIS §1.1.2).** New `setup_tmp_mount()` writes a `tmp.mount.d` drop-in with `mode=1777,strictatime,nosuid,nodev,noexec` and enables `tmp.mount`. Warns and continues on systems without a `tmp.mount` unit (manual `/etc/fstab` then required).
-
-### Added — SSH bootstrap flow (chicken-and-egg solved)
-
-`setup_ssh_hardening()` now **detects whether any `authorized_keys` is present** (root + UID≥1000 users) before disabling password auth. The previous implementation would have bricked any first-time deploy run over a password-only SSH session.
-
-- **Interactive deploy (tty):** prints a colored "no keys found — would lock you out" warning and shows a 4-option menu:
-    - `[P]` paste your public key — round-trip echoed back with fingerprint, requires explicit `y` confirmation, written with `install -d -m 0700` / `chmod 0600`. Validated by prefix (`ssh-ed25519`, `ssh-rsa`, `ecdsa-sha2-*`, `sk-*`) and `ssh-keygen -l -f` round-trip. Private-key paste rejected.
-    - `[H]` show help — exact `ssh-keygen -t ed25519` + `cat ~/.ssh/id_ed25519.pub` invocations for macOS/Linux/Windows, plus Google search terms.
-    - `[K]` keep password auth, loud login banner until fixed.
-    - `[A]` abort deploy entirely.
-- **Non-interactive deploy (no tty):** falls back automatically to `[K]` mode so an Ansible / unattended run never bricks the box.
-- **Soft mode (`[K]` or no-tty)** ships a different sshd drop-in that keeps `PasswordAuthentication yes` but still sets `MaxAuthTries 4`, `LogLevel VERBOSE`, `PubkeyAuthentication yes` first, no X11/agent/TCP forwarding, and installs `/etc/update-motd.d/99-loxprox-ssh-warn` — a red banner that fires on every login until `/var/lib/loxprox/ssh-keys-missing` is removed.
-- **`sudo bash deploy.sh --finalize-ssh`** — new re-entry point that re-runs only `setup_ssh_hardening()`. Use after `ssh-copy-id root@<gateway>` to swap the soft drop-in for the hard one and remove the MOTD nag.
-- **Private keys are never generated on the server.** The flow only accepts paste of an already-existing public key — the appliance-ships-with-default-key antipattern is explicitly avoided.
-
-### Changed (carried over from previously-unreleased work)
-
-- **Supported substrate narrowed to VM-only.** `deploy.sh` now refuses to run inside a container (LXC / systemd-nspawn) unless `ALLOW_LXC=1` is set explicitly. Background: several documented defenses silently fail or no-op when applied from inside an unprivileged Proxmox LXC because they touch host-kernel state the container cannot reach — most importantly the `kernel.unprivileged_userns_clone = 0` Fragnesia (CVE-2026-46300) mitigation added in v1.3.4, which returns `EPERM` from inside a container and does not take effect. Also affected: `kernel.dmesg_restrict` / `kptr_restrict` / `randomize_va_space`, `fs.protected_*`, auditd rule loading (one audit consumer per kernel, owned by the host), AppArmor profile enforcement (`aa-enforce` loads into the host's AppArmor subsystem), and nftables table creation in unprivileged LXC. Prior behaviour was a `warn` and continue — the script's `|| warn` swallow on the sysctl reload meant the deploy looked green while the actual posture was degraded. The new behaviour aborts with an explicit explanation of which defenses would no-op. Operators who knowingly accept the reduced posture can opt in with `ALLOW_LXC=1 sudo ./deploy.sh`; the CIS Debian 12 and OWASP IoT Top 10 posture claims do not apply in that configuration. Docs updated: `README.md`, `README.en.md`, `CONFIGURATION-GUIDE.md`, `phase3-cutover.md`, `phase4-monitoring.md`, `DOCUMENTATION.md`.
-
-- **Minimum hardware requirements raised: 1 GB RAM / 1 vCPU minimum (was 512 MB / 1 core); 2 GB RAM / 2 vCPU recommended.** The previous 512 MB minimum was fiction — the reference VM sits at ~850 MB RSS under normal operation (Debian 12 base ~150 MB + stack idle 100–150 MB + page cache + slack). 512 MB invites OOM under any non-trivial probe. The 2 vCPU / 2 GB recommendation reflects measured behavior under attack: CrowdSec leaky-bucket memory scales linearly with distinct active attacker IPs (256 IPs ≈ 150 MB, 15,000 IPs ≈ 1.2–1.5 GB per upstream's [own benchmark](https://www.crowdsec.net/blog/how-to-process-billions-daily-events-with-crowdsec)), and the AppSec WAF with the Virtual Patching ruleset adds ~5 ms / ~50 millicores per request ([CrowdSec AppSec benchmark](https://docs.crowdsec.net/docs/appsec/benchmark/)). On a single vCPU the first 30–60 seconds of a wide-cardinality scan — before the bouncer propagates decisions to nftables — head-of-line-blocks legitimate users behind AppSec inspection of attacker requests. A second vCPU gives the kernel scheduler room to keep `nginx` responsive while AppSec catches up. 1 vCPU / 1 GB remains viable for steady-state home-automation traffic; the recommended sizing is attack-time headroom. Docs updated: `README.md`, `README.en.md`, `ABOUT.md`, `deploy.sh` header comment.
+All six tags' content is in this v1.5.0 entry. Inline code comments still reference the dev iterations by name (e.g. "v1.5.0-dev iteration") for engineering-history traceability — future readers benefit from knowing what was tried, not just what shipped.
 
 ## [1.3.4] — 2026-05-22
 

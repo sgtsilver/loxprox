@@ -25,7 +25,7 @@ Das hier ist ein Experiment in **KI-gestützter, menschlich kuratierter Infrastr
 ## Das Problem
 
 Der Loxone Miniserver Gen 1 ist **Hardware der ersten Generation** mit:
-- ❌ Keine HTTPS/TLS-Unterstützung auf dem Miniserver selbst (CPU zu schwach für SSL) — seit v1.6.0 kann das Gateway TLS optional auf `:1080` zur Außenseite terminieren und den Miniserver dahinter abdecken
+- ❌ Keine HTTPS/TLS-Unterstützung auf dem Miniserver selbst (CPU zu schwach für SSL) — seit v1.5.0 kann das Gateway TLS optional auf `:1080` zur Außenseite terminieren und den Miniserver dahinter abdecken
 - ❌ Kein natives Rate Limiting
 - ❌ Keine IP-basierte Zugriffskontrolle
 - ❌ Kein Audit-Logging
@@ -114,7 +114,7 @@ loxprox/
    sudo cp deploy.conf.example /etc/loxprox/deploy.conf
    sudo $EDITOR /etc/loxprox/deploy.conf      # [REQUIRED]-Werte eintragen
    ```
-   `deploy.sh` liest die Werte aus dieser Datei beim Start — nicht mehr aus dem Script selbst (siehe v1.6.0). Unsicher? Lies `CONFIGURATION-GUIDE.md`.
+   `deploy.sh` liest die Werte aus dieser Datei beim Start — nicht mehr aus dem Script selbst (siehe v1.5.0). Unsicher? Lies `CONFIGURATION-GUIDE.md`.
 6. **Deploy:** `chmod +x deploy.sh && sudo ./deploy.sh`
 7. **Validieren:** `sudo bash test-gateway.sh` (50+ automatisierte Checks)
 8. **Umschalten:** Folge `phase3-cutover.md`, um das Router-Forwarding umzuziehen.
@@ -122,9 +122,9 @@ loxprox/
 
 Das Deploy-Script ist **idempotent** und upgrade-sicher: `git pull && sudo bash deploy.sh` reicht. Operator-Anpassungen an `/etc/nginx/sites-available/loxone` (z. B. ein WebSocket-Block) überleben jedes Redeploy.
 
-> **Upgrade von v1.4.x?** Einmalig `sudo bash deploy.sh --bootstrap-config` ausführen — das Script liest deine aktiven Werte aus nftables / nginx / CrowdSec und schreibt sie in `/etc/loxprox/deploy.conf`. Anleitung: `docs/UPGRADE-v1.4-to-v1.6.md`.
+> **Upgrade von v1.3.x?** Einmalig `sudo bash deploy.sh --bootstrap-config` ausführen — das Script liest deine aktiven Werte aus nftables / nginx / CrowdSec und schreibt sie in `/etc/loxprox/deploy.conf`. Anleitung: `docs/UPGRADE-to-v1.5.md`.
 
-> **Optional: HTTPS auf `:1080`.** Seit v1.6.0 kann das Gateway TLS per `acme.sh` + HTTP-01 terminieren — aus per Default, einschalten via `ENABLE_TLS="true"` in `/etc/loxprox/deploy.conf`. Voraussetzung: öffentlicher DNS-Name plus zusätzliche Router-Weiterleitung `WAN:80 → Gateway:80` für die ACME-Validierung. Komplettes Runbook: `docs/TLS-SETUP.md`.
+> **Optional: HTTPS auf `:1080`.** Seit v1.5.0 kann das Gateway TLS per `acme.sh` + HTTP-01 terminieren — aus per Default, einschalten via `ENABLE_TLS="true"` in `/etc/loxprox/deploy.conf`. Voraussetzung: öffentlicher DNS-Name plus zusätzliche Router-Weiterleitung `WAN:80 → Gateway:80` für die ACME-Validierung. Komplettes Runbook: `docs/TLS-SETUP.md`.
 
 > **SSH-Bootstrap:** Beim ersten Lauf erkennt das Script, ob bereits ein `authorized_keys` existiert. Wenn nicht, **bricht es nicht und sperrt dich nicht aus** — es zeigt ein interaktives Menü: Public Key direkt einfügen (mit Fingerprint-Bestätigung), Hilfe zum Anlegen anzeigen (`ssh-keygen` auf macOS/Linux/Windows), Passwort-Auth vorerst behalten (lauter Warn-Banner bei jedem Login), oder abbrechen. Nicht-interaktive Deploys fallen automatisch in den Soft-Modus. Nach `ssh-copy-id` schaltet `sudo bash deploy.sh --finalize-ssh` auf das harte Profil um. Details in `CONFIGURATION-GUIDE.md` → "SSH Key Bootstrap".
 

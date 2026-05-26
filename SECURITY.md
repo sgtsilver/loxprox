@@ -144,9 +144,9 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 - nginx: 404 scanning detection
 - Status: Not installed — CrowdSec handles this natively
 
-### TLS Termination on :1080 (shipped in v1.6.0, opt-in)
+### TLS Termination on :1080 (shipped in v1.5.0, opt-in)
 
-The Miniserver itself still cannot speak TLS (Gen 1 CPU constraint — unchanged), so the no-TLS device behind the gateway remains the architectural reality. What changed in v1.6.0: **the gateway can now terminate HTTPS on `:1080` toward the public side** via `acme.sh` + HTTP-01, with an automatic renewal cron that's verified after every deploy. The acme.sh installer is pinned by SHA256 (no `curl|bash`), the issued cert lives at `/etc/loxprox/tls/` (mode 0640), and the public surface widens by exactly one listener — `:80`, scoped to `/.well-known/acme-challenge/` plus a 301 redirect to HTTPS-on-1080. Off by default; toggled by a single `ENABLE_TLS` key in `/etc/loxprox/deploy.conf`. The disable path reverts the site and cancels the renewal cron but keeps the cert files, so flipping back is fast. Full runbook: [`docs/TLS-SETUP.md`](docs/TLS-SETUP.md).
+The Miniserver itself still cannot speak TLS (Gen 1 CPU constraint — unchanged), so the no-TLS device behind the gateway remains the architectural reality. What changed in v1.5.0: **the gateway can now terminate HTTPS on `:1080` toward the public side** via `acme.sh` + HTTP-01, with an automatic renewal cron that's verified after every deploy. The acme.sh installer is pinned by SHA256 (no `curl|bash`), the issued cert lives at `/etc/loxprox/tls/` (mode 0640), and the public surface widens by exactly one listener — `:80`, scoped to `/.well-known/acme-challenge/` plus a 301 redirect to HTTPS-on-1080. Off by default; toggled by a single `ENABLE_TLS` key in `/etc/loxprox/deploy.conf`. The disable path reverts the site and cancels the renewal cron but keeps the cert files, so flipping back is fast. Full runbook: [`docs/TLS-SETUP.md`](docs/TLS-SETUP.md).
 
 ### Volumetric DDoS Protection
 - **Cannot be done at this gateway** — 512MB RAM / 1 vCPU

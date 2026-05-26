@@ -31,7 +31,7 @@ set -euo pipefail
 #     sudo $EDITOR /etc/loxprox/deploy.conf      # fill in the [REQUIRED] values
 #     sudo ./deploy.sh
 #
-# Upgrading from v1.4.0 or earlier (no /etc/loxprox/deploy.conf yet):
+# Upgrading from v1.3.x or earlier (no /etc/loxprox/deploy.conf yet):
 #     sudo ./deploy.sh --bootstrap-config        # extracts your live values
 #     sudo ./deploy.sh                           # normal run, sources the file
 #
@@ -186,7 +186,7 @@ _loxprox_load_config() {
 
 # Returns 0 if signals of a previous LoxProx install are present on the box.
 # Used by main() to distinguish "fresh VM, operator forgot to edit config"
-# from "existing install upgrading to v1.6.0 for the first time."
+# from "existing install upgrading to v1.5.0 for the first time."
 _loxprox_detect_live_install() {
     [[ -f "$NGINX_SITE" ]] && return 0
     [[ -d /opt/loxprox && -n "$(ls -A /opt/loxprox 2>/dev/null)" ]] && return 0
@@ -1138,8 +1138,8 @@ _loxprox_acme_issue() {
         *)
             error "acme.sh --issue failed (rc=$rc). See $LOG_FILE for details."
             error "Common causes (most likely first):"
-            error "  1. nftables on this gateway does not allow :80 — should be fixed by v1.6.1's"
-            error "     setup_firewall change; if you're on v1.6.0 see CHANGELOG [1.6.1] for the patch."
+            error "  1. nftables on this gateway does not allow :80 — fixed by v1.5.0's setup_firewall"
+            error "     conditional rule. If your install predates v1.5.0, re-run sudo bash deploy.sh."
             error "  2. Router WAN:80 → gateway:80 forward not in place (LE probes from outside)."
             error "  3. DNS A record for $TLS_DOMAIN not pointing at your WAN IP — verify with"
             error "     'dig +short A $TLS_DOMAIN' from a system outside your LAN (phone on cellular)."

@@ -1,6 +1,6 @@
 # LoxProx TLS — Optional HTTPS on :1080
 
-LoxProx v1.6.0 adds optional HTTPS termination on the gateway itself, via
+LoxProx v1.5.0 adds optional HTTPS termination on the gateway itself, via
 [`acme.sh`](https://github.com/acmesh-official/acme.sh) and the standard
 HTTP-01 challenge. Disabled by default — the gateway keeps speaking plain
 HTTP on `:1080` until you opt in.
@@ -94,7 +94,7 @@ What happens:
       verified and restored if missing.
     - The nginx site (`/etc/nginx/sites-available/loxone`) gets a marker
       block + a `listen 1080;` → `listen 1080 ssl;` swap. This is the
-      one deviation from v1.6.0's "site is fully preserved" rule. Your
+      one deviation from v1.5.0's "site is fully preserved" rule. Your
       hand-edits outside the marker block (WebSocket location, etc.) are
       untouched.
     - nginx -t, reload. HTTPS is live.
@@ -242,7 +242,7 @@ earlier, adjust the perms accordingly.
   have a public hostname and a cert, consider running `certspotter` or
   polling crt.sh for unexpected issuance. (Recorded in the skills audit
   Known Limits as deferred.)
-- No DNS-01 challenge support. HTTP-01 only in v1.6.0. DNS-01 is a
+- No DNS-01 challenge support. HTTP-01 only in v1.5.0. DNS-01 is a
   future extension if your setup can't open `:80`.
 
 ---
