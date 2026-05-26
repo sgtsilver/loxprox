@@ -95,6 +95,56 @@ systemctl reload crowdsec
 
 ---
 
+## If TLS is enabled (v1.6.0+)
+
+Only relevant when `ENABLE_TLS="true"` in `/etc/loxprox/deploy.conf`. Skip otherwise.
+
+### Verify the renewal cron survives
+
+`acme.sh` installs a daily cron in **root's** crontab on first issuance. It survives reboots, but a manual `crontab -e` mishap could wipe it. The v1.6.0 `_loxprox_ensure_acme_cron` step re-asserts it after every TLS-enabled deploy, but check periodically:
+
+```bash
+crontab -l | grep acme.sh
+# Expected: one line ending in '"/root/.acme.sh"/acme.sh --cron --home …'
+```
+
+If missing, the cleanest restore is just a redeploy: `sudo bash deploy.sh`. To restore the cron alone without a full deploy:
+
+```bash
+sudo /root/.acme.sh/acme.sh --install-cronjob
+```
+
+### Check expiry and force-renew manually
+
+```bash
+# Show all certs acme.sh manages, with expiry dates:
+sudo /root/.acme.sh/acme.sh --list
+
+# Manual force-renew (e.g. when rotating keys or testing the reload hook):
+sudo bash deploy.sh --renew-tls
+```
+
+`--renew-tls` calls `acme.sh --renew … --force` and re-runs the install step (so `systemctl reload nginx` fires). Safe to invoke any time.
+
+### Disable TLS cleanly
+
+Two options, depending on how thorough you want to be:
+
+```bash
+# Soft disable: site reverts to plain :1080, ACME :80 listener removed,
+# per-domain renewal cancelled in acme.sh. Cert files at /etc/loxprox/tls/
+# are kept so re-enabling is fast.
+sudo $EDITOR /etc/loxprox/deploy.conf       # set ENABLE_TLS="false"
+sudo bash deploy.sh
+
+# Full nuke: same as above plus acme.sh --uninstall, /etc/loxprox/tls/
+# deleted, cron cancelled. Remaining operator action: remove the
+# WAN:80 → gateway:80 router forward.
+sudo bash deploy.sh --remove-tls
+```
+
+---
+
 ## Log Rotation
 
 Already configured by `install-gateway.sh`. Verify it works:
@@ -187,6 +237,8 @@ If you run a home monitoring stack, ship nginx logs to Loki/Grafana for dashboar
 - [ ] Review nginx access logs for unusual patterns
 - [ ] Verify SSH banner is **not** showing the red "password auth still enabled" warning. If it is: install a public key (`ssh-copy-id root@<gateway>`) and run `sudo bash deploy.sh --finalize-ssh` to swap from SOFT to HARD profile.
 - [ ] Sanity-check AppSec detections: `tail /var/log/nginx/appsec-detections.log` — should grow under attack and stay empty under normal traffic.
+- [ ] **If `ENABLE_TLS=true`:** check cert expiry — `sudo /root/.acme.sh/acme.sh --list`. Should show > 30 days remaining; `acme.sh`'s daily cron renews automatically inside the 30-day window.
+- [ ] **If `ENABLE_TLS=true`:** verify the auto-renewal cron is still in root's crontab — `crontab -l | grep acme.sh`. If missing, re-run `sudo bash deploy.sh` (the v1.6.0 `_loxprox_ensure_acme_cron` step re-installs it).
 
 ---
 
