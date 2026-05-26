@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-05-26
+
+> **Live VM (`loxprox-wiener`, 192.168.178.252) updated on 2026-05-26 at 18:22 CEST via surgical patches**, not a full `deploy.sh` re-run. Reason: the production VM's originally-deployed `deploy.sh` was edited inline with production values (`LOXONE_IP=192.168.178.20`, `SSH_ALLOWED_SUBNETS=("192.168.178.0/24" "192.168.100.0/24")`, …) and that edited copy was never persisted — running the repo's `deploy.sh` would have rewritten nftables with `192.168.1.0/24` and locked out the entire LAN. Pre-deploy backup at `/root/loxprox-backups/v1.4.0-pre-20260526-182129/`. One LOW finding (`/tmp` mount hardening) was skipped because `tmp.mount` is not present on this Debian 12 VM — recorded in `phase4-monitoring.md` as deferred work.
+
 ### Security (skills-audit follow-up — `audits/2026-05-23-skills-audit.md`)
 
 - **HIGH — SSH daemon now hardened by `deploy.sh`.** New `setup_ssh_hardening()` writes `/etc/ssh/sshd_config.d/99-loxprox.conf` with the CIS Debian 12 §5.2 settings: `PermitRootLogin no`, `PasswordAuthentication no`, `PubkeyAuthentication yes`, `MaxAuthTries 4`, `LogLevel VERBOSE`, `ClientAliveInterval 300`, agent/X11/TCP-forward all off. nftables already drops `:22` from anything outside `SSH_ALLOWED_SUBNETS`, so this finding only ever mattered against a compromised LAN host trying to brute-force the gateway from inside the perimeter — but stock Debian shipped `PasswordAuthentication yes`, leaving that window open. Closed now. Verify from a second terminal before logging out.
@@ -34,7 +38,7 @@ All notable changes to this project will be documented in this file.
 - **`sudo bash deploy.sh --finalize-ssh`** — new re-entry point that re-runs only `setup_ssh_hardening()`. Use after `ssh-copy-id root@<gateway>` to swap the soft drop-in for the hard one and remove the MOTD nag.
 - **Private keys are never generated on the server.** The flow only accepts paste of an already-existing public key — the appliance-ships-with-default-key antipattern is explicitly avoided.
 
-### Changed
+### Changed (carried over from previously-unreleased work)
 
 - **Supported substrate narrowed to VM-only.** `deploy.sh` now refuses to run inside a container (LXC / systemd-nspawn) unless `ALLOW_LXC=1` is set explicitly. Background: several documented defenses silently fail or no-op when applied from inside an unprivileged Proxmox LXC because they touch host-kernel state the container cannot reach — most importantly the `kernel.unprivileged_userns_clone = 0` Fragnesia (CVE-2026-46300) mitigation added in v1.3.4, which returns `EPERM` from inside a container and does not take effect. Also affected: `kernel.dmesg_restrict` / `kptr_restrict` / `randomize_va_space`, `fs.protected_*`, auditd rule loading (one audit consumer per kernel, owned by the host), AppArmor profile enforcement (`aa-enforce` loads into the host's AppArmor subsystem), and nftables table creation in unprivileged LXC. Prior behaviour was a `warn` and continue — the script's `|| warn` swallow on the sysctl reload meant the deploy looked green while the actual posture was degraded. The new behaviour aborts with an explicit explanation of which defenses would no-op. Operators who knowingly accept the reduced posture can opt in with `ALLOW_LXC=1 sudo ./deploy.sh`; the CIS Debian 12 and OWASP IoT Top 10 posture claims do not apply in that configuration. Docs updated: `README.md`, `README.en.md`, `CONFIGURATION-GUIDE.md`, `phase3-cutover.md`, `phase4-monitoring.md`, `DOCUMENTATION.md`.
 
