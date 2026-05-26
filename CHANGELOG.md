@@ -6,6 +6,42 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.6.1] — 2026-05-26
+
+Two fixes caught by the first live TLS deploy on the maintainer's production VM.
+
+### Fixed
+
+- **`setup_firewall()` now opens `:80` in nftables when `ENABLE_TLS=true`.** v1.6.0 wrote the nginx `:80` ACME challenge listener but left the nftables input chain at default-drop with no `:80` accept rule — Let's Encrypt's external probe always timed out with "Timeout during connect (likely firewall problem)" regardless of whether the router forward was in place. The listener answered correctly on `127.0.0.1:80` (loopback bypasses the input chain) but every WAN-arriving SYN to `:80` was silently dropped by the gateway itself. v1.6.1 adds:
+    ```nftables
+    # ACME HTTP-01 + HTTPS-on-1080 301 redirector (v1.6.1)
+    tcp dport 80 accept
+    ```
+    inside `chain input`, gated on `ENABLE_TLS=true`. When TLS is disabled, the conf.d ACME listener is removed AND the firewall rule is omitted — `:80` returns to its v1.5/v1.6.0 closed state.
+
+- **`_loxprox_acme_issue` now reports the correct exit code on failure.** v1.6.0's `if ! cmd; then rc=$?; ...; fi` pattern always captured `rc=0` because, inside the `then` branch, `$?` is the result of the `!` operator (0 or 1), not the original command. Operators saw `acme.sh --issue failed (rc=0)` no matter what acme.sh actually returned. v1.6.1 captures rc OUTSIDE the conditional:
+    ```bash
+    local rc=0
+    "$ACME_HOME/acme.sh" --issue … || rc=$?
+    case "$rc" in
+        0) ok "Cert issued for $TLS_DOMAIN." ;;
+        2) info "Cert already valid; acme.sh skipped re-issue." ;;
+        *) error "acme.sh --issue failed (rc=$rc) …"; return 1 ;;
+    esac
+    ```
+    The error message also got an ordered diagnostic checklist (nftables first, then router forward, then DNS, then rate limit) since the actual order of "most likely causes" on a fresh deploy is now nftables-first.
+
+### Tests
+
+- Unchanged from v1.6.0 (114 deploy-integration assertions, 22 pytest, 11 scanner). The new nftables rule is conditionally interpolated into the existing setup_firewall heredoc; no test rewrite needed.
+- shellcheck `-S warning` clean.
+
+### Operator action
+
+**Existing v1.6.0 installs with TLS planned:** re-run `sudo bash deploy.sh` — `setup_firewall()` re-runs idempotently and the new `:80` rule lands in `/etc/nftables.conf`. The acme.sh state from any v1.6.0 attempt is preserved.
+
+**Already running v1.6.0 with TLS enabled and working:** no action — v1.6.0 + manual `nft add` is functionally identical to v1.6.1. The deploy.sh fix matters next time you re-run `deploy.sh`.
+
 ## [1.6.0] — 2026-05-26
 
 Three changes that landed together in one release window: per-host config separated from `deploy.sh` (closing the lock-yourself-out footgun that bit the maintainer's own production VM earlier in the same day), nginx site preservation across upgrades, and optional HTTPS via `acme.sh` HTTP-01.

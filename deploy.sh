@@ -659,6 +659,17 @@ setup_firewall() {
     local ssh_set
     ssh_set=$(IFS=', '; echo "${SSH_ALLOWED_SUBNETS[*]}")
 
+    # v1.6.1: open :80 in the input chain when TLS is enabled so the ACME
+    # HTTP-01 challenge listener (and its 301-to-HTTPS catch-all) is reachable
+    # from the public internet. Without this, the conf.d/loxprox-acme.conf
+    # listener exists but nftables drops every inbound SYN — Let's Encrypt's
+    # external probe reports "Timeout during connect (likely firewall problem)".
+    # Discovered the hard way on 2026-05-26 during the first live TLS deploy.
+    local tls_port_rule=""
+    if [[ "${ENABLE_TLS,,}" == "true" ]]; then
+        tls_port_rule=$'\n        # ACME HTTP-01 + HTTPS-on-1080 301 redirector (v1.6.1)\n        tcp dport 80 accept'
+    fi
+
     cat > "$NFTABLES_CONF" <<EOF
 #!/usr/sbin/nft -f
 # LoxProx — base firewall
@@ -700,7 +711,7 @@ table inet filter {
 
         # Loxone proxy — open to internet (router forwards 1080 here)
         tcp dport 1080 accept
-
+${tls_port_rule}
         # Everything else is dropped by policy
     }
 
@@ -1100,27 +1111,42 @@ EOF
 
 _loxprox_acme_issue() {
     info "Requesting cert for $TLS_DOMAIN from $TLS_ACME_SERVER via HTTP-01..."
-    # acme.sh --issue is idempotent: returns 0 if cert already valid + not
-    # near expiry, re-issues otherwise. Suppress its banner; log to LOG_FILE.
-    if ! "$ACME_HOME/acme.sh" --issue \
+    # acme.sh --issue is idempotent. Exit codes:
+    #   0 — issued / re-issued successfully
+    #   2 — "skipped, cert not near expiry yet" (success from operator's POV)
+    #   anything else — actual failure
+    #
+    # v1.6.1: capture rc OUTSIDE the `if !` — inside the then-branch, `$?` is
+    # always the result of `!` itself (0 or 1), not the original command's
+    # exit code. The previous v1.6.0 code logged "rc=0" on real failures.
+    local rc=0
+    "$ACME_HOME/acme.sh" --issue \
         --webroot "$ACME_WEBROOT" \
         -d "$TLS_DOMAIN" \
         --server "$TLS_ACME_SERVER" \
         --accountemail "${TLS_EMAIL:-noreply@invalid}" \
         ${TLS_ACME_EXTRA} \
-        >> "$LOG_FILE" 2>&1
-    then
-        local rc=$?
-        # acme.sh returns 2 when the cert is "skipped — not near expiry yet"
-        # — that's success from the operator's POV. Treat only !=2 as failure.
-        if [[ $rc -ne 2 ]]; then
+        >> "$LOG_FILE" 2>&1 || rc=$?
+
+    case "$rc" in
+        0)
+            ok "Cert issued for $TLS_DOMAIN."
+            ;;
+        2)
+            info "Cert already valid; acme.sh skipped re-issue."
+            ;;
+        *)
             error "acme.sh --issue failed (rc=$rc). See $LOG_FILE for details."
-            error "Common causes: WAN:80 not forwarded to gateway:80, DNS A record"
-            error "for $TLS_DOMAIN not pointing at your WAN IP, or ACME rate limit."
+            error "Common causes (most likely first):"
+            error "  1. nftables on this gateway does not allow :80 — should be fixed by v1.6.1's"
+            error "     setup_firewall change; if you're on v1.6.0 see CHANGELOG [1.6.1] for the patch."
+            error "  2. Router WAN:80 → gateway:80 forward not in place (LE probes from outside)."
+            error "  3. DNS A record for $TLS_DOMAIN not pointing at your WAN IP — verify with"
+            error "     'dig +short A $TLS_DOMAIN' from a system outside your LAN (phone on cellular)."
+            error "  4. ACME rate limit hit (use TLS_ACME_SERVER=letsencrypt_test while debugging)."
             return 1
-        fi
-        info "Cert already valid; acme.sh skipped re-issue."
-    fi
+            ;;
+    esac
 }
 
 _loxprox_acme_install_cert() {
