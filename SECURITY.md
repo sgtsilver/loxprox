@@ -1,3 +1,5 @@
+**Language:** [Deutsch](SECURITY.de.md) · English
+
 # Loxone Miniserver Gen 1 — Security Posture & Threat Model
 
 ## Responsible Disclosure

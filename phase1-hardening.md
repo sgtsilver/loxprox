@@ -1,3 +1,5 @@
+**Language:** [Deutsch](phase1-hardening.de.md) · English
+
 # Phase 1 — Proxmox Firewall & Loxone Hardening
 
 Do these steps **before** deploying the gateway. They reduce risk immediately.
