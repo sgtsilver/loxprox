@@ -12,7 +12,12 @@ BACKUP_DIR="/root/loxprox-backups"
 RETENTION_DAYS=30
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP_NAME="loxone-loxprox-backup-${TIMESTAMP}"
-WORK_DIR="/tmp/${BACKUP_NAME}"
+
+# Work directory: root-owned mktemp, not /tmp — closes symlink-race exposure
+# from a hostile LAN host that can predict the backup path.
+WORK_PARENT=$(mktemp -d -t "loxprox-backup-XXXXXX")
+trap 'rm -rf "$WORK_PARENT"' EXIT
+WORK_DIR="${WORK_PARENT}/${BACKUP_NAME}"
 mkdir -p "$WORK_DIR"
 
 mkdir -p "$BACKUP_DIR"
@@ -44,8 +49,7 @@ apt list --installed 2>/dev/null | grep -E "nginx|crowdsec|apparmor|auditd" > "$
 cscli metrics 2>/dev/null > "${WORK_DIR}/crowdsec-metrics.txt" || true
 
 # Compress
-tar czf "${BACKUP_DIR}/${BACKUP_NAME}.tar.gz" -C /tmp "$BACKUP_NAME"
-rm -rf "$WORK_DIR"
+tar czf "${BACKUP_DIR}/${BACKUP_NAME}.tar.gz" -C "$WORK_PARENT" "$BACKUP_NAME"
 
 # Clean old backups
 find "$BACKUP_DIR" -name "loxone-loxprox-backup-*.tar.gz" -mtime +${RETENTION_DAYS} -delete

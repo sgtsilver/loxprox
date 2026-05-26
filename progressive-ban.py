@@ -125,11 +125,16 @@ def main():
     if all_decisions is None:
         sys.exit(1)
 
-    # Count total offenses per IP
+    # Count only local (cscli) bans as "offenses" for escalation purposes.
+    # CAPI/AppSec decisions reflect global reputation, not repeated local
+    # misbehavior — counting them inflates the offense level and would
+    # instantly escalate a first-time local offender that happens to also
+    # be on a community blocklist.
     ip_offenses = defaultdict(int)
     for d in all_decisions:
         ip = d.get("value", "")
-        if ip:
+        origin = d.get("origin", "")
+        if ip and origin == "cscli":
             ip_offenses[ip] += 1
 
     # Get currently active decisions
