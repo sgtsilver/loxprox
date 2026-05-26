@@ -743,43 +743,19 @@ configure_nginx() {
     # Owned by deploy.sh, regenerated every run when ENABLE_APPSEC=true,
     # deleted when false. Lives outside the site file so hand-edits to the
     # site (WebSocket blocks, custom locations, etc.) survive future upgrades.
-    local appsec_conf="$NGINX_APPSEC_AUDIT_CONF"
-    mkdir -p "$(dirname "$appsec_conf")"
-    # Note: no `map` directive here even though it would be the natural
-    # primitive. `map $appsec_action ...` at http scope fails nginx -t with
-    # `unknown "appsec_action" variable` because conf.d/ files are parsed
-    # before sites-enabled/, and `$appsec_action` is only registered when
-    # nginx encounters the `auth_request_set` inside the location block.
-    # The conditional `access_log` inside `server {}` uses `if=$appsec_action`
-    # directly — nginx's standard `if=$var` semantics treat an empty string as
-    # "skip", which is exactly what happens when AppSec allows (no
-    # X-Crowdsec-Action header → empty $upstream_http_x_crowdsec_action →
-    # empty $appsec_action).
-    #
-    # On a live v1.4.0 install patched via the original surgical migration,
-    # `log_format appsec_evt` may already exist inline in the site file. nginx
-    # rejects duplicate log_format names, so we skip writing the conf.d
-    # version in that case — the site's inline copy keeps working until the
-    # operator regenerates with LOXPROX_FORCE_REGEN_NGINX=1.
-    if [[ "$ENABLE_APPSEC" == "true" ]]; then
-        if [[ -f "$NGINX_SITE" ]] && grep -q 'log_format[[:space:]]\+appsec_evt' "$NGINX_SITE"; then
-            info "Site file already defines log_format appsec_evt (legacy v1.4.0 patch) — leaving conf.d empty."
-            rm -f "$appsec_conf"
-        else
-            cat > "$appsec_conf" <<'NGINX_APPSEC'
-# LoxProx — AppSec audit-log plumbing (http scope).
-# Owned by deploy.sh — do not edit by hand; this file is overwritten on every
-# `sudo bash deploy.sh` when ENABLE_APPSEC=true (and deleted when false).
-# Consumed by /var/log/nginx/appsec-detections.log → gateway-monitor.sh.
-log_format appsec_evt '$time_iso8601 $remote_addr "$request" '
-                      'appsec=$appsec_action status=$status '
-                      'ua="$http_user_agent" xff="$http_x_forwarded_for"';
-NGINX_APPSEC
-            chmod 0644 "$appsec_conf"
-        fi
-    else
-        rm -f "$appsec_conf"
-    fi
+    # v1.5.0 originally tried to move the AppSec map + log_format out of the
+    # site file into /etc/nginx/conf.d/loxprox-appsec.conf so future AppSec
+    # features could land without touching the operator-customizable site.
+    # That fails nginx -t on Debian 12: `auth_request_set $appsec_action ...`
+    # is the directive that registers `$appsec_action` with nginx's variable
+    # subsystem, and it lives inside the location block. The map (or any
+    # `if=$appsec_action` reference) requires the variable to be already
+    # registered at parse time — which it isn't if it sits in a conf.d file
+    # that nginx loads before sites-enabled/. So in v1.5.0 the map and
+    # log_format stay inline in the site file (same as v1.4.0), and the only
+    # http-scope helper file we own is removed if it lingers from an earlier
+    # v1.5.0 dev iteration.
+    rm -f "$NGINX_APPSEC_AUDIT_CONF"
 
     # ── Site config ──────────────────────────────────────────────────────────
     # Write the site file ONLY if it does not already exist. Operator
@@ -792,28 +768,37 @@ NGINX_APPSEC
     else
         backup_file "$NGINX_SITE"
 
-        local appsec_include="" appsec_auth="" appsec_access_log=""
+        local appsec_include="" appsec_auth="" appsec_http_extras="" appsec_access_log=""
         if [[ "$ENABLE_APPSEC" == "true" ]]; then
             appsec_include="    include ${NGINX_APPSEC_INCLUDE};"
             appsec_auth='
         auth_request      /crowdsec-appsec;
         auth_request_set  $appsec_action $upstream_http_x_crowdsec_action;'
-            # if=$appsec_action — fires for any non-empty action ("deny", "ban",
-            # "captcha"). When AppSec allows, $appsec_action is empty (no
-            # X-Crowdsec-Action header in the subrequest response), and the
-            # standard nginx `if=` semantics treat empty as "skip".
-            appsec_access_log='    access_log /var/log/nginx/appsec-detections.log appsec_evt if=$appsec_action;'
+            # Map registers $appsec_blocked at http scope so the access_log
+            # `if=$appsec_blocked` directive can resolve it at parse time.
+            # Keeping map + log_format inline (rather than in conf.d/) — see
+            # the comment above about why nginx rejects the split.
+            appsec_http_extras='map $appsec_action $appsec_blocked {
+    default       0;
+    "deny"        1;
+    "ban"         1;
+    "captcha"     1;
+}
+log_format appsec_evt '\''$time_iso8601 $remote_addr "$request" '\''
+                      '\''appsec=$appsec_action status=$status '\''
+                      '\''ua="$http_user_agent" xff="$http_x_forwarded_for"'\'';
+'
+            appsec_access_log='    access_log /var/log/nginx/appsec-detections.log appsec_evt if=$appsec_blocked;'
         fi
 
         cat > "$NGINX_SITE" <<EOF
 # Loxone Miniserver Gen 1 — Security Gateway
 # Generated by deploy.sh on $(date -Iseconds)
-# Note: http-scope AppSec map / log_format live in /etc/nginx/conf.d/loxprox-appsec.conf
-# (regenerated every deploy when ENABLE_APPSEC=true).
 
 limit_req_zone  \$binary_remote_addr zone=loxone_req:10m  rate=${RATE_LIMIT_REQ_PER_SEC}r/s;
 limit_conn_zone \$binary_remote_addr zone=loxone_conn:10m;
 
+${appsec_http_extras}
 upstream loxone_backend {
     server ${LOXONE_IP}:${LOXONE_PORT};
     keepalive 32;

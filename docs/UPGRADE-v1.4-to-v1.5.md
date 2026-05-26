@@ -93,10 +93,7 @@ to live at the top of `deploy.sh` — no new conventions to learn.
   WebSocket location blocks and other operator hand-edits no longer get
   overwritten. Use `LOXPROX_FORCE_REGEN_NGINX=1 sudo bash deploy.sh` to
   regenerate from the template if you ever need to.
-- **AppSec audit-log plumbing moved to `/etc/nginx/conf.d/loxprox-appsec.conf`.**
-  Rewritten on every deploy when `ENABLE_APPSEC=true`, deleted when `false`.
-  Means future LoxProx versions can add AppSec features without touching
-  the operator-customizable site file.
+- **AppSec map + log_format stay inline in the site config** (same as v1.4.0). A `conf.d/loxprox-appsec.conf` split was attempted and reverted — nginx rejects it because `$appsec_action` is registered by `auth_request_set` inside the location block, and any earlier reference fails parse-time validation. v1.5.0 cleans up the conf.d file if a v1.5.0-rc dev build wrote it.
 - **`systemctl reload nginx`** (was `restart`) — graceful, preserves
   established upstream keepalives to the Miniserver.
 
