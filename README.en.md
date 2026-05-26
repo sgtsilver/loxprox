@@ -108,13 +108,21 @@ loxprox/
 3. **Copy `deploy.sh`**, `detect-loxone.sh`, and `.env.example` into the target.
 4. **Find your Loxone:** `chmod +x detect-loxone.sh && ./detect-loxone.sh`
    - This scans your network and prints the exact IP, MAC, firmware version, and suggested config values.
-5. **Configure:** Open `deploy.sh` and edit the `[REQUIRED]` values at the top. Stuck? Read `CONFIGURATION-GUIDE.md` — it explains every setting with examples.
+5. **Configure:** Create your per-host configuration file:
+   ```bash
+   sudo install -d -m 0750 /etc/loxprox
+   sudo cp deploy.conf.example /etc/loxprox/deploy.conf
+   sudo $EDITOR /etc/loxprox/deploy.conf      # fill in [REQUIRED] values
+   ```
+   `deploy.sh` sources this file at startup — no more editing the script itself (as of v1.5.0). Stuck on a value? Read `CONFIGURATION-GUIDE.md`.
 6. **Deploy:** `chmod +x deploy.sh && sudo ./deploy.sh`
 7. **Validate:** `sudo bash test-gateway.sh` (50+ automated checks)
 8. **Cut over:** Follow `phase3-cutover.md` to switch router forwarding.
 9. **Monitor:** Follow `phase4-monitoring.md` to tune and observe.
 
-The deploy script is **idempotent** — safe to re-run.
+The deploy script is **idempotent and upgrade-safe**: `git pull && sudo bash deploy.sh` just works. Operator edits to `/etc/nginx/sites-available/loxone` (e.g. a WebSocket block) survive every redeploy.
+
+> **Upgrading from v1.4.x?** Run `sudo bash deploy.sh --bootstrap-config` once — it reads back your current values from live nftables / nginx / CrowdSec and writes them to `/etc/loxprox/deploy.conf`. Full walkthrough in `docs/UPGRADE-v1.4-to-v1.5.md`.
 
 > **SSH bootstrap:** On first run the script checks for an existing `authorized_keys`. If none exists it **won't lock you out** — instead it shows an interactive menu: paste your public key (with fingerprint confirmation), show help for creating one (`ssh-keygen` on macOS/Linux/Windows), keep password auth for now (loud warning banner on every login), or abort. Non-interactive deploys fall back to soft mode automatically. After `ssh-copy-id`, run `sudo bash deploy.sh --finalize-ssh` to swap to the hard profile. Full details in `CONFIGURATION-GUIDE.md` → "SSH Key Bootstrap".
 

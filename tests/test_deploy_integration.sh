@@ -53,18 +53,35 @@ export CROWDSEC_SSH_ACQUIS="$MOCK_ROOT/etc/crowdsec/acquis.d/ssh.yaml"
 export CROWDSEC_APPSEC_ACQUIS="$MOCK_ROOT/etc/crowdsec/acquis.d/appsec.yaml"
 export SYSCTL_CONF="$MOCK_ROOT/etc/sysctl.d/99-security-gateway.conf"
 export NGINX_APPSEC_INCLUDE="$MOCK_ROOT/etc/nginx/crowdsec-appsec.conf"
+export NGINX_APPSEC_AUDIT_CONF="$MOCK_ROOT/etc/nginx/conf.d/loxprox-appsec.conf"
 export NFTABLES_CONF="$MOCK_ROOT/etc/nftables.conf"
 export LOGROTATE_CONF="$MOCK_ROOT/etc/logrotate.d/loxone-nginx"
 export GATEWAY_CONFIG_DIR="$MOCK_ROOT/etc/loxprox"
 export GATEWAY_CONFIG_FILE="$GATEWAY_CONFIG_DIR/config.env"
+export LOXPROX_DEPLOY_CONF="$MOCK_ROOT/etc/loxprox/deploy.conf"
 
-mkdir -p "$MOCK_ROOT"/{etc/nginx/sites-available,etc/nginx/sites-enabled,etc/crowdsec/acquis.d,etc/sysctl.d,etc/logrotate.d,etc/loxprox,var/log,root}
+mkdir -p "$MOCK_ROOT"/{etc/nginx/sites-available,etc/nginx/sites-enabled,etc/nginx/conf.d,etc/crowdsec/acquis.d,etc/crowdsec/parsers/s02-enrich,etc/sysctl.d,etc/logrotate.d,etc/loxprox,var/log,root}
 
 # Mock system commands
 systemctl() { true; }
 apt-get() { true; }
 dpkg() { true; }
-export -f systemctl apt-get dpkg
+# `hostname -I` is Linux-only; macOS rejects it. Provide a deterministic mock
+# so _loxprox_extract_config_from_live_state can test cleanly on either OS.
+hostname() {
+    case "$1" in
+        -I) echo "192.168.178.99 fe80::1" ;;
+        *) command hostname "$@" ;;
+    esac
+}
+# `ip route` is also Linux-only — return a representative kernel-proto route.
+ip() {
+    case "$1" in
+        route) echo "192.168.178.0/24 dev eth0 proto kernel scope link src 192.168.178.99" ;;
+        *) command ip "$@" 2>/dev/null || true ;;
+    esac
+}
+export -f systemctl apt-get dpkg hostname ip
 
 # Source deploy.sh functions (skip main via BASH_SOURCE guard)
 # shellcheck source=../deploy.sh
@@ -83,10 +100,12 @@ CROWDSEC_SSH_ACQUIS="$MOCK_ROOT/etc/crowdsec/acquis.d/ssh.yaml"
 CROWDSEC_APPSEC_ACQUIS="$MOCK_ROOT/etc/crowdsec/acquis.d/appsec.yaml"
 SYSCTL_CONF="$MOCK_ROOT/etc/sysctl.d/99-security-gateway.conf"
 NGINX_APPSEC_INCLUDE="$MOCK_ROOT/etc/nginx/crowdsec-appsec.conf"
+NGINX_APPSEC_AUDIT_CONF="$MOCK_ROOT/etc/nginx/conf.d/loxprox-appsec.conf"
 NFTABLES_CONF="$MOCK_ROOT/etc/nftables.conf"
 LOGROTATE_CONF="$MOCK_ROOT/etc/logrotate.d/loxone-nginx"
 GATEWAY_CONFIG_DIR="$MOCK_ROOT/etc/loxprox"
 GATEWAY_CONFIG_FILE="$GATEWAY_CONFIG_DIR/config.env"
+LOXPROX_DEPLOY_CONF="$MOCK_ROOT/etc/loxprox/deploy.conf"
 
 # ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -305,6 +324,168 @@ test_crowdsec_install_no_curl_pipe() {
     fi
 }
 
+# ── v1.5.0 — config file separation + bootstrap ──────────────────────────────
+
+test_load_config_sources_values() {
+    echo ""
+    echo "━━━ _loxprox_load_config() ━━━"
+
+    local conf="$MOCK_ROOT/etc/loxprox/deploy.conf.unit-test"
+    cat > "$conf" <<'EOF'
+LOXONE_IP="192.168.42.99"
+LOXONE_PORT="80"
+GATEWAY_IP="192.168.42.10"
+LAN_SUBNET="192.168.42.0/24"
+SSH_ALLOWED_SUBNETS=("192.168.42.0/24" "10.99.0.0/24")
+ENABLE_APPSEC="false"
+EOF
+
+    LOXPROX_DEPLOY_CONF="$conf" _loxprox_load_config && pass "load_config returns 0 when file exists" || fail "load_config returned non-zero"
+
+    # Source it for assertions
+    # shellcheck disable=SC1090
+    source "$conf"
+    [[ "$LOXONE_IP" == "192.168.42.99" ]]            && pass "LOXONE_IP sourced"           || fail "LOXONE_IP wrong: $LOXONE_IP"
+    [[ "$GATEWAY_IP" == "192.168.42.10" ]]           && pass "GATEWAY_IP sourced"          || fail "GATEWAY_IP wrong: $GATEWAY_IP"
+    [[ "${SSH_ALLOWED_SUBNETS[1]}" == "10.99.0.0/24" ]] && pass "SSH_ALLOWED_SUBNETS array sourced" || fail "SSH array wrong"
+    [[ "$ENABLE_APPSEC" == "false" ]]                && pass "ENABLE_APPSEC sourced"       || fail "ENABLE_APPSEC wrong"
+
+    # Reset for downstream tests
+    LOXONE_IP="192.168.1.100"; LOXONE_PORT="80"
+    GATEWAY_IP="192.168.1.50"; LAN_SUBNET="192.168.1.0/24"
+    SSH_ALLOWED_SUBNETS=("192.168.1.0/24" "10.0.0.0/24")
+    ENABLE_APPSEC="true"
+
+    # Negative — file missing
+    LOXPROX_DEPLOY_CONF="$MOCK_ROOT/etc/loxprox/does-not-exist.conf" _loxprox_load_config
+    [[ $? -eq 1 ]] && pass "load_config returns 1 when file absent" || fail "load_config should return 1 when file missing"
+}
+
+test_detect_live_install() {
+    echo ""
+    echo "━━━ _loxprox_detect_live_install() ━━━"
+
+    # Fresh mock — no install artifacts
+    rm -f "$NGINX_SITE"
+    _loxprox_detect_live_install && fail "detect should return 1 on empty mock root" || pass "detect returns 1 on fresh state"
+
+    # With nginx site present
+    mkdir -p "$(dirname "$NGINX_SITE")"
+    touch "$NGINX_SITE"
+    _loxprox_detect_live_install && pass "detect returns 0 when nginx site exists" || fail "detect should return 0 when NGINX_SITE exists"
+    rm -f "$NGINX_SITE"
+}
+
+test_extract_config_from_live_state() {
+    echo ""
+    echo "━━━ _loxprox_extract_config_from_live_state() ━━━"
+
+    # Fixture: representative live state.
+    mkdir -p "$(dirname "$NGINX_SITE")" "$(dirname "$NFTABLES_CONF")" \
+             "$MOCK_ROOT/etc/crowdsec/acquis.d" "$MOCK_ROOT/etc/crowdsec/parsers/s02-enrich"
+
+    cat > "$NGINX_SITE" <<'NGINX_FIXTURE'
+upstream loxone_backend {
+    server 192.168.178.20:80;
+    keepalive 32;
+}
+server {
+    listen 1080;
+    location /crowdsec-appsec { internal; }
+    location / {
+        auth_request /crowdsec-appsec;
+        proxy_pass http://loxone_backend;
+    }
+}
+NGINX_FIXTURE
+
+    cat > "$NFTABLES_CONF" <<'NFT_FIXTURE'
+table inet filter {
+    chain input {
+        tcp dport 22 ip saddr { 192.168.178.0/24, 10.99.0.0/24 } accept
+        tcp dport 1080 accept
+    }
+}
+NFT_FIXTURE
+
+    cat > "$MOCK_ROOT/etc/crowdsec/acquis.d/appsec.yaml" <<'APPSEC_FIXTURE'
+appsec_config: crowdsecurity/appsec-default
+mode: enforce
+APPSEC_FIXTURE
+
+    cat > "$MOCK_ROOT/etc/crowdsec/parsers/s02-enrich/whitelist-loxone.yaml" <<'WL_FIXTURE'
+name: whitelist-loxone
+whitelist:
+  ip:
+    - "192.168.178.99"
+  cidr:
+    - "192.168.178.0/24"
+    - "10.99.0.0/24"
+WL_FIXTURE
+
+    # Override the hardcoded paths the extractor reads.
+    local out
+    out=$(mktemp -t loxprox-extract.XXXXXX)
+    _loxprox_extract_config_from_live_state "$out" >/dev/null 2>&1
+    local rc=$?
+
+    [[ $rc -eq 0 ]] && pass "extract returns 0 on complete fixture" || fail "extract returned $rc (expected 0)"
+    grep -q 'LOXONE_IP="192.168.178.20"' "$out"      && pass "extracted LOXONE_IP"      || fail "LOXONE_IP not extracted"
+    grep -q 'LOXONE_PORT="80"' "$out"                && pass "extracted LOXONE_PORT"    || fail "LOXONE_PORT not extracted"
+    grep -q '"192.168.178.0/24"' "$out"              && pass "extracted SSH subnet 1"   || fail "SSH subnet 1 missing"
+    grep -q '"10.99.0.0/24"' "$out"                  && pass "extracted SSH subnet 2"   || fail "SSH subnet 2 missing"
+    grep -q 'ENABLE_APPSEC="true"' "$out"            && pass "detected ENABLE_APPSEC"   || fail "ENABLE_APPSEC not detected"
+    grep -q 'APPSEC_MODE="enforce"' "$out"           && pass "extracted APPSEC_MODE"    || fail "APPSEC_MODE not extracted"
+    rm -f "$out"
+
+    # Negative — empty fixture
+    rm -f "$NGINX_SITE" "$NFTABLES_CONF"
+    out=$(mktemp -t loxprox-extract.XXXXXX)
+    _loxprox_extract_config_from_live_state "$out" >/dev/null 2>&1
+    [[ $? -eq 1 ]] && pass "extract returns 1 on empty fixture" || fail "extract should return 1 when nothing readable"
+    rm -f "$out"
+}
+
+test_configure_nginx_preserves_existing_site() {
+    echo ""
+    echo "━━━ configure_nginx() preserves existing site ━━━"
+
+    mkdir -p "$(dirname "$NGINX_SITE")" "$(dirname "$NGINX_APPSEC_AUDIT_CONF")"
+    local sentinel='# OPERATOR-EDITED-SENTINEL-DO-NOT-REMOVE'
+    cat > "$NGINX_SITE" <<EOF
+$sentinel
+server {
+    listen 1080;
+    location /ws/ {
+        # custom WebSocket block — hand-edited, must survive deploy
+        proxy_pass http://loxone_backend;
+    }
+}
+EOF
+
+    configure_nginx >/dev/null 2>&1
+
+    grep -q "$sentinel" "$NGINX_SITE"             && pass "operator sentinel preserved"        || fail "operator sentinel was nuked"
+    grep -q "custom WebSocket block" "$NGINX_SITE" && pass "WebSocket block preserved"          || fail "WebSocket block was nuked"
+    [[ -f "$NGINX_APPSEC_AUDIT_CONF" ]]           && pass "conf.d/loxprox-appsec.conf written" || fail "conf.d/loxprox-appsec.conf missing"
+    grep -q 'log_format appsec_evt' "$NGINX_APPSEC_AUDIT_CONF" \
+                                                  && pass "appsec log_format in conf.d"        || fail "log_format missing from conf.d"
+
+    # Force regen: should now overwrite (sentinel disappears)
+    LOXPROX_FORCE_REGEN_NGINX=1 configure_nginx >/dev/null 2>&1
+    grep -q "$sentinel" "$NGINX_SITE" && fail "sentinel survived FORCE_REGEN (should have been overwritten)" \
+                                      || pass "FORCE_REGEN regenerates from template"
+
+    # Disable AppSec → conf.d file should be removed on next run
+    local saved="$ENABLE_APPSEC"
+    ENABLE_APPSEC="false"
+    configure_nginx >/dev/null 2>&1
+    [[ ! -f "$NGINX_APPSEC_AUDIT_CONF" ]] && pass "conf.d removed when ENABLE_APPSEC=false" \
+                                          || fail "conf.d/loxprox-appsec.conf should be removed"
+    ENABLE_APPSEC="$saved"
+    rm -f "$NGINX_SITE"
+}
+
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 
 cleanup() {
@@ -330,6 +511,12 @@ test_setup_logrotate
 test_write_runtime_config
 test_rollback_validation
 test_crowdsec_install_no_curl_pipe
+
+# v1.5.0 — config separation
+test_load_config_sources_values
+test_detect_live_install
+test_extract_config_from_live_state
+test_configure_nginx_preserves_existing_site
 
 echo ""
 echo "═══════════════════════════════════════════════════════════════════════════════"

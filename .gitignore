@@ -4,6 +4,12 @@
 config.json
 /etc/crowdsec/bouncers/*.yaml.local
 
+# Deploy configuration — operator's per-host values. The tracked template is
+# deploy.conf.example; the real file lives at /etc/loxprox/deploy.conf on the
+# deployed VM. Never commit a populated copy that ended up in the repo by
+# accident.
+deploy.conf
+
 # Runtime files
 *.pid
 *.sock
