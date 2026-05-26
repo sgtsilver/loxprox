@@ -1,3 +1,5 @@
+**Language:** [Deutsch](UPGRADE-to-v1.5.de.md) · English
+
 # Upgrading LoxProx v1.3.x → v1.5.0
 
 v1.5.0 moves the REQUIRED configuration values out of `deploy.sh` into a
