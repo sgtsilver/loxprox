@@ -279,6 +279,30 @@ class TestMain:
                     mock_del.assert_not_called()
                     mock_add.assert_not_called()
 
+    def test_capi_history_does_not_inflate_local_offense_count(self):
+        """Mixed-origin decision history: only cscli bans count toward escalation.
+
+        An IP with three CAPI community-blocklist entries and ONE local
+        cscli ban should be treated as a first-time local offender
+        (offense=1 → not in ESCALATION table → no extension). Without the
+        origin filter, it would be counted as four offenses and instantly
+        escalated to 30 days.
+        """
+        all_decisions = [
+            {"value": "1.2.3.4", "id": "10", "origin": "CAPI"},
+            {"value": "1.2.3.4", "id": "11", "origin": "CAPI"},
+            {"value": "1.2.3.4", "id": "12", "origin": "CAPI"},
+            {"value": "1.2.3.4", "id": "20", "origin": "cscli"},
+        ]
+        active = [{"value": "1.2.3.4", "id": "20", "origin": "cscli",
+                   "duration": "3h58m", "scenario": "ssh-bf"}]
+        with patch.object(pb, "run_cscli", side_effect=[all_decisions, active]):
+            with patch.object(pb, "cscli_decision_delete") as mock_del:
+                with patch.object(pb, "cscli_decision_add") as mock_add:
+                    pb.main()
+                    mock_del.assert_not_called()
+                    mock_add.assert_not_called()
+
     def test_delete_fails_does_not_add(self):
         """If delete fails, add should NOT be called."""
         all_decisions = [

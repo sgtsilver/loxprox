@@ -70,12 +70,16 @@ PAYLOAD=$(jq -n \
     }]}')
 
 # ── Circuit breaker: skip alerts after 3 consecutive failures for 15 min ──
-CB_DIR="/tmp/loxprox-discord-cb"
+# State lives under /var/lib/loxprox (root-owned 0750, created by deploy.sh
+# setup_alerting / setup_security_monitoring) rather than world-writable /tmp,
+# to avoid symlink-race pre-staging from a non-root attacker.
+CB_DIR="${LOXPROX_STATE_DIR:-/var/lib/loxprox}/discord-cb"
 CB_FILE="$CB_DIR/failures"
 CB_THRESHOLD=3
 CB_COOLDOWN_SECONDS=900  # 15 minutes
 
 mkdir -p "$CB_DIR"
+chmod 0750 "$CB_DIR" 2>/dev/null || true
 
 is_circuit_open() {
     if [[ -f "$CB_FILE" ]]; then
