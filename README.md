@@ -108,13 +108,21 @@ loxprox/
 3. **Kopiere `deploy.sh`**, `detect-loxone.sh` und `.env.example` in die Ziel-VM.
 4. **Finde deinen Loxone:** `chmod +x detect-loxone.sh && ./detect-loxone.sh`
    - Scannt dein Netz und gibt dir die exakte IP, MAC, Firmware-Version und passende Config-Werte aus.
-5. **Konfigurieren:** Öffne `deploy.sh` und passe die `[REQUIRED]`-Werte oben an. Unsicher? Lies `CONFIGURATION-GUIDE.md` — dort wird jede Einstellung mit Beispielen erklärt.
+5. **Konfigurieren:** Lege dir deine Per-Host-Konfiguration an:
+   ```bash
+   sudo install -d -m 0750 /etc/loxprox
+   sudo cp deploy.conf.example /etc/loxprox/deploy.conf
+   sudo $EDITOR /etc/loxprox/deploy.conf      # [REQUIRED]-Werte eintragen
+   ```
+   `deploy.sh` liest die Werte aus dieser Datei beim Start — nicht mehr aus dem Script selbst (siehe v1.5.0). Unsicher? Lies `CONFIGURATION-GUIDE.md`.
 6. **Deploy:** `chmod +x deploy.sh && sudo ./deploy.sh`
 7. **Validieren:** `sudo bash test-gateway.sh` (50+ automatisierte Checks)
 8. **Umschalten:** Folge `phase3-cutover.md`, um das Router-Forwarding umzuziehen.
 9. **Monitoren:** Folge `phase4-monitoring.md` für Tuning und Beobachtung.
 
-Das Deploy-Script ist **idempotent** — kannst du gefahrlos erneut laufen lassen.
+Das Deploy-Script ist **idempotent** und upgrade-sicher: `git pull && sudo bash deploy.sh` reicht. Operator-Anpassungen an `/etc/nginx/sites-available/loxone` (z. B. ein WebSocket-Block) überleben jedes Redeploy.
+
+> **Upgrade von v1.4.x?** Einmalig `sudo bash deploy.sh --bootstrap-config` ausführen — das Script liest deine aktiven Werte aus nftables / nginx / CrowdSec und schreibt sie in `/etc/loxprox/deploy.conf`. Anleitung: `docs/UPGRADE-v1.4-to-v1.5.md`.
 
 > **SSH-Bootstrap:** Beim ersten Lauf erkennt das Script, ob bereits ein `authorized_keys` existiert. Wenn nicht, **bricht es nicht und sperrt dich nicht aus** — es zeigt ein interaktives Menü: Public Key direkt einfügen (mit Fingerprint-Bestätigung), Hilfe zum Anlegen anzeigen (`ssh-keygen` auf macOS/Linux/Windows), Passwort-Auth vorerst behalten (lauter Warn-Banner bei jedem Login), oder abbrechen. Nicht-interaktive Deploys fallen automatisch in den Soft-Modus. Nach `ssh-copy-id` schaltet `sudo bash deploy.sh --finalize-ssh` auf das harte Profil um. Details in `CONFIGURATION-GUIDE.md` → "SSH Key Bootstrap".
 
