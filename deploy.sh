@@ -983,14 +983,143 @@ EOF
 # SSH daemon hardening (CIS Debian 12 §5.2)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-setup_ssh_hardening() {
-    banner "SSH Daemon Hardening (CIS §5.2)"
+_loxprox_has_authorized_key() {
+    # True (0) if at least one parseable key entry exists in root's or any
+    # UID>=1000 user's authorized_keys file.
+    local files=("/root/.ssh/authorized_keys") user uid home f
+    while IFS=: read -r user _ uid _ _ home _; do
+        [[ "$uid" -ge 1000 ]] || continue
+        [[ -d "$home" ]] || continue
+        [[ "$user" == "nobody" ]] && continue
+        files+=("$home/.ssh/authorized_keys")
+    done < /etc/passwd
+    for f in "${files[@]}"; do
+        [[ -f "$f" ]] || continue
+        if grep -Ev '^\s*(#|$)' "$f" 2>/dev/null | grep -q '^\(ssh-\|ecdsa-sha2-\|sk-\)'; then
+            return 0
+        fi
+    done
+    return 1
+}
 
+_loxprox_validate_pubkey() {
+    # Accepts a single-line public key string. Returns 0 if it parses.
+    local key="$1" tmp
+    case "$key" in
+        ssh-ed25519\ *|ssh-rsa\ *|ssh-dss\ *|ecdsa-sha2-*\ *|sk-ssh-ed25519@openssh.com\ *|sk-ecdsa-sha2-*@openssh.com\ *) ;;
+        *) return 1 ;;
+    esac
+    tmp=$(mktemp) || return 1
+    printf '%s\n' "$key" > "$tmp"
+    if ssh-keygen -l -f "$tmp" >/dev/null 2>&1; then
+        rm -f "$tmp"; return 0
+    fi
+    rm -f "$tmp"; return 1
+}
+
+_loxprox_install_pubkey() {
+    local key="$1" target="${2:-/root}"
+    install -d -m 0700 -o root -g root "${target}/.ssh"
+    local ak="${target}/.ssh/authorized_keys"
+    touch "$ak"; chmod 0600 "$ak"; chown root:root "$ak"
+    if ! grep -qF "$key" "$ak" 2>/dev/null; then
+        printf '%s\n' "$key" >> "$ak"
+    fi
+}
+
+_loxprox_show_key_help() {
+    cat <<EOF
+
+  ${YELLOW}━━ How to create an SSH key — do this ON YOUR WORKSTATION, not here ━━${NC}
+
+    macOS / Linux (Terminal):
+        ssh-keygen -t ed25519 -C "you@workstation"
+
+    Windows 10 / 11 (PowerShell or Git Bash):
+        ssh-keygen -t ed25519 -C "you@workstation"
+
+    Press Enter to accept the default path. Set a passphrase if you want.
+
+    Then print the PUBLIC key (the one ending in .pub — never share the
+    file without .pub):
+
+        cat ~/.ssh/id_ed25519.pub
+
+    Output looks like ONE line starting with 'ssh-ed25519':
+
+        ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... you@workstation
+
+    Copy that ENTIRE line, then come back here and choose [P].
+
+    Need more help? Search:
+        "ssh-keygen ed25519 <your OS>"
+        "how to create ssh key on <your OS>"
+
+EOF
+}
+
+_loxprox_interactive_collect_pubkey() {
+    # Returns:
+    #   0 — public key installed, proceed with HARD hardening
+    #   2 — user chose SOFT mode (password auth stays on)
+    #   exits 1 — user aborted
+    local choice pasted fp confirm
+    while true; do
+        echo
+        echo -e "  ${RED}⚠  No SSH authorized_keys found on this gateway.${NC}"
+        echo "  Disabling password auth NOW would lock you out of SSH."
+        echo
+        echo "  Choose:"
+        echo "    [P] Paste your public key (recommended — we'll wait)"
+        echo "    [H] Show help — how to create a key on your workstation"
+        echo "    [K] Keep password auth for now (insecure; loud login banner until fixed)"
+        echo "    [A] Abort deploy entirely"
+        echo
+        read -r -p "  > " choice
+        case "${choice^^}" in
+            P)
+                echo
+                echo "  Paste the entire public key on ONE line, then press Enter."
+                echo "  Must start with: ssh-ed25519, ssh-rsa, ecdsa-sha2-…, or sk-…"
+                echo "  (Press Enter on an empty line to cancel and go back to the menu.)"
+                echo
+                read -r -p "  pubkey> " pasted
+                [[ -z "$pasted" ]] && continue
+                if ! _loxprox_validate_pubkey "$pasted"; then
+                    error "That doesn't parse as a public key — try again."
+                    continue
+                fi
+                fp=$(printf '%s\n' "$pasted" | ssh-keygen -l -f /dev/stdin 2>/dev/null | head -1)
+                echo
+                echo "  You pasted:"
+                echo "    $pasted"
+                echo
+                echo "  Fingerprint: $fp"
+                echo
+                read -r -p "  Is this YOUR key, correctly copied? [y/N] " confirm
+                if [[ "${confirm,,}" == "y" ]]; then
+                    _loxprox_install_pubkey "$pasted" /root
+                    ok "Public key installed at /root/.ssh/authorized_keys."
+                    return 0
+                fi
+                ;;
+            H) _loxprox_show_key_help ;;
+            K) return 2 ;;
+            A)
+                error "Deploy aborted by user. SSH config unchanged."
+                error "Re-run: sudo bash deploy.sh --finalize-ssh   (after installing a key)"
+                exit 1
+                ;;
+            *) warn "Unknown choice: ${choice:-<empty>}" ;;
+        esac
+    done
+}
+
+_loxprox_write_hard_ssh_drop_in() {
     local drop=/etc/ssh/sshd_config.d/99-loxprox.conf
     backup_file "$drop"
-
     cat > "$drop" <<'EOF'
-# LoxProx — CIS Debian 12 §5.2 SSH hardening
+# LoxProx — CIS Debian 12 §5.2 SSH hardening (HARD mode)
 # Generated by deploy.sh — do not edit by hand.
 Protocol 2
 LogLevel VERBOSE
@@ -1009,15 +1138,110 @@ ClientAliveCountMax 3
 Banner none
 EOF
     chmod 0644 "$drop"
+}
+
+_loxprox_write_soft_ssh_drop_in() {
+    local drop=/etc/ssh/sshd_config.d/99-loxprox.conf
+    backup_file "$drop"
+    cat > "$drop" <<'EOF'
+# LoxProx — SOFT SSH hardening (password auth STILL ENABLED).
+# Re-run `sudo bash deploy.sh --finalize-ssh` after installing an
+# authorized_keys entry to swap this for the HARD profile.
+Protocol 2
+LogLevel VERBOSE
+MaxAuthTries 4
+PermitRootLogin yes
+PermitEmptyPasswords no
+PasswordAuthentication yes
+PubkeyAuthentication yes
+X11Forwarding no
+AllowTcpForwarding no
+AllowAgentForwarding no
+MaxStartups 10:30:60
+LoginGraceTime 60
+ClientAliveInterval 300
+ClientAliveCountMax 3
+EOF
+    chmod 0644 "$drop"
+    mkdir -p /var/lib/loxprox && chmod 0750 /var/lib/loxprox
+    touch /var/lib/loxprox/ssh-keys-missing
+}
+
+_loxprox_install_ssh_motd_nag() {
+    install -d -m 0755 /etc/update-motd.d
+    cat > /etc/update-motd.d/99-loxprox-ssh-warn <<'MOTD'
+#!/bin/sh
+# LoxProx — login warning while password auth is still on.
+[ -f /var/lib/loxprox/ssh-keys-missing ] || exit 0
+RED=$(printf '\033[1;31m'); NC=$(printf '\033[0m')
+IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+printf '%s\n' "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+printf '%s\n' "  ⚠  LOXPROX — SSH PASSWORD AUTH IS STILL ENABLED"
+printf '%s\n' ""
+printf '%s\n' "  No authorized_keys was present when deploy ran. Fix it NOW:"
+printf '%s\n' "    1. On your workstation:  ssh-keygen -t ed25519"
+printf '%s\n' "    2.                       ssh-copy-id root@${IP:-this-gateway}"
+printf '%s\n' "    3. On this gateway:      sudo bash /opt/loxprox/deploy.sh --finalize-ssh"
+printf '%s\n' "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+MOTD
+    chmod 0755 /etc/update-motd.d/99-loxprox-ssh-warn
+}
+
+_loxprox_remove_ssh_motd_nag() {
+    rm -f /etc/update-motd.d/99-loxprox-ssh-warn /var/lib/loxprox/ssh-keys-missing
+}
+
+setup_ssh_hardening() {
+    banner "SSH Daemon Hardening (CIS §5.2)"
+
+    mkdir -p /var/lib/loxprox && chmod 0750 /var/lib/loxprox
+
+    local mode="hard"
+    if ! _loxprox_has_authorized_key; then
+        warn "No SSH authorized_keys found anywhere on this gateway."
+        if [[ -t 0 && -t 1 ]]; then
+            if _loxprox_interactive_collect_pubkey; then
+                mode="hard"
+            else
+                mode="soft"
+            fi
+        else
+            warn "Non-interactive deploy (no tty) — applying SOFT hardening so the box stays reachable."
+            mode="soft"
+        fi
+    fi
+
+    # Defensive re-check: if we plan to go hard, keys MUST be present.
+    if [[ "$mode" == "hard" ]] && ! _loxprox_has_authorized_key; then
+        error "Internal error: hard hardening selected but no key present after collection. Falling back to SOFT."
+        mode="soft"
+    fi
+
+    if [[ "$mode" == "hard" ]]; then
+        _loxprox_write_hard_ssh_drop_in
+        _loxprox_remove_ssh_motd_nag
+    else
+        _loxprox_write_soft_ssh_drop_in
+        _loxprox_install_ssh_motd_nag
+    fi
 
     if ! sshd -t 2>>"$LOG_FILE"; then
-        error "sshd -t failed with hardening drop-in; reverting."
-        rm -f "$drop"
+        error "sshd -t failed with the new drop-in; reverting."
+        rm -f /etc/ssh/sshd_config.d/99-loxprox.conf
         return 1
     fi
 
-    systemctl reload ssh 2>>"$LOG_FILE" || systemctl reload sshd 2>>"$LOG_FILE"
-    ok "SSH hardened (key-only, no root, VERBOSE log) — verify a SECOND session before logging out."
+    systemctl reload ssh 2>>"$LOG_FILE" || systemctl reload sshd 2>>"$LOG_FILE" || true
+
+    if [[ "$mode" == "hard" ]]; then
+        ok "SSH HARD-hardened (key-only, no root, VERBOSE log)."
+        ok "  Verify from a SECOND terminal before logging out:  ssh root@<gateway>"
+    else
+        warn "SSH SOFT-hardened — password auth is STILL ENABLED."
+        warn "  Login banner will nag every session until you fix it."
+        warn "  From your workstation:   ssh-copy-id root@<gateway>"
+        warn "  Then on this gateway:    sudo bash deploy.sh --finalize-ssh"
+    fi
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1516,6 +1740,16 @@ main() {
 
     mkdir -p "$(dirname "$LOG_FILE")"
     touch "$LOG_FILE"
+
+    # Re-entry point for the SSH hardening bootstrap. Used after the operator
+    # installs an authorized_keys entry on a box that was deployed without one
+    # (SOFT mode). Swaps the soft drop-in for the hard one and removes the
+    # MOTD nag. Safe to run repeatedly.
+    if [[ "${1:-}" == "--finalize-ssh" ]]; then
+        banner "LoxProx — --finalize-ssh"
+        setup_ssh_hardening
+        exit 0
+    fi
 
     banner "LoxProx — Debian 12 VM Deploy"
     info "Log: $LOG_FILE"
