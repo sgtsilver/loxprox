@@ -450,7 +450,7 @@ test_configure_nginx_preserves_existing_site() {
     echo ""
     echo "━━━ configure_nginx() preserves existing site ━━━"
 
-    mkdir -p "$(dirname "$NGINX_SITE")" "$(dirname "$NGINX_APPSEC_AUDIT_CONF")"
+    mkdir -p "$(dirname "$NGINX_SITE")"
     local sentinel='# OPERATOR-EDITED-SENTINEL-DO-NOT-REMOVE'
     cat > "$NGINX_SITE" <<EOF
 $sentinel
@@ -467,22 +467,23 @@ EOF
 
     grep -q "$sentinel" "$NGINX_SITE"             && pass "operator sentinel preserved"        || fail "operator sentinel was nuked"
     grep -q "custom WebSocket block" "$NGINX_SITE" && pass "WebSocket block preserved"          || fail "WebSocket block was nuked"
-    [[ -f "$NGINX_APPSEC_AUDIT_CONF" ]]           && pass "conf.d/loxprox-appsec.conf written" || fail "conf.d/loxprox-appsec.conf missing"
-    grep -q 'log_format appsec_evt' "$NGINX_APPSEC_AUDIT_CONF" \
-                                                  && pass "appsec log_format in conf.d"        || fail "log_format missing from conf.d"
+    # v1.5.0 final shape: NO conf.d split — map + log_format stay inline in
+    # the site config (nginx -t rejects the split because `auth_request_set`
+    # registers $appsec_action at parse time, and the variable must be
+    # registered before any `if=$var` access_log reference). The conf.d file
+    # must be cleaned up if it lingered from an earlier dev iteration.
+    [[ ! -f "$NGINX_APPSEC_AUDIT_CONF" ]] && pass "conf.d/loxprox-appsec.conf is NOT written" \
+                                          || fail "conf.d/loxprox-appsec.conf should not exist"
 
-    # Force regen: should now overwrite (sentinel disappears)
+    # Force regen: should now overwrite (sentinel disappears, fresh template
+    # carries map + log_format + access_log inline)
     LOXPROX_FORCE_REGEN_NGINX=1 configure_nginx >/dev/null 2>&1
     grep -q "$sentinel" "$NGINX_SITE" && fail "sentinel survived FORCE_REGEN (should have been overwritten)" \
                                       || pass "FORCE_REGEN regenerates from template"
+    grep -q 'log_format appsec_evt' "$NGINX_SITE"     && pass "log_format appsec_evt in regenerated site"    || fail "log_format missing from regenerated site"
+    grep -q 'map \$appsec_action' "$NGINX_SITE"       && pass "map \$appsec_action in regenerated site"     || fail "map missing from regenerated site"
+    grep -q 'if=\$appsec_blocked' "$NGINX_SITE"       && pass "conditional access_log in regenerated site" || fail "conditional access_log missing"
 
-    # Disable AppSec → conf.d file should be removed on next run
-    local saved="$ENABLE_APPSEC"
-    ENABLE_APPSEC="false"
-    configure_nginx >/dev/null 2>&1
-    [[ ! -f "$NGINX_APPSEC_AUDIT_CONF" ]] && pass "conf.d removed when ENABLE_APPSEC=false" \
-                                          || fail "conf.d/loxprox-appsec.conf should be removed"
-    ENABLE_APPSEC="$saved"
     rm -f "$NGINX_SITE"
 }
 
