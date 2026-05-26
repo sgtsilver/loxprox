@@ -2395,7 +2395,7 @@ main() {
         if _loxprox_detect_live_install; then
             if [[ -t 0 && -t 1 ]]; then
                 error "No $LOXPROX_DEPLOY_CONF found, but an existing LoxProx install is detected."
-                error "First run on this host since the v1.6.0 config split. Bootstrap your config:"
+                error "First run on this host since the v1.5.0 config split. Bootstrap your config:"
                 error "    sudo bash deploy.sh --bootstrap-config"
                 error "Then re-run sudo bash deploy.sh."
                 exit 1

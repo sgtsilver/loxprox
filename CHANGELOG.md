@@ -106,7 +106,7 @@ Off by default. Toggle is a `deploy.conf` edit + `sudo bash deploy.sh` re-run; t
 - Staging issuance: succeeded against `letsencrypt_test` once the `:80` nftables rule was in place.
 - Production issuance: cert from Let's Encrypt E7 intermediate, valid 2026-05-26 → 2026-08-24, browser-trusted from an external Hetzner host (`TLS_verify 0`, no `-k`).
 - Auto-renewal cron: `0 0 * * * "/root/.acme.sh"/acme.sh --cron ...` present.
-- End-to-end: Loxone iOS app on 5G connecting through `https://dewia71.selfhost.eu:1080` after the operator added `:1080` to the URL in the app's connection settings.
+- End-to-end: Loxone iOS app on cellular connecting through `https://<gateway-fqdn>:1080` after the operator added `:1080` to the URL in the app's connection settings.
 
 ### Operator action
 
