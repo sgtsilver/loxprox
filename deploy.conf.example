@@ -168,7 +168,7 @@ ENABLE_TLS="false"
 
 # Fully-qualified domain name the cert is issued for.
 #   Must already resolve publicly to your router's WAN IP.
-#   Example: "dewia71.selfhost.eu"
+#   Example: "loxprox.example.com" (or your dynamic-DNS hostname)
 TLS_DOMAIN=""
 
 # Account email registered with the ACME provider. Required by Let's Encrypt;
