@@ -29,8 +29,13 @@ This gateway exists because the Miniserver cannot protect itself.
 | **Credential stuffing** | High | Critical | Rate limits + CrowdSec http-cve |
 | **Exploitation of Loxone CVEs** | Medium | Critical | AppSec WAF (virtual patching), WAF rules |
 | **Lateral movement (LAN → Miniserver)** | Low | High | Proxmox firewall, VLAN isolation |
+| **Lateral movement (LAN → Gateway via SSH)** | Low | Critical | `setup_ssh_hardening` — CIS §5.2 drop-in, key-only, `PermitRootLogin no`, `MaxAuthTries 4` |
 | **Config file password extraction** | Medium | High | *Physical access control only* |
 | **Cloud DNS hijacking (CVE-2020-27488)** | Low | High | Disable Cloud DNS, use static IP |
+
+### SSH model — LAN-side only
+
+The gateway exposes `:22` only to `SSH_ALLOWED_SUBNETS` via nftables. The internet never sees SSH on this host — there is **no** `endlessh`-style tarpit because there is no public attack surface on port 22 to absorb. The hardening matters for the inside-the-LAN attacker scenario only: a compromised laptop, smart-TV, or IoT toaster trying to pivot from the LAN to the gateway. `deploy.sh` ships a CIS Debian 12 §5.2 drop-in (key-only, no root, VERBOSE log) with a first-deploy bootstrap that prevents the lock-yourself-out chicken-and-egg (see `CONFIGURATION-GUIDE.md` → "SSH Key Bootstrap").
 
 ### What the Miniserver CANNOT Do (Gen 1 Limitations)
 

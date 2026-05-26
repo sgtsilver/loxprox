@@ -185,3 +185,31 @@ If you run a home monitoring stack, ship nginx logs to Loki/Grafana for dashboar
 - [ ] Check disk usage inside LXC (`df -h`)
 - [ ] Verify backups exist
 - [ ] Review nginx access logs for unusual patterns
+- [ ] Verify SSH banner is **not** showing the red "password auth still enabled" warning. If it is: install a public key (`ssh-copy-id root@<gateway>`) and run `sudo bash deploy.sh --finalize-ssh` to swap from SOFT to HARD profile.
+- [ ] Sanity-check AppSec detections: `tail /var/log/nginx/appsec-detections.log` — should grow under attack and stay empty under normal traffic.
+
+---
+
+## Known Limits & Deferred Work
+
+Items the skills audit (`audits/2026-05-23-skills-audit.md`) raised but that are not fixed by the current `deploy.sh`. Recorded here so they're not re-raised every audit cycle.
+
+### Port-scan visibility
+
+nftables drops scans against `:22` from anything outside `SSH_ALLOWED_SUBNETS` silently — no log line, no CrowdSec event, no offender counter increment. CrowdSec only sees what nginx and `auth.log` surface, so a slow TCP fan-scan against the gateway's ports never makes it into the access log because nginx never accepts past the listen socket.
+
+Fixing it cleanly is invasive: either an nftables `limit rate over … log prefix "portscan: "` rule that streams into a custom CrowdSec parser tailing `kern.log`, or installing `crowdsecurity/iptables` and feeding it. Both add noise and an extra parser. The gateway's threat model treats internet-facing scans as already-mitigated (`:1080` is the only listener on the public side, and CrowdSec's HTTP scenarios catch the actually-interesting probes). Deferred until there's a concrete reason to want scanner-level telemetry.
+
+### No host file-integrity monitoring (AIDE)
+
+The audit flagged the absence of AIDE. The decision to skip it stands:
+
+- `auditd` already watches every config path AIDE would protect, with real-time event-level granularity. AIDE's value is **offline** tampering (rootkit, live-CD modification of disk while the VM is powered off) — a class auditd cannot see.
+- AIDE's nightly `aide --check` of `/etc + /bin + /sbin + /usr/bin + /boot` peaks around 200 MB RSS and 5–10 minutes wall time on the 1 GB / 1 vCPU minimum hardware. Both numbers exceed the `network-watchdog.sh` tolerance window — a check running at the wrong moment looks like the box freezing.
+- The offline-tampering threat requires either physical access to the Proxmox host or root on the host kernel. Both are out-of-band failures that AIDE would only confirm after the fact, and at that point the recovery path is "restore VM from a known-good snapshot," not "diff against AIDE DB."
+
+Re-evaluate if hardware ever moves to ≥ 2 GB RAM and ≥ 2 vCPU as a hard baseline (not just the recommended floor).
+
+### IoT-assessment skill applies to the Loxone, not the gateway
+
+The audit's `performing-iot-security-assessment` finding targets the Loxone Miniserver Gen 1 itself (UART/JTAG, firmware extraction, default-credential audit) — not LoxProx. LoxProx **is** the compensating control for that legacy device. A real assessment of the Miniserver would require physical access to the Gen 1 unit and is out of scope for the gateway repo.
