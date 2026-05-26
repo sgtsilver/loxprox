@@ -1234,6 +1234,18 @@ _loxprox_site_enable_tls() {
             printf "%s    ssl_session_cache   shared:loxprox_ssl:10m;\n", indent
             printf "%s    ssl_session_timeout 1d;\n", indent
             printf "%s    add_header          Strict-Transport-Security \"max-age=31536000\" always;\n", indent
+            # v1.6.2 — plain-HTTP-to-HTTPS-port grace: nginx returns 400 ("The
+            # plain HTTP request was sent to HTTPS port") when a client speaks
+            # cleartext to a `listen 1080 ssl` socket. CrowdSec'\''s
+            # http-probing scenario interprets a burst of 400s as scanning
+            # activity and bans the client IP — which Loxone iOS/Android apps
+            # configured for http://gateway:1080 trip into within seconds.
+            # `error_page 497` (nginx'\''s internal code for this exact case)
+            # routed through a named location issues a clean 301 instead.
+            # The bare `error_page 497 https://...` form does not work; the
+            # named-location indirection is required.
+            printf "%s    error_page 497 = @loxprox_https_redirect;\n", indent
+            printf "%s    location @loxprox_https_redirect { return 301 https://$host:1080$request_uri; }\n", indent
             printf "%s%s\n", indent, tls_end
             next
         }

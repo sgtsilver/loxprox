@@ -6,6 +6,28 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.6.2] — 2026-05-26
+
+### Fixed
+
+- **`listen 1080 ssl` now answers plain-HTTP clients with a 301 redirect to HTTPS** instead of returning the default `400 "The plain HTTP request was sent to HTTPS port"`. Found within minutes of switching the maintainer's production VM to HTTPS: the Loxone iOS app was configured for `http://gateway:1080`, the gateway is now `listen 1080 ssl`, and every API call (`/jdev/cfg/api?cacheBstr=…`) got a 400. CrowdSec's `http-probing` scenario interprets a burst of 400s as scanning activity and bans the client IP — Loxone clients trip into a self-ban loop within seconds.
+
+    nginx's internal status code for this case is `497`. Bare `error_page 497 https://…` does not actually redirect (verified on Debian 12 nginx 1.22.1). The reliable form is a named location:
+
+    ```nginx
+    error_page 497 = @loxprox_https_redirect;
+    location @loxprox_https_redirect {
+        return 301 https://$host:1080$request_uri;
+    }
+    ```
+
+    Added inside the v1.6.0 TLS marker block in `configure_nginx()` → `_loxprox_site_enable_tls()`. Lands automatically on every TLS-enabled deploy from v1.6.2 onward. Sites mutated by v1.6.0/v1.6.1 don't get the redirect on re-deploy unless the marker block is regenerated; the simplest fix on those installs is `sudo bash deploy.sh --remove-tls && sudo bash deploy.sh` to recycle the marker block.
+
+### Notes
+
+- This is a transitional grace, not the final story. Loxone iOS/Android/Mac clients that follow HTTP 301 redirects will continue to work without configuration change. Clients that don't (some embedded Loxone Touch UIs, older firmware) will still need their connection URL updated from `http://` to `https://`.
+- CrowdSec's `http-probing` scenario stays as-is — once cleartext clients are migrated to HTTPS, no 400 storm is generated and the scenario doesn't fire on legitimate Loxone traffic.
+
 ## [1.6.1] — 2026-05-26
 
 Two fixes caught by the first live TLS deploy on the maintainer's production VM.
