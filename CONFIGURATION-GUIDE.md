@@ -1,10 +1,10 @@
 # Configuration Guide
 
-This document explains every value LoxProx needs. As of v1.5.0, those values live in `/etc/loxprox/deploy.conf` (not at the top of `deploy.sh` like in v1.4 and earlier — see `docs/UPGRADE-v1.4-to-v1.5.md` if you're migrating).
+This document explains every value LoxProx needs. As of v1.6.0, those values live in `/etc/loxprox/deploy.conf` (not at the top of `deploy.sh` like in v1.4 and earlier — see `docs/UPGRADE-v1.4-to-v1.6.md` if you're migrating).
 
 ---
 
-## TL;DR: Three-Step Setup (v1.5.0+)
+## TL;DR: Three-Step Setup (v1.6.0+)
 
 ```bash
 # Step 1: Find your Loxone automatically
@@ -21,7 +21,7 @@ sudo bash deploy.sh
 
 `deploy.sh` sources `/etc/loxprox/deploy.conf` at startup. It refuses to run if the file is missing AND no existing install is detected, so you can't accidentally deploy with the placeholder values that ship in the example.
 
-**Upgrading from v1.4.x?** Run `sudo bash deploy.sh --bootstrap-config` once. It reads back your current values from live nftables / nginx / CrowdSec state and writes them into `/etc/loxprox/deploy.conf` for you. Full walkthrough: [`docs/UPGRADE-v1.4-to-v1.5.md`](docs/UPGRADE-v1.4-to-v1.5.md).
+**Upgrading from v1.4.x?** Run `sudo bash deploy.sh --bootstrap-config` once. It reads back your current values from live nftables / nginx / CrowdSec state and writes them into `/etc/loxprox/deploy.conf` for you. Full walkthrough: [`docs/UPGRADE-v1.4-to-v1.6.md`](docs/UPGRADE-v1.4-to-v1.6.md).
 
 ---
 

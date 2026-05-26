@@ -3,7 +3,7 @@
 ## Scope
 
 Baseline: v1.3.3 (2026-05-21, netlink batch GeoIP loader). Audit is repo-only;
-no SSH to 192.168.178.252.
+no SSH to the production VM.
 
 Skills applied (12, all loaded from `/Users/paul/Library/Mobile Documents/com~apple~CloudDocs/Projects/skills/Anthropic-Cybersecurity-Skills/skills/`):
 
@@ -311,7 +311,7 @@ See OUT-OF-SCOPE section.
 - **`analyzing-tls-certificate-transparency-logs`, `auditing-tls-certificate-transparency-logs`** — Same. No public DNS name today. Becomes mandatory at Relay-v2.0 (see INFO finding above).
 - **`performing-web-application-firewall-bypass`** — Needs the running VM and external network access. Test plan written into the INFO finding above.
 - **`detecting-sql-injection-via-waf-logs` — runtime validation.** Once the appsec-detections.log gap (MED above) is fixed and one week of traffic has accumulated, run the SKILL's payload-pattern analyzer (`UNION SELECT`, `OR 1=1`, `SLEEP()`, `BENCHMARK()`) against `/var/log/nginx/appsec-detections.log` to baseline noise level and tune thresholds.
-- **GeoIP set size verification** — `geoip-block.sh` claims 22 061 → 11 031 merged CIDRs on the live VM (v1.3.3 release note). Cannot verify locally; requires `ssh loxprox-wiener 'nft list set inet filter geoip_blocklist | wc -l'`.
-- **AppSec actually firing** — Cannot verify the `auth_request` → 127.0.0.1:7422 chain returns 403 on a malicious payload without the running VM. Curl test plan: `curl -i 'http://192.168.178.252:1080/?id=%27%20OR%201=1--'` from an IP not in `CROWDSEC_WHITELIST_IPS`, expect HTTP/1.1 403.
+- **GeoIP set size verification** — `geoip-block.sh` claims 22 061 → 11 031 merged CIDRs on the live VM (v1.3.3 release note). Cannot verify locally; requires SSH access to the production VM and `nft list set inet filter geoip_blocklist | wc -l`.
+- **AppSec actually firing** — Cannot verify the `auth_request` → 127.0.0.1:7422 chain returns 403 on a malicious payload without the running VM. Curl test plan: `curl -i 'http://<gateway>:1080/?id=%27%20OR%201=1--'` from an IP not in `CROWDSEC_WHITELIST_IPS`, expect HTTP/1.1 403.
 - **nftables real input policy** — `health_check()` parses `nft list chain inet filter input | grep policy`. Cannot snapshot remotely.
 - **CrowdSec hub component versions actually deployed** — `cscli hub list` would tell. Deferred.

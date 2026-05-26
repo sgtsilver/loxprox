@@ -54,6 +54,7 @@ export CROWDSEC_APPSEC_ACQUIS="$MOCK_ROOT/etc/crowdsec/acquis.d/appsec.yaml"
 export SYSCTL_CONF="$MOCK_ROOT/etc/sysctl.d/99-security-gateway.conf"
 export NGINX_APPSEC_INCLUDE="$MOCK_ROOT/etc/nginx/crowdsec-appsec.conf"
 export NGINX_APPSEC_AUDIT_CONF="$MOCK_ROOT/etc/nginx/conf.d/loxprox-appsec.conf"
+export NGINX_ACME_CONF="$MOCK_ROOT/etc/nginx/conf.d/loxprox-acme.conf"
 export NFTABLES_CONF="$MOCK_ROOT/etc/nftables.conf"
 export LOGROTATE_CONF="$MOCK_ROOT/etc/logrotate.d/loxone-nginx"
 export GATEWAY_CONFIG_DIR="$MOCK_ROOT/etc/loxprox"
@@ -70,14 +71,14 @@ dpkg() { true; }
 # so _loxprox_extract_config_from_live_state can test cleanly on either OS.
 hostname() {
     case "$1" in
-        -I) echo "192.168.178.99 fe80::1" ;;
+        -I) echo "192.168.42.99 fe80::1" ;;
         *) command hostname "$@" ;;
     esac
 }
 # `ip route` is also Linux-only — return a representative kernel-proto route.
 ip() {
     case "$1" in
-        route) echo "192.168.178.0/24 dev eth0 proto kernel scope link src 192.168.178.99" ;;
+        route) echo "192.168.42.0/24 dev eth0 proto kernel scope link src 192.168.42.99" ;;
         *) command ip "$@" 2>/dev/null || true ;;
     esac
 }
@@ -101,6 +102,7 @@ CROWDSEC_APPSEC_ACQUIS="$MOCK_ROOT/etc/crowdsec/acquis.d/appsec.yaml"
 SYSCTL_CONF="$MOCK_ROOT/etc/sysctl.d/99-security-gateway.conf"
 NGINX_APPSEC_INCLUDE="$MOCK_ROOT/etc/nginx/crowdsec-appsec.conf"
 NGINX_APPSEC_AUDIT_CONF="$MOCK_ROOT/etc/nginx/conf.d/loxprox-appsec.conf"
+NGINX_ACME_CONF="$MOCK_ROOT/etc/nginx/conf.d/loxprox-acme.conf"
 NFTABLES_CONF="$MOCK_ROOT/etc/nftables.conf"
 LOGROTATE_CONF="$MOCK_ROOT/etc/logrotate.d/loxone-nginx"
 GATEWAY_CONFIG_DIR="$MOCK_ROOT/etc/loxprox"
@@ -324,7 +326,7 @@ test_crowdsec_install_no_curl_pipe() {
     fi
 }
 
-# ── v1.5.0 — config file separation + bootstrap ──────────────────────────────
+# ── v1.6.0 — config file separation + bootstrap ──────────────────────────────
 
 test_load_config_sources_values() {
     echo ""
@@ -391,7 +393,7 @@ test_extract_config_from_live_state() {
     # extractor whitespace-tolerant; this fixture pins the behaviour.
     cat > "$NGINX_SITE" <<'NGINX_FIXTURE'
 upstream loxone_backend {
-    server 192.168.178.20:80;
+    server 192.168.42.20:80;
     keepalive 32;
 }
 server {
@@ -407,7 +409,7 @@ NGINX_FIXTURE
     cat > "$NFTABLES_CONF" <<'NFT_FIXTURE'
 table inet filter {
     chain input {
-        tcp dport 22 ip saddr { 192.168.178.0/24, 10.99.0.0/24 } accept
+        tcp dport 22 ip saddr { 192.168.42.0/24, 10.99.0.0/24 } accept
         tcp dport 1080 accept
     }
 }
@@ -422,9 +424,9 @@ APPSEC_FIXTURE
 name: whitelist-loxone
 whitelist:
   ip:
-    - "192.168.178.99"
+    - "192.168.42.99"
   cidr:
-    - "192.168.178.0/24"
+    - "192.168.42.0/24"
     - "10.99.0.0/24"
 WL_FIXTURE
 
@@ -435,9 +437,9 @@ WL_FIXTURE
     local rc=$?
 
     [[ $rc -eq 0 ]] && pass "extract returns 0 on complete fixture" || fail "extract returned $rc (expected 0)"
-    grep -q 'LOXONE_IP="192.168.178.20"' "$out"      && pass "extracted LOXONE_IP"      || fail "LOXONE_IP not extracted"
+    grep -q 'LOXONE_IP="192.168.42.20"' "$out"      && pass "extracted LOXONE_IP"      || fail "LOXONE_IP not extracted"
     grep -q 'LOXONE_PORT="80"' "$out"                && pass "extracted LOXONE_PORT"    || fail "LOXONE_PORT not extracted"
-    grep -q '"192.168.178.0/24"' "$out"              && pass "extracted SSH subnet 1"   || fail "SSH subnet 1 missing"
+    grep -q '"192.168.42.0/24"' "$out"              && pass "extracted SSH subnet 1"   || fail "SSH subnet 1 missing"
     grep -q '"10.99.0.0/24"' "$out"                  && pass "extracted SSH subnet 2"   || fail "SSH subnet 2 missing"
     grep -q 'ENABLE_APPSEC="true"' "$out"            && pass "detected ENABLE_APPSEC"   || fail "ENABLE_APPSEC not detected"
     grep -q 'APPSEC_MODE="enforce"' "$out"           && pass "extracted APPSEC_MODE"    || fail "APPSEC_MODE not extracted"
@@ -492,6 +494,121 @@ EOF
     rm -f "$NGINX_SITE"
 }
 
+# ── v1.6.0 — optional TLS via acme.sh ────────────────────────────────────────
+
+test_tls_validate_config() {
+    echo ""
+    echo "━━━ _loxprox_tls_validate_config() ━━━"
+
+    local saved_domain="$TLS_DOMAIN"
+
+    TLS_DOMAIN="" _loxprox_tls_validate_config 2>/dev/null
+    [[ $? -eq 1 ]] && pass "refuses empty TLS_DOMAIN" || fail "should refuse empty TLS_DOMAIN"
+
+    TLS_DOMAIN="bare-hostname" _loxprox_tls_validate_config 2>/dev/null
+    [[ $? -eq 1 ]] && pass "refuses non-FQDN (no dots)" || fail "should refuse non-FQDN"
+
+    TLS_DOMAIN="loxprox.example.com" _loxprox_tls_validate_config 2>/dev/null
+    [[ $? -eq 0 ]] && pass "accepts valid FQDN" || fail "should accept FQDN"
+
+    TLS_DOMAIN="$saved_domain"
+}
+
+test_tls_site_mutation_round_trip() {
+    echo ""
+    echo "━━━ TLS site mutation — enable/disable/idempotency ━━━"
+
+    mkdir -p "$(dirname "$NGINX_SITE")"
+    # Fresh "v1.5.0-shaped" site config — what configure_nginx writes.
+    cat > "$NGINX_SITE" <<'EOF'
+upstream loxone_backend {
+    server 192.168.42.20:80;
+}
+server {
+    listen 1080;
+    server_name _;
+    location / {
+        proxy_pass http://loxone_backend;
+    }
+}
+EOF
+
+    # State 0: not in TLS mode
+    _loxprox_site_in_tls_mode && fail "fresh site should NOT report in_tls_mode" || pass "fresh site is plain HTTP"
+
+    # Enable → markers + ssl listen
+    _loxprox_site_enable_tls >/dev/null 2>&1
+    [[ $? -eq 0 ]] && pass "enable returns 0 on canonical site" || fail "enable failed on canonical site"
+    grep -q '^[[:space:]]*listen 1080 ssl;' "$NGINX_SITE" && pass "listen line swapped to 'listen 1080 ssl;'" || fail "listen line not swapped"
+    grep -q '# LOXPROX-TLS-BEGIN' "$NGINX_SITE" && pass "TLS-BEGIN marker present" || fail "TLS-BEGIN marker missing"
+    grep -q '# LOXPROX-TLS-END' "$NGINX_SITE" && pass "TLS-END marker present" || fail "TLS-END marker missing"
+    grep -q 'ssl_certificate     /etc/loxprox/tls/fullchain.pem;' "$NGINX_SITE" && pass "ssl_certificate path present" || fail "ssl_certificate missing"
+    grep -q 'Strict-Transport-Security' "$NGINX_SITE" && pass "HSTS header present" || fail "HSTS header missing"
+    _loxprox_site_in_tls_mode && pass "in_tls_mode true after enable" || fail "in_tls_mode should be true"
+
+    # Re-enable should be a no-op
+    local before_hash after_hash
+    before_hash=$(sha256sum "$NGINX_SITE" | awk '{print $1}')
+    _loxprox_site_enable_tls >/dev/null 2>&1
+    after_hash=$(sha256sum "$NGINX_SITE" | awk '{print $1}')
+    [[ "$before_hash" == "$after_hash" ]] && pass "re-enable is idempotent (no mutation)" || fail "re-enable mutated the file"
+
+    # Disable → marker block stripped, listen reverted
+    _loxprox_site_disable_tls >/dev/null 2>&1
+    grep -q '^[[:space:]]*listen 1080;' "$NGINX_SITE" && pass "listen line reverted to plain" || fail "listen revert failed"
+    grep -q '# LOXPROX-TLS-' "$NGINX_SITE" && fail "TLS markers should be gone after disable" || pass "marker block stripped"
+    _loxprox_site_in_tls_mode && fail "in_tls_mode should be false after disable" || pass "in_tls_mode false after disable"
+
+    # Re-disable is a no-op (site already plain)
+    before_hash=$(sha256sum "$NGINX_SITE" | awk '{print $1}')
+    _loxprox_site_disable_tls >/dev/null 2>&1
+    after_hash=$(sha256sum "$NGINX_SITE" | awk '{print $1}')
+    [[ "$before_hash" == "$after_hash" ]] && pass "re-disable is idempotent (no mutation)" || fail "re-disable mutated the file"
+
+    # Enable again — should produce identical content to the first enable
+    _loxprox_site_enable_tls >/dev/null 2>&1
+    grep -q '^[[:space:]]*listen 1080 ssl;' "$NGINX_SITE" && pass "second enable swaps listen again" || fail "second enable failed"
+
+    rm -f "$NGINX_SITE"
+}
+
+test_tls_enable_refuses_noncanonical_listen() {
+    echo ""
+    echo "━━━ TLS site mutation refuses non-canonical 'listen' ━━━"
+
+    mkdir -p "$(dirname "$NGINX_SITE")"
+    # Operator hand-edited the listen line into IPv6-explicit form.
+    cat > "$NGINX_SITE" <<'EOF'
+server {
+    listen [::]:1080;
+    server_name _;
+}
+EOF
+    _loxprox_site_enable_tls >/dev/null 2>&1
+    [[ $? -eq 1 ]] && pass "refuses non-canonical listen line" || fail "should refuse non-canonical listen"
+    grep -q 'TLS-BEGIN' "$NGINX_SITE" && fail "must NOT mutate when refusing" || pass "site untouched when refused"
+
+    rm -f "$NGINX_SITE"
+}
+
+test_tls_acme_listener_written() {
+    echo ""
+    echo "━━━ _loxprox_write_acme_listener() ━━━"
+
+    local saved_webroot="$ACME_WEBROOT"
+    # Re-target the webroot into MOCK_ROOT so non-root tests can create dirs.
+    ACME_WEBROOT="$MOCK_ROOT/var/www/acme"
+    rm -f "$NGINX_ACME_CONF"
+    GATEWAY_IP="192.168.42.252" _loxprox_write_acme_listener
+    [[ -f "$NGINX_ACME_CONF" ]] && pass "ACME conf.d file written" || fail "ACME conf.d not written"
+    grep -q 'listen      80 default_server;' "$NGINX_ACME_CONF" && pass ":80 listener present" || fail ":80 listen missing"
+    grep -q '/.well-known/acme-challenge/' "$NGINX_ACME_CONF" && pass "challenge location present" || fail "challenge location missing"
+    grep -q 'return 301 https://\$host:1080' "$NGINX_ACME_CONF" && pass "301-to-HTTPS catch-all present" || fail "301 catch-all missing"
+    rm -f "$NGINX_ACME_CONF"
+    rm -rf "$ACME_WEBROOT"
+    ACME_WEBROOT="$saved_webroot"
+}
+
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 
 cleanup() {
@@ -523,6 +640,12 @@ test_load_config_sources_values
 test_detect_live_install
 test_extract_config_from_live_state
 test_configure_nginx_preserves_existing_site
+
+# v1.6.0 — optional TLS
+test_tls_validate_config
+test_tls_site_mutation_round_trip
+test_tls_enable_refuses_noncanonical_listen
+test_tls_acme_listener_written
 
 echo ""
 echo "═══════════════════════════════════════════════════════════════════════════════"
