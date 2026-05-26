@@ -6,6 +6,34 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Security (skills-audit follow-up — `audits/2026-05-23-skills-audit.md`)
+
+- **HIGH — SSH daemon now hardened by `deploy.sh`.** New `setup_ssh_hardening()` writes `/etc/ssh/sshd_config.d/99-loxprox.conf` with the CIS Debian 12 §5.2 settings: `PermitRootLogin no`, `PasswordAuthentication no`, `PubkeyAuthentication yes`, `MaxAuthTries 4`, `LogLevel VERBOSE`, `ClientAliveInterval 300`, agent/X11/TCP-forward all off. nftables already drops `:22` from anything outside `SSH_ALLOWED_SUBNETS`, so this finding only ever mattered against a compromised LAN host trying to brute-force the gateway from inside the perimeter — but stock Debian shipped `PasswordAuthentication yes`, leaving that window open. Closed now. Verify from a second terminal before logging out.
+
+- **MED — auditd persistence-vector coverage.** `setup_auditd()` now also watches `/etc/ld.so.preload` + `ld.so.conf{,.d/}` (T1574.006 LD_PRELOAD hijack), `/etc/systemd/system/` + `/lib/systemd/system/` + `/usr/lib/systemd/system/` (T1543.002 unit drops), `/etc/profile{,.d/}` + `/etc/bash.bashrc` + `/root/.bashrc` + `.bash_profile` + `.profile` (T1546.004 shell init), `/root/.ssh/` plus any `/home/<user>/.ssh/` for UID≥1000 (T1098.004 SSH backdoor keys), and the four periodic cron dirs + `/etc/anacrontab` (T1053.003).
+
+- **MED — progressive-ban no longer inflates offense count from CAPI/AppSec.** `progressive-ban.py` was building the per-IP offense counter from every decision in `cscli decisions list -a` regardless of `origin`. An IP that appeared once on the CAPI community blocklist plus once on a local cscli ban was treated as a 2nd-offense local repeat → instant escalation to 24h, defeating the intended "punish proven-local repeats" policy. Counter is now filtered to `origin == "cscli"` only. Regression test `test_capi_history_does_not_inflate_local_offense_count` added.
+
+- **MED — AppSec detections actually get written to disk.** `gateway-monitor.sh:check_appsec_detections()` had been tailing `/var/log/nginx/appsec-detections.log` since v1.x, but nothing ever wrote that file — CrowdSec AppSec returns decisions to nginx via `auth_request`, and nginx was not logging the body. `configure_nginx()` now emits a `map $appsec_action $appsec_blocked` + `log_format appsec_evt` (http scope, gated on `ENABLE_APPSEC=true`) and a conditional `access_log /var/log/nginx/appsec-detections.log appsec_evt if=$appsec_blocked` so blocked requests get a parseable per-IP audit trail.
+
+- **LOW — `/tmp` TOCTOU surface closed in monitoring scripts.** `gateway-backup.sh` previously used a predictable `/tmp/${BACKUP_NAME}` work dir; replaced with `mktemp -d` + `trap rm -rf EXIT`. `discord-alert.sh` circuit-breaker state moved from `/tmp/loxprox-discord-cb` to `${LOXPROX_STATE_DIR:-/var/lib/loxprox}/discord-cb` (0750 root). Closes symlink-race pre-staging from a hostile non-root LAN host.
+
+- **LOW — `/tmp` mounted nosuid,nodev,noexec (CIS §1.1.2).** New `setup_tmp_mount()` writes a `tmp.mount.d` drop-in with `mode=1777,strictatime,nosuid,nodev,noexec` and enables `tmp.mount`. Warns and continues on systems without a `tmp.mount` unit (manual `/etc/fstab` then required).
+
+### Added — SSH bootstrap flow (chicken-and-egg solved)
+
+`setup_ssh_hardening()` now **detects whether any `authorized_keys` is present** (root + UID≥1000 users) before disabling password auth. The previous implementation would have bricked any first-time deploy run over a password-only SSH session.
+
+- **Interactive deploy (tty):** prints a colored "no keys found — would lock you out" warning and shows a 4-option menu:
+    - `[P]` paste your public key — round-trip echoed back with fingerprint, requires explicit `y` confirmation, written with `install -d -m 0700` / `chmod 0600`. Validated by prefix (`ssh-ed25519`, `ssh-rsa`, `ecdsa-sha2-*`, `sk-*`) and `ssh-keygen -l -f` round-trip. Private-key paste rejected.
+    - `[H]` show help — exact `ssh-keygen -t ed25519` + `cat ~/.ssh/id_ed25519.pub` invocations for macOS/Linux/Windows, plus Google search terms.
+    - `[K]` keep password auth, loud login banner until fixed.
+    - `[A]` abort deploy entirely.
+- **Non-interactive deploy (no tty):** falls back automatically to `[K]` mode so an Ansible / unattended run never bricks the box.
+- **Soft mode (`[K]` or no-tty)** ships a different sshd drop-in that keeps `PasswordAuthentication yes` but still sets `MaxAuthTries 4`, `LogLevel VERBOSE`, `PubkeyAuthentication yes` first, no X11/agent/TCP forwarding, and installs `/etc/update-motd.d/99-loxprox-ssh-warn` — a red banner that fires on every login until `/var/lib/loxprox/ssh-keys-missing` is removed.
+- **`sudo bash deploy.sh --finalize-ssh`** — new re-entry point that re-runs only `setup_ssh_hardening()`. Use after `ssh-copy-id root@<gateway>` to swap the soft drop-in for the hard one and remove the MOTD nag.
+- **Private keys are never generated on the server.** The flow only accepts paste of an already-existing public key — the appliance-ships-with-default-key antipattern is explicitly avoided.
+
 ### Changed
 
 - **Supported substrate narrowed to VM-only.** `deploy.sh` now refuses to run inside a container (LXC / systemd-nspawn) unless `ALLOW_LXC=1` is set explicitly. Background: several documented defenses silently fail or no-op when applied from inside an unprivileged Proxmox LXC because they touch host-kernel state the container cannot reach — most importantly the `kernel.unprivileged_userns_clone = 0` Fragnesia (CVE-2026-46300) mitigation added in v1.3.4, which returns `EPERM` from inside a container and does not take effect. Also affected: `kernel.dmesg_restrict` / `kptr_restrict` / `randomize_va_space`, `fs.protected_*`, auditd rule loading (one audit consumer per kernel, owned by the host), AppArmor profile enforcement (`aa-enforce` loads into the host's AppArmor subsystem), and nftables table creation in unprivileged LXC. Prior behaviour was a `warn` and continue — the script's `|| warn` swallow on the sysctl reload meant the deploy looked green while the actual posture was degraded. The new behaviour aborts with an explicit explanation of which defenses would no-op. Operators who knowingly accept the reduced posture can opt in with `ALLOW_LXC=1 sudo ./deploy.sh`; the CIS Debian 12 and OWASP IoT Top 10 posture claims do not apply in that configuration. Docs updated: `README.md`, `README.en.md`, `CONFIGURATION-GUIDE.md`, `phase3-cutover.md`, `phase4-monitoring.md`, `DOCUMENTATION.md`.

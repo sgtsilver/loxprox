@@ -116,6 +116,10 @@ loxprox/
 
 Das Deploy-Script ist **idempotent** — kannst du gefahrlos erneut laufen lassen.
 
+> **SSH-Bootstrap:** Beim ersten Lauf erkennt das Script, ob bereits ein `authorized_keys` existiert. Wenn nicht, **bricht es nicht und sperrt dich nicht aus** — es zeigt ein interaktives Menü: Public Key direkt einfügen (mit Fingerprint-Bestätigung), Hilfe zum Anlegen anzeigen (`ssh-keygen` auf macOS/Linux/Windows), Passwort-Auth vorerst behalten (lauter Warn-Banner bei jedem Login), oder abbrechen. Nicht-interaktive Deploys fallen automatisch in den Soft-Modus. Nach `ssh-copy-id` schaltet `sudo bash deploy.sh --finalize-ssh` auf das harte Profil um. Details in `CONFIGURATION-GUIDE.md` → "SSH Key Bootstrap".
+
+> **Hinweis zum Bedrohungsmodell:** Port 22 ist nur LAN-seitig erreichbar (nftables droppt alles außerhalb `SSH_ALLOWED_SUBNETS`). Die Härtung schützt also nicht gegen Internet-Scanner, sondern gegen einen kompromittierten Host im eigenen Netz, der die Gateway über SSH übernehmen will. Stock-Debian hat `PasswordAuthentication yes` — genau dieses Fenster schließt das Deploy.
+
 ---
 
 ## Was deployt wird

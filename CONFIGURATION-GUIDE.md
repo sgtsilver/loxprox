@@ -134,6 +134,78 @@ ssh loxone@$GATEWAY_IP
 
 ---
 
+## SSH Key Bootstrap — what `deploy.sh` does on first run
+
+`deploy.sh` hardens the SSH daemon (CIS Debian 12 §5.2: `PermitRootLogin no`, `PasswordAuthentication no`, key-only). That would normally **lock you out** of a fresh box that has no `authorized_keys` yet — the classic first-deploy chicken-and-egg. The deploy script handles this for you.
+
+### Threat model — why this matters even on LAN-only SSH
+
+nftables on the gateway already drops `:22` from anything outside `SSH_ALLOWED_SUBNETS`, so the public internet never sees the SSH port. **The hardening protects against a compromised host inside your LAN** (your laptop, a smart-TV, an IoT toaster) trying to brute-force the gateway from the inside. Stock Debian ships `PasswordAuthentication yes`, leaving that window open until hardening lands.
+
+> **Different model from a public Hetzner/AWS box.** Some self-hosted projects (e.g. `endlessh` SSH tarpit setups) need to absorb internet-scale SSH noise on port 22. LoxProx does not — port 22 here is LAN-side only, so the hardened sshd is the right primitive instead of a tarpit.
+
+### What happens during `sudo ./deploy.sh`
+
+1. The script checks `/root/.ssh/authorized_keys` and every `/home/<user>/.ssh/authorized_keys` for UID ≥ 1000.
+
+2. **If at least one key is present** — applies the HARD profile immediately:
+   ```
+   PermitRootLogin no
+   PasswordAuthentication no
+   PubkeyAuthentication yes
+   MaxAuthTries 4
+   LogLevel VERBOSE
+   ClientAliveInterval 300
+   ```
+   Verify from a **second terminal** before logging out.
+
+3. **If no keys are present and the deploy is interactive (tty)** — the script pauses and shows a 4-option menu:
+
+   ```
+   ⚠  No SSH authorized_keys found on this gateway.
+       Disabling password auth NOW would lock you out of SSH.
+
+       [P] Paste your public key (recommended — we'll wait)
+       [H] Show help — how to create a key on your workstation
+       [K] Keep password auth for now (insecure; loud login banner until fixed)
+       [A] Abort deploy entirely
+   ```
+
+   - **`[P]`** — paste the entire `ssh-ed25519 AAAA… you@host` public key on one line. The script validates it (prefix + `ssh-keygen -l -f` round-trip), echoes it back with the fingerprint, asks for a final `y` confirmation, then installs it under `/root/.ssh/authorized_keys` (mode 0600). Then applies the HARD profile.
+   - **`[H]`** — shows the exact commands to run on your workstation:
+     ```
+     macOS / Linux:    ssh-keygen -t ed25519 -C "you@workstation"
+     Windows 10/11:    ssh-keygen -t ed25519 -C "you@workstation"   (PowerShell or Git Bash)
+     Print public:     cat ~/.ssh/id_ed25519.pub
+     ```
+     Plus Google search terms. Switch to `[P]` afterwards without losing your place.
+   - **`[K]`** — applies a SOFT profile (`PasswordAuthentication yes`, but `MaxAuthTries 4` + `LogLevel VERBOSE` + key-pref still set) and installs `/etc/update-motd.d/99-loxprox-ssh-warn` — a red banner that fires on every login until you finalize.
+   - **`[A]`** — aborts the deploy with no SSH changes.
+
+4. **If no keys are present and the deploy is non-interactive** (Ansible, CI, piped stdin) — falls back automatically to the SOFT profile + MOTD banner. The box stays reachable.
+
+### Finalizing after `ssh-copy-id`
+
+If you chose `[K]` or ran an unattended deploy, the box is now running SOFT mode (password auth still on, banner nagging). To swap it for the HARD profile:
+
+```bash
+# 1. On your workstation — install the key:
+ssh-copy-id root@<gateway-ip>
+
+# 2. On the gateway — re-run only the SSH hardening step:
+sudo bash deploy.sh --finalize-ssh
+```
+
+`--finalize-ssh` is idempotent and re-runs only `setup_ssh_hardening()`. It rechecks `authorized_keys`, swaps the drop-in, removes `/var/lib/loxprox/ssh-keys-missing` and the MOTD banner, and reloads `sshd`. Verify with a second terminal before logging out.
+
+### Notes
+
+- Private keys are **never** generated on the gateway. The paste flow only accepts a public key that already exists on your workstation. (Generating private keys server-side is the appliance-ships-with-default-key antipattern — not done here.)
+- The same drop-in path is used by both modes (`/etc/ssh/sshd_config.d/99-loxprox.conf`).
+- The stock `/etc/ssh/sshd_config` is untouched; everything LoxProx writes lives in the drop-in directory.
+
+---
+
 ## Optional Values (Adjust If Needed)
 
 ### Rate Limiting
