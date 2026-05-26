@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-05-26
+
+### Fixed
+
+- **`deploy.sh --bootstrap-config` misreads `ENABLE_APPSEC=false` on hand-aligned nginx configs.** The extractor used `grep -q 'auth_request /crowdsec-appsec'` — a literal single-space match. Real-world nginx configs often have aligned columns (`auth_request      /crowdsec-appsec;`), and the v1.4.0 → v1.5.0 surgical-patch'd site on `loxprox-wiener` uses exactly that style. Result: an AppSec-enabled gateway gets extracted as `ENABLE_APPSEC="false"`, and the subsequent `sudo bash deploy.sh` would skip the AppSec hub collection install and stop registering the bouncer — leaving the still-active `auth_request` in the preserved site config pointing at a non-running upstream. Caught and corrected manually during the maintainer's own v1.5.0 deploy on 2026-05-26. The regex is now `grep -qE 'auth_request[[:space:]]+/crowdsec-appsec'`. Test fixture updated to use aligned whitespace so the regression can't sneak back in.
+
 ## [1.5.0] — 2026-05-26
 
 > **Upgrade-path overhaul.** v1.4 and earlier shipped REQUIRED configuration values inline in `deploy.sh` (`LOXONE_IP="192.168.1.100"` at line 47, …). Operators were expected to edit the script before running it, and to keep their edited copy somewhere safe — because re-running the repo's `deploy.sh` would rewrite nftables / nginx with the upstream placeholders. That bricked the maintainer's own production VM during the v1.4.0 deploy on 2026-05-26 (the edited `deploy.sh` was never persisted; only `192.168.1.x` placeholders remained on disk). v1.5.0 splits configuration from code so that path is closed for good.
