@@ -18,6 +18,20 @@ This gateway exists because the Miniserver cannot protect itself.
 
 ---
 
+## Scope & Design Invariants
+
+These are deliberate boundaries for the **current (Gen 1)** deployment — what this gateway is and isn't trying to do. Revisit them only when the hardware changes (see "v2 / Gen 2" below).
+
+1. **Remote/mobile access goes through the public gateway — no client VPN.** Devices reach the Miniserver via the gateway's public listener, not through a VPN, tunnel, or relay on the device itself. The security ceiling for this path is therefore the gateway stack: TLS + nginx rate/conn limits + CrowdSec + AppSec WAF (+ optional geo-block). The native Loxone app **cannot present client certificates or participate in any gateway-layer auth** (no cookie/OAuth/TOTP), so per-device authentication is not available on Gen 1.
+
+2. **LAN and trusted subnets are never blocked.** Every trusted network must be in `CROWDSEC_WHITELIST_IPS` — not just the primary `LAN_SUBNET`. If a trusted device can reach the gateway from a *second* VLAN (e.g. via inter-VLAN routing), that VLAN must be whitelisted too, or the device can be banned even though it's "internal." Conversely, **guest/IoT segments are intentionally left out** of the whitelist: they are untrusted and pass through the full security stack like any remote client.
+
+3. **Harden on the hardware you have.** The goal is maximum security on the existing Gen 1 Miniserver *without buying new hardware*. Native TLS on the Miniserver, Remote Connect, Trusts, and per-user/per-device identity are Gen 2+ features and are **deferred to a future "v2" with new hardware** — explicitly out of scope here.
+
+4. **The availability trade-off is accepted, not engineered away.** Because remote clients roam onto shared or rotating IPs (mobile carriers, iCloud Private Relay / Cloudflare WARP), the CAPI community blocklist can occasionally block a legitimate user for another tenant's behavior — and a rotating IP **cannot be pre-whitelisted**. We keep the community blocklist for its protection value and resolve such cases reactively (see "Legitimate User Blocked").
+
+---
+
 ## Threat Model
 
 ### What We're Protecting Against
@@ -216,7 +230,11 @@ sudo bash /tmp/deploy.sh
 
 1. `cscli decisions list` → find their IP
 2. `cscli decisions delete --ip <IP>`
-3. Add to whitelist if recurring
+3. Add to whitelist if recurring **and the IP is stable** (a fixed LAN/VLAN subnet, a static remote office, etc.)
+
+**Roaming / shared-egress clients (mobile).** A remote user on a mobile carrier, iCloud Private Relay, or Cloudflare WARP egresses from a **shared, rotating** IP (e.g. `104.28.x.x` for Private Relay). The CAPI community blocklist can list such an IP because of *another* tenant's behavior, blocking your user through no fault of their own. You **cannot** pre-whitelist a rotating IP — there is no stable target. This is an accepted trade-off of keeping the community blocklist on a no-VPN public path (see "Scope & Design Invariants"). Handle it reactively with step 2; if a trusted user is hit repeatedly, advise them to disable Private Relay / WARP so they present a more stable carrier IP.
+
+> **Not a ban — the `https://` migration trap.** If a Loxone app "can't connect" but `cscli decisions list` shows **no** decision for its IP, the cause is almost always the TLS scheme, not a block. See "The Loxone app can't connect after I enabled TLS" in `CONFIGURATION-GUIDE.md`.
 
 ### Loxone Unreachable Externally
 

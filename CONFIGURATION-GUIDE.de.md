@@ -270,6 +270,11 @@ Diese IPs/Netze werden von CrowdSec **niemals** gebannt, selbst wenn sie Attack-
 **Muss enthalten:**
 - Dein LAN-Subnetz (`192.168.1.0/24`)
 - VPN-/Tunnel-Subnetze
+- **Jedes weitere Trusted-Subnetz/VLAN**, aus dem ein vertrauenswürdiges Gerät das Gateway erreichen könnte (z. B. ein zweites WLAN-VLAN, das via Inter-VLAN-Routing ans Gateway geroutet wird). Steht es nicht in der Liste, kann ein Gerät darin gebannt werden, obwohl es intern ist.
+
+**Bewusst ausschließen:** Gast- und IoT-Segmente — lass sie untrusted, damit sie den vollen Security-Stack durchlaufen wie jeder Remote-Client.
+
+> **Roaming-Mobile-Clients lassen sich hier nicht whitelisten.** Geräte im Mobilfunknetz, hinter iCloud Private Relay oder Cloudflare WARP nutzen rotierende IPs — es gibt keine stabile Adresse zum Eintragen. Wie diese Fälle (reaktiv) behandelt werden, steht in SECURITY.de.md → "Legitimer Nutzer geblockt".
 
 **Sollte enthalten:**
 - Uptime-Monitoring-Dienste (z. B. UptimeRobot, Pingdom)
@@ -367,6 +372,8 @@ TLS_ACME_EXTRA=""
 5. Die bestehende Site-Datei wird zwischen expliziten Markern (`# LOXPROX-TLS-BEGIN` / `# LOXPROX-TLS-END`) mutiert, und `listen 1080;` wird zu `listen 1080 ssl;`. Operator-Handedits außerhalb des Marker-Blocks (WebSocket-Location, Custom Header) bleiben unberührt. Die strikte Regex auf der Listen-Zeile akzeptiert ausschließlich das kanonische `listen 1080;` — keine stille Mutation.
 6. Der Auto-Renewal-Cron wird nach jedem TLS-aktivierten Deploy **verifiziert** (nicht vorausgesetzt). Fehlt er? Wird via `acme.sh --install-cronjob` wiederhergestellt, und die exakte Cron-Zeile plus Anleitung zum manuellen Renewal wird geloggt.
 
+> ⚠️ **TLS einzuschalten migriert bestehende Clients nicht automatisch.** Sobald `:1080` nur noch HTTPS spricht, läuft jede Loxone-App / jeder Browser, der noch als `http://<host>:1080` konfiguriert ist, in eine `301`-Redirect-Schleife, bis du ihn auf `https://` umstellst. Plane ein, **jede** gespeicherte Verbindung (jedes Handy, Tablet, jeden Browser) anzupassen, wenn du `ENABLE_TLS=true` setzt. Siehe Troubleshooting → "Die Loxone-App verbindet sich nach dem Aktivieren von TLS nicht mehr".
+
 ### Verhalten beim Ausschalten (`ENABLE_TLS="false"`)
 
 `ENABLE_TLS="false"` setzen und `sudo bash deploy.sh` erneut laufen lassen. Das Script:
@@ -440,6 +447,15 @@ curl -v http://$LOXONE_IP:$LOXONE_PORT/jdev/cfg/api
 # 2. Ist das Gateway im selben Subnetz wie der Loxone?
 # 3. Blockt eine Proxmox-Firewall den Traffic zwischen VMs?
 ```
+
+### "Die Loxone-App verbindet sich nach dem Aktivieren von TLS nicht mehr" (301-Redirect-Schleife)
+
+Nachdem du `ENABLE_TLS=true` gesetzt hast, spricht `:1080` nur noch HTTPS. Ein Client, der weiterhin als `http://<host>:1080` konfiguriert ist, schickt Cleartext an den TLS-Port; nginx beantwortet jeden Request mit einem `301` nach `https://…`, und die Loxone-App (die bei ihren API-Calls keinen Redirects folgt) wiederholt das in einer Schleife. Symptom in `loxone-access.log`: derselbe Client trifft `GET /jdev/cfg/api?cacheBstr=…` immer wieder mit Status `301`.
+
+Das ist kein Ban — `cscli decisions list` zeigt nichts für die IP. Der Fix ist client-seitig und gilt für jede App / jeden Browser, der sich verbindet:
+
+1. In der Loxone-App die Miniserver-Verbindung bearbeiten (oder löschen und neu anlegen).
+2. Die Adresse auf `https://<your-host>:1080` setzen — verifiziere, dass das Schema `https` ist und der Port `:1080` weiterhin vorhanden ist (die App speichert Schema und Port getrennt).
 
 ---
 
