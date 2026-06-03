@@ -269,7 +269,12 @@ These IPs/networks are **never** banned by CrowdSec, even if they trigger attack
 
 **Must include:**
 - Your LAN subnet (`192.168.1.0/24`)
+- **Every other trusted subnet/VLAN** a trusted device might reach the gateway from (e.g. a second Wi-Fi VLAN routed to the gateway via inter-VLAN routing). If it isn't listed, a device on it can be banned even though it's internal.
 - Any VPN/network tunnel subnets
+
+**Deliberately exclude:** guest and IoT segments — leave them untrusted so they pass through the full security stack like any remote client.
+
+> **Roaming mobile clients cannot be whitelisted here.** Devices on mobile carriers, iCloud Private Relay, or Cloudflare WARP use **rotating** IPs — there is no stable address to list. See `SECURITY.md` → "Legitimate User Blocked" for how those are handled (reactively).
 
 **Should include:**
 - Uptime monitoring services (e.g., UptimeRobot, Pingdom)
@@ -367,6 +372,8 @@ TLS_ACME_EXTRA=""
 5. The existing site file is mutated between explicit markers (`# LOXPROX-TLS-BEGIN` / `# LOXPROX-TLS-END`) and `listen 1080;` is swapped for `listen 1080 ssl;`. Operator hand-edits outside the marker block (WebSocket location, custom headers) are untouched. The strict regex on the listen line refuses anything other than canonical `listen 1080;` — no silent mutation.
 6. The auto-renewal cron is **verified** after every TLS-enabled deploy (not assumed). Missing? It is restored from `acme.sh --install-cronjob` and the exact cron line plus manual-renewal recipe is logged.
 
+> ⚠️ **Enabling TLS does not auto-migrate existing clients.** Once `:1080` is HTTPS-only, every Loxone app/browser still configured as `http://<host>:1080` will fail in a `301` redirect loop until you update it to `https://`. Plan to update **every** saved connection (each phone, tablet, browser) when you flip `ENABLE_TLS=true`. See Troubleshooting → "The Loxone app can't connect after I enabled TLS."
+
 ### Toggle-off behavior (`ENABLE_TLS="false"`)
 
 Set `ENABLE_TLS="false"` and re-run `sudo bash deploy.sh`. The script:
@@ -440,6 +447,15 @@ curl -v http://$LOXONE_IP:$LOXONE_PORT/jdev/cfg/api
 # 2. Is the gateway on the same subnet as the Loxone?
 # 3. Is there a Proxmox firewall blocking traffic between VMs?
 ```
+
+### "The Loxone app can't connect after I enabled TLS" (301 redirect loop)
+
+After flipping `ENABLE_TLS=true`, `:1080` speaks **HTTPS only**. A client still configured as `http://<host>:1080` sends cleartext to the TLS port; nginx answers every request with a `301` to `https://…`, and the Loxone app (which doesn't follow redirects on its API calls) retries in a loop. Symptom in `loxone-access.log`: the same client hitting `GET /jdev/cfg/api?cacheBstr=…` with status `301` over and over.
+
+**This is not a ban** — `cscli decisions list` shows nothing for the IP. The fix is client-side and applies to **every** app/browser that connects:
+
+1. In the Loxone app, edit the Miniserver connection (or delete and re-add it).
+2. Set the address to **`https://<your-host>:1080`** — verify the scheme is `https` **and** the `:1080` port is still present (the app stores scheme and port separately).
 
 ---
 
