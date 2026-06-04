@@ -27,7 +27,7 @@ sudo bash deploy.sh
 
 ---
 
-## Erforderliche Werte (6 Einstellungen)
+## Erforderliche Werte (5 Einstellungen)
 
 Diese **müssen** angepasst werden, sonst funktioniert das Deployment in deinem Netz nicht.
 

@@ -6,20 +6,18 @@ For users who already run Prometheus + Grafana (+ optional Loki). Adds LoxProx-s
 
 | Component | Source | Purpose |
 |-----------|--------|---------|
-| `node_exporter` + textfile | System + custom script | CPU, RAM, disk, CrowdSec blocks, nginx errors, AppSec hits |
-| `promtail` | Log shipper | nginx access/error logs, CrowdSec logs, monitor logs → Loki |
+| `node_exporter` + textfile | System + `loxprox-metrics.sh` | CPU/RAM/disk; CrowdSec blocks & alerts; nginx errors & rate-limits; AppSec hits; SSH failures; service health for nginx/CrowdSec/bouncer/**network-watchdog**/**loxprox-monitor**; **watchdog reboot count** |
+| `promtail` | Log shipper | nginx access & error, **AppSec detections**, CrowdSec, monitor, and **network-watchdog** logs → Loki |
 | `grafana-dashboard.json` | Importable dashboard | Security overview, system health, live logs |
+
+> The collector + promtail config cover every log the gateway writes (`loxone-access`, `loxone-error`, `appsec-detections`, `loxprox-monitor`, `network-watchdog`, CrowdSec) and the health of every long-running unit. Upstream binary versions below are pinned examples — check each project's releases page for the current one.
 
 ## Gateway-Side Setup (LoxProx VM)
 
 ### 1. Install node_exporter
 
 ```bash
-# Debian 12 — official Prometheus repo
-wget -qO- https://packages.grafana.com/gpg.key | sudo apt-key add -
-echo "deb https://packages.grafana.com/oss/deb stable main" | sudo tee /etc/apt/sources.list.d/grafana.list
-
-# Or just grab the binary
+# Debian 12 — grab the binary
 curl -sL https://github.com/prometheus/node_exporter/releases/download/v1.8.1/node_exporter-1.8.1.linux-amd64.tar.gz | \
   tar -xzf - -C /tmp
 sudo mv /tmp/node_exporter-1.8.1.linux-amd64/node_exporter /usr/local/bin/
