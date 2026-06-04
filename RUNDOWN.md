@@ -2,8 +2,8 @@
 
 **Status:** Published on GitHub  
 **Repo:** https://github.com/sgtsilver/loxprox  
-**Version:** 1.3.3 (released)  
-**Last updated:** 2026-05-21 (v1.3.3 — geoip-block.sh: incremental nft loader for large blocklists, fixes netlink "No buffer space available")
+**Version:** 1.5.1 (released)  
+**Last updated:** 2026-06-04 (v1.5.1 — token-confidentiality audit: access-log scrubbing + path redaction, TLS PFS hardening, watchdog reboot-gate, fail-safe progressive ban; all verified live)
 
 ---
 
@@ -189,7 +189,7 @@ These settings are configured on the repo and affect how code lands in `main`:
 | Branch protection on `main` | ✅ Active | Requires PR + 1 approval + all CI checks pass |
 | Dependabot (Actions) | ✅ Active | Weekly checks; auto-opens PRs for action updates |
 | Secret scanning | ⏭️ Skipped | LAN-only project; no secrets committed |
-| Releases | ✅ Published | `v1.1.0`, `v1.2.0`, `v1.2.1`, `v1.3.1`, `v1.3.2`, `v1.3.3` (latest). v1.3.0 was withdrawn — do not install. See [Releases](https://github.com/sgtsilver/loxprox/releases). |
+| Releases | ✅ Published | `v1.1.0`, `v1.2.0`, `v1.2.1`, `v1.3.1`, `v1.3.2`, `v1.3.3`, `v1.5.0`, `v1.5.1` (latest). v1.3.0 was withdrawn — do not install. v1.4.0 and the v1.6.x same-day tags were consolidated into v1.5.0 (see CHANGELOG). See [Releases](https://github.com/sgtsilver/loxprox/releases). |
 
 ### Developer workflow (after branch protection)
 
@@ -249,7 +249,7 @@ All 23 findings from the 2026-05-06 Ezio audit have been addressed:
 
 ### Cumulative Stats
 - **Total findings resolved:** 45 (23 audit + 10 handover + 12 second sweep)
-- **Test assertions:** 88 (21 pytest + 54 deploy + 11 scanner + 2 shellcheck)
+- **Test assertions:** 151 (23 pytest + 117 deploy integration + 11 scanner) — all green as of v1.5.1
 
 ## Test Infrastructure
 
