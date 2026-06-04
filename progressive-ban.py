@@ -193,13 +193,19 @@ def main():
             ip, offenses, scenario, target,
         )
 
-        # Delete current ban and re-add with longer duration
-        if not cscli_decision_delete(id_):
-            logger.warning("Failed to delete decision %s for %s — skipping add", id_, ip)
-            continue
+        # F9: add the extended ban FIRST, then delete the original. A failure
+        # between the two steps then leaves the IP *over*-banned (two overlapping
+        # decisions, the longer one wins) instead of UNbanned — fail safe, not
+        # fail open. The stale original simply expires on its own if the delete
+        # never lands.
         if not cscli_decision_add(ip, target, f"repeat-offender-{offenses}"):
-            logger.warning("Failed to add extended decision for %s — IP may be unbanned", ip)
+            logger.warning("Failed to add extended decision for %s — leaving original ban in place", ip)
             continue
+        if not cscli_decision_delete(id_):
+            logger.warning(
+                "Added extended ban for %s but failed to delete original %s — "
+                "harmless duplicate, original will expire on its own", ip, id_,
+            )
 
         state[ip] = target
         extended += 1

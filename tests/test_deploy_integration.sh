@@ -490,6 +490,16 @@ EOF
     grep -q 'log_format appsec_evt' "$NGINX_SITE"     && pass "log_format appsec_evt in regenerated site"    || fail "log_format missing from regenerated site"
     grep -q 'map \$appsec_action' "$NGINX_SITE"       && pass "map \$appsec_action in regenerated site"     || fail "map missing from regenerated site"
     grep -q 'if=\$appsec_blocked' "$NGINX_SITE"       && pass "conditional access_log in regenerated site" || fail "conditional access_log missing"
+    # F3 — access log scrubbed of query string (combined-shaped for CrowdSec)
+    grep -q 'log_format loxone_scrubbed' "$NGINX_SITE" && pass "F3: scrubbed log_format defined"          || fail "F3: scrubbed log_format missing"
+    grep -qE 'access_log /var/log/nginx/loxone-access\.log +loxone_scrubbed;' "$NGINX_SITE" && pass "F3: main access_log uses scrubbed format" || fail "F3: main access_log not scrubbed (query string still logged)"
+    grep -q '\$request_method \$loxone_log_uri \$server_protocol' "$NGINX_SITE" && pass "F3: request line uses redacted \$loxone_log_uri (not raw \$request)" || fail "F3: scrubbed format does not use \$loxone_log_uri"
+    grep -q 'map \$uri \$loxone_log_uri' "$NGINX_SITE" && pass "F3: path-redaction map present"        || fail "F3: redaction map missing"
+    grep -qE 'fenc\|enc\|gettoken\|getjwt\|keyexchange\|getkey2' "$NGINX_SITE" && pass "F3: redaction covers fenc/enc/gettoken/keyexchange path forms" || fail "F3: redaction map does not cover the sensitive Loxone endpoints"
+    # F7 — WebSocket transparency (additive; non-WS behaviour unchanged)
+    grep -q 'map \$http_upgrade \$connection_upgrade' "$NGINX_SITE" && pass "F7: WebSocket upgrade map present"        || fail "F7: WebSocket map missing"
+    grep -qE 'proxy_set_header Upgrade +\$http_upgrade' "$NGINX_SITE" && pass "F7: Upgrade header forwarded"          || fail "F7: Upgrade header missing"
+    grep -qE 'proxy_set_header Connection +\$connection_upgrade' "$NGINX_SITE" && pass "F7: Connection is WS-aware"   || fail "F7: Connection header not WS-aware"
 
     rm -f "$NGINX_SITE"
 }
@@ -544,6 +554,9 @@ EOF
     grep -q '# LOXPROX-TLS-END' "$NGINX_SITE" && pass "TLS-END marker present" || fail "TLS-END marker missing"
     grep -q 'ssl_certificate     /etc/loxprox/tls/fullchain.pem;' "$NGINX_SITE" && pass "ssl_certificate path present" || fail "ssl_certificate missing"
     grep -q 'Strict-Transport-Security' "$NGINX_SITE" && pass "HSTS header present" || fail "HSTS header missing"
+    # F6 — TLS forward-secrecy hardening
+    grep -q 'ssl_session_tickets off;' "$NGINX_SITE" && pass "F6: ssl_session_tickets off present" || fail "F6: ssl_session_tickets off missing (PFS regression)"
+    grep -qE 'ssl_ciphers .*ECDHE' "$NGINX_SITE" && pass "F6: PFS ssl_ciphers (ECDHE-only) present" || fail "F6: PFS ssl_ciphers missing (non-PFS suite negotiable)"
     _loxprox_site_in_tls_mode && pass "in_tls_mode true after enable" || fail "in_tls_mode should be true"
 
     # Re-enable should be a no-op

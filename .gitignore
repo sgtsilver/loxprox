@@ -62,3 +62,25 @@ __pycache__/
 DOCUMENTATION.md
 PLAN-v2-v25.md
 for-kimi.md
+
+# Internal security-audit tooling + scratch — NEVER commit to the public repo.
+# These are local audit machinery and attack-analysis seeds; publishing them
+# would hand attackers a roadmap of the live gateway.
+agents/
+templates/
+cache/
+audits/
+requiescat.md
+SKILL.md
+skills-lock.json
+audit-swarm.md
+discovery-agent.md
+research-agent.md
+report-template.md
+loxprox-security-review.md
+tmp-session-stealing-audit.md
+CONTEXT.md
+CONTEXT_Ezio.md
+BROTHERHOOD-REPORT-*.html
+ezio-audit-report-*.md
+ezio-audit-report-*.html
