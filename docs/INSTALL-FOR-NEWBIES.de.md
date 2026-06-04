@@ -2,7 +2,7 @@
 
 # Installation für Linux-Einsteiger
 
-**Du hast einen Loxone Miniserver, kennst dich aber mit Linux kaum aus? Kein Problem. Wir urteilen nicht und halten niemanden draußen — folge einfach Schritt für Schritt mit.**
+**Du hast einen Loxone Miniserver, kennst dich aber mit Linux kaum aus? Kein Problem. Wir urteilen nicht und grenzen niemanden aus — folge einfach Schritt für Schritt mit.**
 
 Jeder fängt mal an. Wer einem Kochrezept folgen kann, schafft auch das hier. Du kopierst eine Handvoll Befehle, tippst ein paar eigene Zahlen ein, und am Ende sitzt dein Miniserver hinter einem richtigen Sicherheits-Gateway, statt offen im Internet zu stehen. Keine Linux-Vorkenntnisse nötig. Lass dir Zeit. Dumme Fragen gibt es hier nicht.
 
@@ -27,7 +27,7 @@ Internet  →  dein Router  →  LoxProx-Gateway  →  dein Loxone Miniserver
   - einen **Raspberry Pi 3, 4 oder 5** (mit 64-bit Raspberry Pi OS), oder
   - irgendeinen **alten Mini-PC oder Laptop**, den du löschen und mit Debian neu aufsetzen kannst.
 - **Die Daten deines Miniservers** — dafür gibt es ein Tool, das sie für dich findet. Kein Stress, wenn du sie noch nicht kennst.
-- **Etwa 30–45 Minuten** und einen Kaffee.
+- **Etwa 30–45 Minuten** und dein Lieblingsgetränk. (Falls dein Lieblingsgetränk Alkohol enthält, heb dir die Runde vielleicht für *danach* auf — einen klaren Kopf willst du behalten, während du umbaust, wie dein Zuhause mit dem Internet spricht.)
 - Mehr nicht. Du musst **kein** Programmierer sein.
 
 Zur Größe: 1 CPU und **1 GB RAM** ist das Minimum; **2 CPU / 2 GB** ist komfortabel. Etwa 5 GB Festplatte.
