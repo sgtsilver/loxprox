@@ -139,7 +139,7 @@ Or use the provided `prometheus-scrape.yml` snippet and include it.
 If your gateway VM has nftables input DROP, allow Prometheus scrapes from your monitoring subnet:
 
 ```bash
-sudo nft add rule inet filter input ip sdr 192.168.100.0/24 tcp dport 9100 accept
+sudo nft add rule inet filter input ip saddr 192.168.100.0/24 tcp dport 9100 accept
 ```
 
 (Replace `192.168.100.0/24` with your Prometheus/Loki network.)

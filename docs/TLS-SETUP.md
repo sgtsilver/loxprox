@@ -78,7 +78,7 @@ sudo bash deploy.sh
 
 What happens:
 
-1. **Pre-flight + nftables + nginx + CrowdSec + AppArmor** — unchanged from v1.4.x.
+1. **Pre-flight + nftables + nginx + CrowdSec + AppArmor** — unchanged from v1.3.x.
 2. **TLS step:**
     - `acme.sh` is installed at `/root/.acme.sh/` from a SHA256-pinned
       tarball (version + hash in `deploy.sh`; no `curl | bash`).

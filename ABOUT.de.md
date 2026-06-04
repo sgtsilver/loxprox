@@ -62,7 +62,7 @@ Stack:
 - auditd für die Erkennung von Config-Tampering
 - Discord-Alerting bei Security-Events
 
-Deploy: ein Script (`deploy.sh`, ~1265 Zeilen, idempotent). Validierung: 50+ automatisierte Checks. Note: A- über CIS Debian 12, OWASP Top 10 und OWASP IoT Top 10.
+Deploy: ein Script (`deploy.sh`, ~2550 Zeilen, idempotent). Validierung: 50+ automatisierte Checks. Note: A- über CIS Debian 12, OWASP Top 10 und OWASP IoT Top 10.
 
 LAN umgeht das Gateway vollständig — nur internet-facing Traffic wird gehärtet. Läuft auf einer 1 vCPU / 1 GB VM (2 vCPU / 2 GB empfohlen für Angriffs-Reserve) oder einem Raspberry Pi 4. **Nur VM — LXC wird nicht unterstützt**, weil sich mehrere Kernel-Level-Verteidigungen (Sysctls inklusive der Fragnesia-Mitigation, auditd, AppArmor-Enforcement, nftables) aus einem Container heraus nicht anwenden lassen und stillschweigend zu No-Ops würden.
 
@@ -77,7 +77,7 @@ Non-commercial lizensiert. Feedback von allen willkommen, die CrowdSec auf resso
 LoxProx deployt einen Sechs-Schichten-Verteidigungsstack (nftables → nginx → CrowdSec IDS → AppSec WAF → Firewall Bouncer → AppArmor/auditd) auf einer Debian-12-VM und schützt den externen Zugriff transparent, ohne LAN-Nutzer zu beeinträchtigen.
 
 Technische Highlights:
-- Idempotentes Deploy-Script mit ~1265 Zeilen
+- Idempotentes Deploy-Script mit ~2550 Zeilen
 - Validierungs-Suite mit 50+ automatisierten Checks
 - Self-contained HTML-Security-Report (Note A-)
 - Raspberry Pi 4/5 kompatibel

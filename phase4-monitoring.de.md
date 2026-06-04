@@ -27,7 +27,7 @@ awk '{print $1}' /var/log/nginx/loxone-access.log | sort | uniq -c | sort -rn | 
 ## Rate Limits tunen
 
 Die Default-Config nutzt:
-- **10 req/s** pro IP mit Burst 20
+- **10 req/s** pro IP mit Burst 100
 - **20 gleichzeitige Verbindungen** pro IP
 
 Wenn legitime Nutzer geblockt werden (z. B. weil die Loxone-App viele schnelle Requests feuert):
