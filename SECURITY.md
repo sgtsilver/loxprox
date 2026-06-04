@@ -46,8 +46,13 @@ These are deliberate boundaries for the **current (Gen 1)** deployment — what 
 | **Exploitation of Loxone CVEs** | Medium | Critical | AppSec WAF (virtual patching), WAF rules |
 | **Lateral movement (LAN → Miniserver)** | Low | High | Proxmox firewall, VLAN isolation |
 | **Lateral movement (LAN → Gateway via SSH)** | Low | Critical | `setup_ssh_hardening` — CIS §5.2 drop-in, key-only, `PermitRootLogin no`, `MaxAuthTries 4` |
+| **Passive token capture on the gateway → Miniserver hop** | Low | High | *Cleartext by necessity — Gen 1 has no TLS. Isolate this hop on a dedicated VLAN/link so the same on-LAN attacker modeled above cannot sniff the relayed Loxone token. See note below.* |
 | **Config file password extraction** | Medium | High | *Physical access control only* |
 | **Cloud DNS hijacking (CVE-2020-27488)** | Low | High | Disable Cloud DNS, use static IP |
+
+### Backend hop — gateway → Miniserver is cleartext
+
+The gateway terminates TLS on `:1080` and proxies **plaintext HTTP** to the Miniserver on `:80`, because Gen 1 hardware cannot speak TLS. Everything the gateway relays — the Loxone `gettoken` HMAC, command query arguments, and the **live session token** — therefore crosses the gateway→Miniserver wire unencrypted. The gateway holds no session of its own; it relays Loxone's token, so capturing that token on this hop is equivalent to capturing the session. This is the **same on-LAN attacker** the lateral-movement rows above already model (a compromised IoT device pivoting on the LAN), and the exposure cannot be removed in code (the Miniserver has no TLS). The compensating control is **network isolation**: place the gateway↔Miniserver path on a dedicated VLAN or point-to-point link so no untrusted LAN device shares that broadcast/routing domain.
 
 ### SSH model — LAN-side only
 

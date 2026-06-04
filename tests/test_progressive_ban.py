@@ -303,23 +303,28 @@ class TestMain:
                     mock_del.assert_not_called()
                     mock_add.assert_not_called()
 
-    def test_delete_fails_does_not_add(self):
-        """If delete fails, add should NOT be called."""
+    # ── F9: fail-safe ban extension (add the new ban BEFORE deleting the old) ──
+    def test_extend_adds_before_deletes(self):
+        """F9: the extended ban is ADDED before the original is DELETED, so a
+        crash/timeout between the two steps can only over-ban, never unban."""
         all_decisions = [
             {"value": "1.2.3.4", "id": "1", "origin": "cscli"},
             {"value": "1.2.3.4", "id": "2", "origin": "cscli"},
         ]
         active = [{"value": "1.2.3.4", "id": "2", "origin": "cscli",
                    "duration": "3h58m", "scenario": "ssh-bf"}]
+        order = []
         with patch.object(pb, "run_cscli", side_effect=[all_decisions, active]):
-            with patch.object(pb, "cscli_decision_delete", return_value=False) as mock_del:
-                with patch.object(pb, "cscli_decision_add") as mock_add:
+            with patch.object(pb, "cscli_decision_add",
+                              side_effect=lambda *a, **k: order.append("add") or True):
+                with patch.object(pb, "cscli_decision_delete",
+                                  side_effect=lambda *a, **k: order.append("delete") or True):
                     pb.main()
-                    mock_del.assert_called_once()
-                    mock_add.assert_not_called()
+        assert order == ["add", "delete"], f"expected add before delete, got {order}"
 
-    def test_add_fails_logs_warning(self):
-        """If delete succeeds but add fails, should log and continue."""
+    def test_add_fails_leaves_original_ban(self):
+        """F9: if the extended add fails, the original is NOT deleted — the IP
+        stays banned (fail safe, never an unban)."""
         all_decisions = [
             {"value": "1.2.3.4", "id": "1", "origin": "cscli"},
             {"value": "1.2.3.4", "id": "2", "origin": "cscli"},
@@ -327,10 +332,28 @@ class TestMain:
         active = [{"value": "1.2.3.4", "id": "2", "origin": "cscli",
                    "duration": "3h58m", "scenario": "ssh-bf"}]
         with patch.object(pb, "run_cscli", side_effect=[all_decisions, active]):
-            with patch.object(pb, "cscli_decision_delete", return_value=True):
-                with patch.object(pb, "cscli_decision_add", return_value=False) as mock_add:
+            with patch.object(pb, "cscli_decision_add", return_value=False) as mock_add:
+                with patch.object(pb, "cscli_decision_delete") as mock_del:
                     pb.main()
                     mock_add.assert_called_once()
+                    mock_del.assert_not_called()
+
+    def test_add_succeeds_delete_fails_is_harmless(self):
+        """F9: add succeeds but deleting the original fails — the IP stays
+        banned via the new (longer) decision; the stale original just expires.
+        main() must not crash and the delete must still have been attempted."""
+        all_decisions = [
+            {"value": "1.2.3.4", "id": "1", "origin": "cscli"},
+            {"value": "1.2.3.4", "id": "2", "origin": "cscli"},
+        ]
+        active = [{"value": "1.2.3.4", "id": "2", "origin": "cscli",
+                   "duration": "3h58m", "scenario": "ssh-bf"}]
+        with patch.object(pb, "run_cscli", side_effect=[all_decisions, active]):
+            with patch.object(pb, "cscli_decision_add", return_value=True) as mock_add:
+                with patch.object(pb, "cscli_decision_delete", return_value=False) as mock_del:
+                    pb.main()
+                    mock_add.assert_called_once()
+                    mock_del.assert_called_once()
 
 
 class TestEscalationTable:

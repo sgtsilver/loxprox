@@ -69,6 +69,9 @@ LOG_FILE="/var/log/loxprox-network-watchdog.log"
 REBOOT_FLAG="$STATE_DIR/.watchdog-reboot-pending"
 REBOOT_LOG="$STATE_DIR/watchdog-reboot-history.log"
 FAILURE_COUNT_FILE="$STATE_DIR/watchdog-failure-count"
+# F4: set once when we suppress a reboot for an upstream-only outage, so we
+# alert exactly once instead of every 60 s while the ISP/DNS is down.
+UPSTREAM_FLAG="$STATE_DIR/.watchdog-upstream-alerted"
 
 # Anti-reboot-loop protection
 MAX_REBOOTS_PER_HOUR=2
@@ -366,6 +369,7 @@ main() {
     # 5. All healthy?
     if [[ ${#failed[@]} -eq 0 ]]; then
         clear_failure_count
+        rm -f "$UPSTREAM_FLAG"
         log "Cycle passed"
         exit 0
     fi
@@ -389,13 +393,37 @@ main() {
     # 9. Attempt heal
     if attempt_heal; then
         clear_failure_count
+        rm -f "$UPSTREAM_FLAG"
         send_discord "WARNING" "Network Recovered After Restart" \
             "Watchdog detected failure (${failed[*]}) but recovered after restarting networking/nginx.\n\n${diag}"
         log "Recovered after heal"
         exit 0
     fi
 
-    # 10. Unrecoverable — reboot
+    # 9b. F4: a reboot only fixes a VM-side network failure. If every failed
+    # check is *upstream* (router ping / public DNS) while the local stack is
+    # healthy — the interface still holds its IP and nginx answers on localhost —
+    # a reboot cannot fix the problem and would drop every live Loxone session
+    # for what is almost certainly an ISP/DNS blip. Alert once and wait instead.
+    # The dhclient-spiral / routing-corruption case this watchdog exists for
+    # surfaces as interface_ip / nginx_local failures, which still reboot below.
+    local local_failed=0 f
+    for f in "${failed[@]}"; do
+        case "$f" in
+            nginx_local|interface_ip) local_failed=1 ;;
+        esac
+    done
+    if [[ "$local_failed" -eq 0 ]]; then
+        if [[ ! -f "$UPSTREAM_FLAG" ]]; then
+            : > "$UPSTREAM_FLAG"
+            send_discord "WARNING" "Upstream Network Unreachable — No Reboot" \
+                "Watchdog checks failed (${failed[*]}) but the local network stack is healthy (interface has its IP, nginx responds on localhost). This looks like an upstream/ISP/DNS outage, which a reboot cannot fix — NOT rebooting, alerting only.\n\n${diag}\n\nCheck your upstream router/Fritzbox and internet connection. This alert fires once; recovery will be reported when checks pass again."
+        fi
+        log "Upstream-only failure (${failed[*]}); local stack healthy — alerting, not rebooting"
+        exit 0
+    fi
+
+    # 10. Unrecoverable AND the local stack is broken — reboot
     handle_reboot "${failed[*]}" "$diag"
 }
 

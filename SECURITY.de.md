@@ -46,8 +46,13 @@ Das sind bewusst gesetzte Grenzen für das **aktuelle (Gen-1-)** Deployment — 
 | **Ausnutzung von Loxone-CVEs** | Mittel | Kritisch | AppSec WAF (Virtual Patching), WAF-Regeln |
 | **Lateral Movement (LAN → Miniserver)** | Niedrig | Hoch | Proxmox-Firewall, VLAN-Isolation |
 | **Lateral Movement (LAN → Gateway via SSH)** | Niedrig | Kritisch | `setup_ssh_hardening` — CIS §5.2 Drop-in, Key-only, `PermitRootLogin no`, `MaxAuthTries 4` |
+| **Passives Abgreifen des Tokens auf dem Hop Gateway → Miniserver** | Niedrig | Hoch | *Klartext aus Notwendigkeit — Gen 1 kann kein TLS. Diesen Hop auf einem dedizierten VLAN/Link isolieren, damit der oben modellierte LAN-interne Angreifer das weitergereichte Loxone-Token nicht mitschneiden kann. Siehe Hinweis unten.* |
 | **Passwort-Extraktion aus Config-Datei** | Mittel | Hoch | *Nur physische Zugangskontrolle* |
 | **Cloud-DNS-Hijacking (CVE-2020-27488)** | Niedrig | Hoch | Cloud DNS abschalten, statische IP verwenden |
+
+### Backend-Hop — Gateway → Miniserver ist Klartext
+
+Das Gateway terminiert TLS auf `:1080` und proxyt **Klartext-HTTP** zum Miniserver auf `:80`, weil die Gen-1-Hardware kein TLS kann. Alles, was das Gateway weiterreicht — der Loxone-`gettoken`-HMAC, die Command-Query-Argumente und das **aktive Session-Token** — quert den Draht Gateway→Miniserver damit unverschlüsselt. Das Gateway hält keine eigene Session; es reicht das Loxone-Token nur durch, das Mitschneiden dieses Tokens auf diesem Hop entspricht also dem Übernehmen der Session. Das ist **derselbe LAN-interne Angreifer**, den die Lateral-Movement-Zeilen oben bereits modellieren (ein kompromittiertes IoT-Gerät, das im LAN pivotiert), und die Exposition lässt sich nicht im Code beseitigen (der Miniserver hat kein TLS). Die kompensierende Maßnahme ist **Netzwerk-Isolation**: den Pfad Gateway↔Miniserver auf ein dediziertes VLAN oder einen Punkt-zu-Punkt-Link legen, sodass kein nicht-vertrauenswürdiges LAN-Gerät dieselbe Broadcast-/Routing-Domäne teilt.
 
 ### SSH-Modell — nur LAN-seitig
 
