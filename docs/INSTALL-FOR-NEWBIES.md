@@ -116,7 +116,7 @@ sudo nano /etc/loxprox/deploy.conf
 - `GATEWAY_IP` — this gateway's own address (from Step 6).
 - `LAN_SUBNET` — your home network range (the scanner suggests it; usually something like `192.168.1.0/24`).
 - `SSH_ALLOWED_SUBNETS` — who's allowed to log in to the gateway; your home network is fine to start.
-- `DISCORD_WEBHOOK` *(optional)* — paste a Discord webhook URL here to get phone alerts. Skip it for now if you like.
+- `DISCORD_WEBHOOK_URL` *(optional)* — paste a Discord webhook URL here to get phone alerts. Skip it for now if you like.
 
 Every value has a comment above it explaining what it does. When you're done: press **Ctrl+O** then **Enter** to save, then **Ctrl+X** to exit. (Stuck on a value? The full [Configuration Guide](../CONFIGURATION-GUIDE.md) explains every single one.)
 

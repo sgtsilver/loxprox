@@ -24,7 +24,7 @@ Wenn du KI verwendet hast, um einen Bug zu finden: füge den tatsächlichen Test
 
 - Generische Hardening-Tipps, die CrowdSec / Debian-Basisdoku duplizieren
 - Breaking Changes am Deployment-Flow ohne starke Begründung
-- Features, die den Ressourcenverbrauch deutlich erhöhen (Target: 512 MB RAM)
+- Features, die den Ressourcenverbrauch deutlich erhöhen (Target: 1 GB RAM)
 
 ## Vor dem Submit
 

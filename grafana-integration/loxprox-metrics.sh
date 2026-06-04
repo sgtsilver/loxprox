@@ -68,6 +68,19 @@ systemctl is-active --quiet crowdsec 2>/dev/null && crowdsec_up=1
 bouncer_up=0
 systemctl is-active --quiet crowdsec-firewall-bouncer 2>/dev/null && bouncer_up=1
 
+watchdog_up=0
+systemctl is-active --quiet network-watchdog.timer 2>/dev/null && watchdog_up=1
+
+monitor_up=0
+systemctl is-active --quiet loxprox-monitor.timer 2>/dev/null && monitor_up=1
+
+# ── Network watchdog ───────────────────────────────────────────────────────────
+
+WATCHDOG_REBOOTS=0
+if [[ -f /var/lib/loxprox/watchdog-reboot-history.log ]]; then
+    WATCHDOG_REBOOTS=$(wc -l < /var/lib/loxprox/watchdog-reboot-history.log 2>/dev/null || echo 0)
+fi
+
 # ── Monitor health ─────────────────────────────────────────────────────────────
 
 monitor_last_run=0
@@ -107,6 +120,12 @@ loxprox_ssh_failed_total $SSH_FAILED
 loxprox_service_up{service="nginx"} $nginx_up
 loxprox_service_up{service="crowdsec"} $crowdsec_up
 loxprox_service_up{service="crowdsec-firewall-bouncer"} $bouncer_up
+loxprox_service_up{service="network-watchdog"} $watchdog_up
+loxprox_service_up{service="loxprox-monitor"} $monitor_up
+
+# HELP loxprox_watchdog_reboots_total Watchdog-initiated reboots (lifetime count)
+# TYPE loxprox_watchdog_reboots_total counter
+loxprox_watchdog_reboots_total $WATCHDOG_REBOOTS
 
 # HELP loxprox_monitor_last_run_unixtime Last monitor run timestamp
 # TYPE loxprox_monitor_last_run_unixtime gauge

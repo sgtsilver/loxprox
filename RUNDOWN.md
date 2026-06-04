@@ -9,7 +9,7 @@
 
 ## What This Is
 
-A drop-in security gateway for Loxone Miniserver Gen 1 (and Gen 2). It sits between the internet and your Miniserver, adding every protection the hardware lacks: TLS termination, rate limiting, WAF, IDS, firewall, audit logging, and real-time alerting.
+A drop-in security gateway for Loxone Miniserver Gen 1. It sits between the internet and your Miniserver, adding every protection the hardware lacks: TLS termination, rate limiting, WAF, IDS, firewall, audit logging, and real-time alerting.
 
 LAN traffic bypasses the gateway entirely — only external traffic is inspected.
 
@@ -34,7 +34,7 @@ Internet ──► Router:1080 ──► Gateway:1080 ──► Loxone:80
 
 | File | Purpose |
 |------|---------|
-| `deploy.sh` | One-shot Debian 12 hardening & installation (~1265 lines, idempotent) |
+| `deploy.sh` | One-shot Debian 12 hardening & installation (~2550 lines, idempotent) |
 | `detect-loxone.sh` | Network autodetector — finds your Miniserver by MAC OUI and API fingerprint |
 | `test-gateway.sh` | 50+ automated checks — run after deploy to verify every control |
 | `set-static-ip.sh` | Pre-deploy VM network configuration |
@@ -162,7 +162,7 @@ The Miniserver Gen 1 CPU cannot handle SSL. The gateway terminates TLS and speak
 
 | Platform | Status | Notes |
 |----------|--------|-------|
-| Debian 12 VM (Proxmox) | ✅ Production | 1 vCPU, 512MB RAM, 4GB disk |
+| Debian 12 VM (Proxmox) | ✅ Production | 1 vCPU, 1 GB RAM, 5 GB disk |
 | Raspberry Pi 4/5 | ✅ Supported | Official ARM64 packages |
 | Raspberry Pi 3 | ✅ Supported | Requires 64-bit Raspberry Pi OS |
 | Raspberry Pi 2 | ⚠️ Partial | Needs 64-bit kernel or manual compile |
@@ -256,8 +256,8 @@ All 23 findings from the 2026-05-06 Ezio audit have been addressed:
 ```
 tests/
 ├── run-tests.sh              # unified test runner
-├── test_progressive_ban.py   # 21 pytest cases for ban script
-├── test_deploy_integration.sh # 64 assertions for deploy.sh logic
+├── test_progressive_ban.py   # 23 pytest cases for ban script
+├── test_deploy_integration.sh # 117 assertions for deploy.sh logic
 └── test_detect_loxone.sh     # 11 assertions for scanner logic
 ```
 

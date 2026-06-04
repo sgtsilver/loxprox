@@ -428,6 +428,6 @@ This release was withdrawn ~3 hours after publication. The systemd-unit fix it c
 - Security headers via nginx
 
 ### Fixed
-- IP migration from DHCP to static `.252`
+- IP migration from DHCP to a static LAN IP
 - Router cutover: external port 1080 forwarded to gateway
 - SSH multiplexing with ControlMaster (`%C` hash format)
