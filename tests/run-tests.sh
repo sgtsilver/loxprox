@@ -54,7 +54,7 @@ run_python_tests() {
     fi
 
     if [[ -n "$pytest_cmd" ]]; then
-        if $pytest_cmd "$SCRIPT_DIR/test_progressive_ban.py" -v --tb=short; then
+        if $pytest_cmd "$SCRIPT_DIR" -v --tb=short; then
             TOTAL_PASSED=$((TOTAL_PASSED + 1))
         else
             TOTAL_FAILED=$((TOTAL_FAILED + 1))
