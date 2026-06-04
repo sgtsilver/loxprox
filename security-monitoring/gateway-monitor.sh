@@ -66,25 +66,45 @@ send_alert() {
 # ── Checks ───────────────────────────────────────────────────────────────────
 
 check_crowdsec_blocks() {
-    local decisions_json
+    # Alert on each NEW local scenario ban (this gateway's own detections) — not a
+    # repeating snapshot of the current set. `cscli decisions list` (no -a) returns
+    # only local decisions; the large community blocklist (CAPI, tens of thousands
+    # of IPs) is enforced by the bouncer separately and is reported here as a
+    # background count, never per-IP (that would be thousands of alerts).
+    local decisions_json seen_file="$STATE_DIR/seen_local_bans"
     decisions_json=$(cscli decisions list -o json 2>/dev/null)
     [[ -z "$decisions_json" ]] && return 0
 
-    # cscli's JSON shape varies across CrowdSec versions: a flat array of
-    # decisions (older), a {"decisions":[...]} wrapper, and (current) an array of
-    # *alert* objects each carrying a `.decisions[]`. Recursively pull out every
-    # decision object — uniquely identified by having both `value` and `duration`
-    # — so parsing is robust to all three shapes.
-    local decisions_filter='[ .. | objects | select(has("value") and has("duration")) ]'
-    local new_decisions
-    new_decisions=$(echo "$decisions_json" | jq -r "$decisions_filter"' | .[] |
-        "\(.value) (\(.type // "ban")) - \(.scenario // "unknown")"' 2>/dev/null | sort -u | head -10)
+    # Robust to all cscli JSON shapes (flat array / {decisions:[]} / array of
+    # alerts): pull out decision objects, identified by having value + duration.
+    local current
+    current=$(echo "$decisions_json" | jq -r '
+        [ .. | objects | select(has("value") and has("duration")) ]
+        | .[] | "\(.id)|\(.value)|\(.scenario // "?")|\(.origin // "?")"' 2>/dev/null | sort -u)
 
-    local count
-    count=$(echo "$decisions_json" | jq "$decisions_filter"' | length' 2>/dev/null)
+    if [[ -z "$current" ]]; then
+        : > "$seen_file" 2>/dev/null   # nothing active — forget previous IDs
+        return 0
+    fi
 
-    if [[ -n "$new_decisions" && "${count:-0}" -gt 0 ]]; then
-        send_alert "WARNING" "CrowdSec Active Blocks" "$count IPs currently blocked by CrowdSec:\n$new_decisions" "crowdsec_blocks"
+    touch "$seen_file" 2>/dev/null
+    local new_msg="" id value scenario origin
+    while IFS='|' read -r id value scenario origin; do
+        [[ -z "$id" ]] && continue
+        grep -qxF "$id" "$seen_file" 2>/dev/null || new_msg+="${value} — ${scenario} [${origin}]\n"
+    done <<< "$current"
+
+    # Remember exactly the currently-active local bans; expired ones drop out, so a
+    # later re-ban (new decision id) alerts again.
+    echo "$current" | cut -d'|' -f1 > "$seen_file" 2>/dev/null
+
+    if [[ -n "$new_msg" ]]; then
+        local community
+        community=$(nft list set ip crowdsec crowdsec-blacklists 2>/dev/null \
+            | grep -coE '([0-9]{1,3}\.){3}[0-9]{1,3}' | tr -d ' ')
+        log "ALERT [WARNING]: New CrowdSec local ban(s)"
+        "$DISCORD" "WARNING" "New CrowdSec Ban" \
+            "Newly banned by a local scenario:\n${new_msg}\nBackground: ${community:-?} IPs currently enforced via the CrowdSec community blocklist." 2>/dev/null || true
     fi
 }
 
