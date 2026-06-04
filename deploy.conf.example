@@ -12,7 +12,7 @@
 #                      sudo $EDITOR /etc/loxprox/deploy.conf
 #                      sudo ./deploy.sh
 #
-#   Upgrading from v1.4.0 (or earlier) without an /etc/loxprox/deploy.conf:
+#   Upgrading from v1.3.x or earlier without an /etc/loxprox/deploy.conf:
 #                      sudo ./deploy.sh --bootstrap-config
 #                      # Inspects live nftables / nginx / ip route, extracts
 #                      # your current values, writes /etc/loxprox/deploy.conf,

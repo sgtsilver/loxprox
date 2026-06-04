@@ -170,7 +170,7 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 Der Miniserver selbst kann nach wie vor kein TLS (Gen-1-CPU-Constraint — unverändert), das No-TLS-Gerät hinter dem Gateway bleibt also architektonische Realität. Was sich in v1.5.0 geändert hat: **das Gateway kann jetzt HTTPS auf `:1080` zur öffentlichen Seite terminieren** via `acme.sh` + HTTP-01, mit automatischem Renewal-Cron, der nach jedem Deploy verifiziert wird. Der acme.sh-Installer ist per SHA256 gepinnt (kein `curl|bash`), das ausgestellte Cert liegt in `/etc/loxprox/tls/` (Mode 0640), und die öffentliche Angriffsfläche wächst um exakt einen Listener — `:80`, eingeschränkt auf `/.well-known/acme-challenge/` plus einen 301-Redirect nach HTTPS-on-1080. Per Default aus; geschaltet durch einen einzigen `ENABLE_TLS`-Key in `/etc/loxprox/deploy.conf`. Der Disable-Pfad setzt die Site zurück und bricht den Renewal-Cron ab, behält aber die Cert-Dateien — das Zurückschalten geht entsprechend schnell. Vollständiges Runbook: [`docs/TLS-SETUP.md`](docs/TLS-SETUP.md).
 
 ### Volumetric DDoS Protection
-- **An diesem Gateway nicht machbar** — 512 MB RAM / 1 vCPU
+- **An diesem Gateway nicht machbar** — 1 GB RAM / 1 vCPU
 - Optionen: Cloudflare Spectrum, AWS Shield, ISP-Level-Scrubbing
 - Status: dokumentierte Limitierung
 
@@ -254,7 +254,7 @@ sudo bash /tmp/deploy.sh
 Wenn eine Webhook-URL kompromittiert ist oder Credentials rotiert werden müssen:
 1. In Discord: Server-Einstellungen → Integrationen → Webhooks → alten Webhook löschen
 2. Neuen Webhook anlegen und die URL kopieren
-3. `DISCORD_WEBHOOK_URL` in `deploy.sh` aktualisieren (oder direkt in `/etc/loxprox/config.env`)
+3. `DISCORD_WEBHOOK_URL` in `/etc/loxprox/config.env` aktualisieren
 4. `deploy.sh` erneut ausführen oder den Monitor-Timer neu starten: `systemctl restart loxprox-monitor.timer`
 5. Verifizieren: Test-Alert auslösen (z. B. `sudo /opt/loxprox/discord-alert.sh INFO "Test" "Rotation verified"`)
 

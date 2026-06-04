@@ -36,6 +36,24 @@ scrape_configs:
           instance: loxprox-gateway
           __path__: /var/log/loxprox-monitor.log
 
+  - job_name: appsec-detections
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: appsec-detections
+          instance: loxprox-gateway
+          __path__: /var/log/nginx/appsec-detections.log
+
+  - job_name: network-watchdog
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: network-watchdog
+          instance: loxprox-gateway
+          __path__: /var/log/loxprox-network-watchdog.log
+
   - job_name: crowdsec
     static_configs:
       - targets:

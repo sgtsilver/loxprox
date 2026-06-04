@@ -1,5 +1,7 @@
 #!/bin/bash
-# Run this script INSIDE the Security Gateway LXC (as root).
+# REFERENCE ONLY — superseded by deploy.sh (the single-script installer that is
+# the supported path). Kept as the original two-phase manual installer for
+# historical reference; not invoked by deploy.sh, CI, or the docs' install flow.
 # It installs Nginx, CrowdSec, and configures rate limiting.
 
 set -e

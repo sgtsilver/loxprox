@@ -116,7 +116,7 @@ sudo nano /etc/loxprox/deploy.conf
 - `GATEWAY_IP` — die eigene Adresse dieses Gateways (aus Schritt 6).
 - `LAN_SUBNET` — der Bereich deines Heimnetzes (der Scanner schlägt ihn vor; meist sowas wie `192.168.1.0/24`).
 - `SSH_ALLOWED_SUBNETS` — wer sich am Gateway anmelden darf; dein Heimnetz ist für den Anfang in Ordnung.
-- `DISCORD_WEBHOOK` *(optional)* — füge hier eine Discord-Webhook-URL ein, um Handy-Benachrichtigungen zu bekommen. Für den Anfang ruhig weglassen.
+- `DISCORD_WEBHOOK_URL` *(optional)* — füge hier eine Discord-Webhook-URL ein, um Handy-Benachrichtigungen zu bekommen. Für den Anfang ruhig weglassen.
 
 Über jedem Wert steht ein Kommentar, der erklärt, was er bedeutet. Wenn du fertig bist: **Strg+O** dann **Enter** zum Speichern, dann **Strg+X** zum Beenden. (Bei einem Wert hängengeblieben? Der vollständige [Konfigurations-Guide](../CONFIGURATION-GUIDE.de.md) erklärt jeden einzelnen.)
 

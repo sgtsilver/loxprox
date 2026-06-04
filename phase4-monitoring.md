@@ -149,7 +149,7 @@ sudo bash deploy.sh --remove-tls
 
 ## Log Rotation
 
-Already configured by `install-gateway.sh`. Verify it works:
+Already configured by `deploy.sh` (`setup_logrotate`). Verify it works:
 
 ```bash
 logrotate -d /etc/logrotate.d/loxone-nginx
