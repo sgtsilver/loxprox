@@ -24,7 +24,7 @@ If you used AI to help find a bug: include the actual test output and steps to r
 
 - Generic hardening advice that duplicates CrowdSec/base Debian docs
 - Breaking changes to the deployment flow without strong justification
-- Features that significantly increase resource usage (the target is 512MB RAM)
+- Features that significantly increase resource usage (the target is 1 GB RAM)
 
 ## Before Submitting
 
