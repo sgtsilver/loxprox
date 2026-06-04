@@ -102,7 +102,7 @@ loxprox/
 
 ## Schnellstart
 
-> **Neu bei Linux?** Du hast einen Loxone Miniserver, aber noch nie ein Terminal benutzt? Kein Problem — wir urteilen nicht und halten niemanden draußen. Folge stattdessen der sanften Schritt-für-Schritt-Anleitung zum Kopieren: **[Installation für Linux-Einsteiger](docs/INSTALL-FOR-NEWBIES.de.md)**.
+> **Neu bei Linux?** Du hast einen Loxone Miniserver, aber noch nie ein Terminal benutzt? Kein Problem — wir urteilen nicht und grenzen niemanden aus. Folge stattdessen der sanften Schritt-für-Schritt-Anleitung zum Kopieren: **[Installation für Linux-Einsteiger](docs/INSTALL-FOR-NEWBIES.de.md)**.
 
 1. **Lege eine Debian-12-VM an** (mindestens 1 vCPU, 1 GB RAM, 5 GB Disk — empfohlen: 2 vCPU, 2 GB RAM).
    > ⚠️ **Nur VM — kein LXC.** Mehrere Verteidigungsschichten (Kernel-Sysctls inkl. der Fragnesia-Mitigation, auditd, AppArmor-Enforcement, nftables in unprivilegierten Containern) lassen sich aus einem LXC heraus nicht anwenden und werden vom Deploy-Script stillschweigend übersprungen. Das Ergebnis sieht grün aus, liefert aber die dokumentierte Sicherheits-Posture nicht. Siehe Abschnitt [Hardware-Anforderungen](#hardware-anforderungen) und `CHANGELOG.md` für Details. Wer die reduzierte Posture bewusst akzeptiert, kann das Script mit `ALLOW_LXC=1 sudo ./deploy.sh` aufrufen.
