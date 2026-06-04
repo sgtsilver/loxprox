@@ -42,7 +42,6 @@ Internet ──► Router:1080 ──► Gateway:1080 ──► Loxone:80
 | `security-monitoring/network-watchdog.sh` | Self-healing network stack monitor |
 | `security-monitoring/network-watchdog.service` | systemd system service (root) |
 | `security-monitoring/network-watchdog.timer` | Runs watchdog every 60 seconds |
-| `VALIDATION-REPORT.html` | Self-contained HTML report — A- grade, 9 security frameworks |
 
 ---
 
@@ -249,17 +248,25 @@ All 23 findings from the 2026-05-06 Ezio audit have been addressed:
 
 ### Cumulative Stats
 - **Total findings resolved:** 45 (23 audit + 10 handover + 12 second sweep)
-- **Test assertions:** 151 (23 pytest + 117 deploy integration + 11 scanner) — all green as of v1.5.1
+- **Test assertions:** 165 (37 pytest + 117 deploy integration + 11 scanner) — all green as of v1.5.1
 
 ## Test Infrastructure
 
 ```
 tests/
-├── run-tests.sh              # unified test runner
+├── run-tests.sh              # unified test runner (runs all of tests/)
 ├── test_progressive_ban.py   # 23 pytest cases for ban script
+├── test_repo_hygiene.py      # 14 repo-hygiene guards (OpSec, versions, hardware,
+│                             #   config model, dead-file refs, links, bilingual,
+│                             #   naming) — the automated audit; tracked files only
 ├── test_deploy_integration.sh # 117 assertions for deploy.sh logic
 └── test_detect_loxone.sh     # 11 assertions for scanner logic
 ```
+
+**`test_repo_hygiene.py` replaces the manual "deep clean" audits.** It scans only
+git-tracked files (the public repo), so the gitignored `local-deployment/`
+production config is never inspected. Run it before any docs/release PR:
+`pytest tests/ -v`.
 
 Run locally:
 ```bash
