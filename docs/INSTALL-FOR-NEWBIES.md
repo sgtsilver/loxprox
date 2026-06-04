@@ -27,7 +27,7 @@ Internet  →  your router  →  LoxProx gateway  →  your Loxone Miniserver
   - a **Raspberry Pi 3, 4, or 5** (with 64-bit Raspberry Pi OS), or
   - any **old mini-PC or laptop** you can wipe and install Debian on.
 - **Your Miniserver's details** — we have a tool that finds these for you, so don't worry if you don't know them yet.
-- **About 30–45 minutes** and a coffee.
+- **About 30–45 minutes** and your beverage of choice. (If that beverage is alcoholic, maybe save the round for *after* you're done — you'll want a clear head while you rewire how your home talks to the internet.)
 - That's it. You do **not** need to be a programmer.
 
 A note on size: 1 CPU and **1 GB of RAM** is the minimum; **2 CPU / 2 GB** is comfortable. About 5 GB of disk.
