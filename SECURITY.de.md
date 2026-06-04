@@ -18,6 +18,20 @@ Dieses Gateway existiert, weil der Miniserver sich selbst nicht schützen kann.
 
 ---
 
+## Scope & Design Invariants
+
+Das sind bewusst gesetzte Grenzen für das **aktuelle (Gen-1-)** Deployment — was dieses Gateway leisten soll und was nicht. Sie gehören nur dann auf den Prüfstand, wenn sich die Hardware ändert (siehe "v2 / Gen 2" weiter unten).
+
+1. **Remote-/Mobile-Zugriff läuft über das öffentliche Gateway — kein Client-VPN.** Geräte erreichen den Miniserver über den öffentlichen Listener des Gateways, nicht über ein VPN, einen Tunnel oder ein Relay auf dem Gerät selbst. Die Security-Obergrenze für diesen Pfad ist daher der Gateway-Stack: TLS + nginx Rate-/Connection-Limits + CrowdSec + AppSec WAF (+ optionales Geo-Blocking). Die native Loxone-App kann keine Client-Zertifikate vorweisen und an keiner Gateway-Layer-Auth teilnehmen (kein Cookie/OAuth/TOTP), eine Per-Device-Authentifizierung ist auf Gen 1 also nicht verfügbar.
+
+2. **LAN und Trusted-Subnetze werden niemals geblockt.** Jedes vertrauenswürdige Netz muss in `CROWDSEC_WHITELIST_IPS` stehen — nicht nur das primäre `LAN_SUBNET`. Wenn ein vertrauenswürdiges Gerät das Gateway aus einem zweiten VLAN erreichen kann (z. B. via Inter-VLAN-Routing), muss auch dieses VLAN gewhitelistet sein, sonst kann das Gerät gebannt werden, obwohl es "intern" ist. Umgekehrt bleiben Gast-/IoT-Segmente bewusst außen vor: Sie sind untrusted und durchlaufen den vollen Security-Stack wie jeder Remote-Client.
+
+3. **Härten auf der vorhandenen Hardware.** Ziel ist maximale Sicherheit auf dem bestehenden Gen-1-Miniserver, ohne neue Hardware zu kaufen. Natives TLS auf dem Miniserver, Remote Connect, Trusts und Per-User-/Per-Device-Identität sind Gen-2+-Features und werden auf ein künftiges "v2" mit neuer Hardware verschoben — hier explizit out of scope.
+
+4. **Der Availability-Trade-off wird akzeptiert, nicht wegdesignt.** Weil Remote-Clients auf geteilten oder rotierenden IPs roamen (Mobilfunk-Provider, iCloud Private Relay / Cloudflare WARP), kann die CAPI-Community-Blocklist gelegentlich einen legitimen Nutzer wegen des Verhaltens eines anderen Tenants blocken — und eine rotierende IP lässt sich nicht vorab whitelisten. Wir behalten die Community-Blocklist wegen ihres Schutzwerts und lösen solche Fälle reaktiv (siehe "Legitimer Nutzer geblockt").
+
+---
+
 ## Threat Model
 
 ### Wovor wir schützen
@@ -32,8 +46,13 @@ Dieses Gateway existiert, weil der Miniserver sich selbst nicht schützen kann.
 | **Ausnutzung von Loxone-CVEs** | Mittel | Kritisch | AppSec WAF (Virtual Patching), WAF-Regeln |
 | **Lateral Movement (LAN → Miniserver)** | Niedrig | Hoch | Proxmox-Firewall, VLAN-Isolation |
 | **Lateral Movement (LAN → Gateway via SSH)** | Niedrig | Kritisch | `setup_ssh_hardening` — CIS §5.2 Drop-in, Key-only, `PermitRootLogin no`, `MaxAuthTries 4` |
+| **Passives Abgreifen des Tokens auf dem Hop Gateway → Miniserver** | Niedrig | Hoch | *Klartext aus Notwendigkeit — Gen 1 kann kein TLS. Diesen Hop auf einem dedizierten VLAN/Link isolieren, damit der oben modellierte LAN-interne Angreifer das weitergereichte Loxone-Token nicht mitschneiden kann. Siehe Hinweis unten.* |
 | **Passwort-Extraktion aus Config-Datei** | Mittel | Hoch | *Nur physische Zugangskontrolle* |
 | **Cloud-DNS-Hijacking (CVE-2020-27488)** | Niedrig | Hoch | Cloud DNS abschalten, statische IP verwenden |
+
+### Backend-Hop — Gateway → Miniserver ist Klartext
+
+Das Gateway terminiert TLS auf `:1080` und proxyt **Klartext-HTTP** zum Miniserver auf `:80`, weil die Gen-1-Hardware kein TLS kann. Alles, was das Gateway weiterreicht — der Loxone-`gettoken`-HMAC, die Command-Query-Argumente und das **aktive Session-Token** — quert den Draht Gateway→Miniserver damit unverschlüsselt. Das Gateway hält keine eigene Session; es reicht das Loxone-Token nur durch, das Mitschneiden dieses Tokens auf diesem Hop entspricht also dem Übernehmen der Session. Das ist **derselbe LAN-interne Angreifer**, den die Lateral-Movement-Zeilen oben bereits modellieren (ein kompromittiertes IoT-Gerät, das im LAN pivotiert), und die Exposition lässt sich nicht im Code beseitigen (der Miniserver hat kein TLS). Die kompensierende Maßnahme ist **Netzwerk-Isolation**: den Pfad Gateway↔Miniserver auf ein dediziertes VLAN oder einen Punkt-zu-Punkt-Link legen, sodass kein nicht-vertrauenswürdiges LAN-Gerät dieselbe Broadcast-/Routing-Domäne teilt.
 
 ### SSH-Modell — nur LAN-seitig
 
@@ -216,7 +235,11 @@ sudo bash /tmp/deploy.sh
 
 1. `cscli decisions list` → IP heraussuchen
 2. `cscli decisions delete --ip <IP>`
-3. Bei Wiederholung in die Whitelist eintragen
+3. Bei Wiederholung **und stabiler IP** in die Whitelist eintragen (ein festes LAN-/VLAN-Subnetz, ein statisches Remote-Office o. Ä.)
+
+**Roaming-/Shared-Egress-Clients (Mobil).** Ein Remote-Nutzer im Mobilfunknetz, hinter iCloud Private Relay oder Cloudflare WARP geht über eine geteilte, rotierende IP raus (z. B. `104.28.x.x` für Private Relay). Die CAPI-Community-Blocklist kann eine solche IP wegen des Verhaltens eines *anderen* Tenants listen und so deinen Nutzer ohne dessen Verschulden blocken. Eine rotierende IP lässt sich nicht vorab whitelisten — es gibt kein stabiles Ziel. Das ist ein akzeptierter Trade-off, wenn man die Community-Blocklist auf einem öffentlichen No-VPN-Pfad aktiv lässt (siehe "Scope & Design Invariants"). Behandle es reaktiv mit Schritt 2; wird ein vertrauenswürdiger Nutzer wiederholt getroffen, rate ihm, Private Relay / WARP zu deaktivieren, damit er eine stabilere Carrier-IP vorweist.
+
+> **Kein Ban — die `https://`-Migrationsfalle.** Wenn eine Loxone-App "keine Verbindung" bekommt, `cscli decisions list` aber **keine** Decision für ihre IP zeigt, liegt es fast immer am TLS-Schema und nicht an einem Block. Siehe "Die Loxone-App verbindet sich nach dem Aktivieren von TLS nicht mehr" in `CONFIGURATION-GUIDE.md` (im deutschen Dokument: CONFIGURATION-GUIDE.de.md).
 
 ### Loxone von außen nicht erreichbar
 

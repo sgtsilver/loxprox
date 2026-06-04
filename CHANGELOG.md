@@ -6,6 +6,75 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Security — session/token-confidentiality audit (2026-06-04)
+
+A full multi-agent re-audit focused on the confidentiality of the relayed Loxone
+token. The five candidate "shell bugs" a stale external review re-raised were
+confirmed already fixed in v1.3.2; the real residual was at-rest/in-transit
+confidentiality of Loxone auth material. All of the below were applied to the
+maintainer's production gateway and verified live (`nginx -t`, real-app traffic
+on 5G + WiFi, `cscli explain`) before landing here.
+
+- **MED — access log scrubbed of Loxone auth material (F3).** The `access_log`
+  carried no `log_format`, so nginx logged the full `combined` `$request`
+  including the query string. Live traffic confirmed the app drives commands as
+  `GET /jdev/sys/fenc/<encrypted-blob>?sk=<key>` — secret in **both** path and
+  query. New `log_format loxone_scrubbed` reconstructs the request as
+  `$request_method $loxone_log_uri $server_protocol` (drops `?query`) and a
+  `map $uri $loxone_log_uri` redacts the secret suffix of
+  `fenc|enc|gettoken|getjwt|keyexchange|getkey2` path forms → `<redacted>`. Same
+  combined shape, so the CrowdSec `type:nginx` parser still parses 100% (verified
+  with `cscli explain`). Operators with existing logs should sanitize the current
+  log + rotated archives in place (the secrets are already at rest there).
+- **MED — TLS forward-secrecy hardening (F6).** The injected TLS block had no
+  `ssl_ciphers` and no `ssl_session_tickets off`, so a TLS-1.2 client could pick a
+  non-PFS suite and the unrotated session-ticket STEK defeated forward secrecy.
+  Added an ECDHE-only `ssl_ciphers` list and `ssl_session_tickets off`. TLS 1.3
+  unaffected. Verified live: TLS 1.2 negotiates `ECDHE-…-GCM`, no ticket issued.
+- **MED — cleartext backend hop documented in the threat model (F2).** The
+  gateway→Miniserver hop is plaintext (Gen 1 has no TLS), carrying the relayed
+  token. Added a threat-table row + "Backend hop" note (EN + DE) recommending
+  VLAN/point-to-point isolation as the compensating control.
+- **LOW — WebSocket transparency in the generated site (F7).** Added
+  `map $http_upgrade $connection_upgrade` + `Upgrade`/`Connection` headers so a
+  fresh install proxies native ws:// transparently; non-WebSocket requests keep
+  the existing empty-Connection keepalive behaviour (no change to the HTTP-API
+  path). Existing installs that hand-edited a `/ws/` block keep it (site is
+  write-once).
+- **LOW — audit tooling excluded from the public repo (F5).** The local audit
+  machinery and scratch attack-analysis files were untracked but not gitignored —
+  one `git add -A` would have published them. Added to `.gitignore`.
+
+### Fixed
+
+- **Watchdog no longer reboots a healthy VM on an upstream blip (F4).** The
+  network watchdog counted router-ping and public-DNS failures toward the reboot
+  decision, so an ISP/DNS outage rebooted a healthy VM (dropping every live
+  session) for something a reboot can't fix. Reboot now triggers only on
+  local-stack failure (`nginx_local`/`interface_ip`); upstream-only failures
+  alert once and wait. The dhclient-spiral case this watchdog exists for still
+  reboots.
+- **Progressive ban is now fail-safe (F9).** `progressive-ban.py` deleted the
+  existing decision before adding the extended one, so a failure between the two
+  left the IP **unbanned**. Reordered to add-before-delete: a mid-operation
+  failure now over-bans (harmless duplicate that expires) rather than un-bans.
+  Three regression tests added.
+- **CrowdSec collection install failures no longer silent (F8).** `cscli
+  collections install … || true` swallowed hub-outage/renamed-item failures;
+  `deploy.sh` now asserts each expected collection is present and warns on a gap.
+
+### Changed
+
+- **Preflight warns on cleartext public exposure (F1).** `deploy.sh` now warns
+  when `ENABLE_TLS=false`, since a WAN-exposed `:1080` would serve Loxone
+  credentials in cleartext (non-fatal — LAN-only gateways legitimately run
+  without TLS).
+- **Whitelist-breadth warning (F10).** A `CROWDSEC_WHITELIST_IPS` entry broader
+  than /24 disables CrowdSec for every host in that range; `deploy.sh` now warns.
+- **AppSec fail-closed documented as intentional (F11).** Added an inline note
+  that the `auth_request` deny-on-AppSec-outage behaviour is deliberate; do not
+  "fix" it into fail-open.
+
 ## [1.5.0] — 2026-05-26
 
 Everything from a single intense day: the skills-audit response (SSH hardening, auditd persistence-vector coverage, AppSec audit log, `/tmp` TOCTOU, progressive-ban CAPI filter), the SSH bootstrap flow that solves the lock-yourself-out chicken-and-egg, per-host configuration separated from `deploy.sh` (closing the inline-edit footgun that bricked the maintainer's own VM mid-day), nginx site preservation across upgrades, and optional HTTPS on `:1080` via `acme.sh` + HTTP-01 — plus the three live-deploy fixes that surfaced when the maintainer dogfooded the TLS path on production.

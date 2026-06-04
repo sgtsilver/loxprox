@@ -505,6 +505,17 @@ preflight() {
         validate_network "$_ssh_subnet" || { error "SSH_ALLOWED_SUBNETS contains invalid CIDR: $_ssh_subnet"; exit 1; }
     done
 
+    # F1: the :1080 listener is the gateway's only confidentiality control. With
+    # TLS off, anything reaching :1080 from outside the LAN (i.e. a WAN
+    # port-forward) crosses the wire in cleartext — Loxone credentials and the
+    # relayed session token included. Warn loudly; non-fatal because a strictly
+    # LAN-only gateway legitimately runs without TLS.
+    if [[ "${ENABLE_TLS,,}" != "true" ]]; then
+        warn "ENABLE_TLS=false — the :1080 listener will serve CLEARTEXT HTTP."
+        warn "  For any internet-exposed gateway (WAN forward to :1080), set ENABLE_TLS=true"
+        warn "  (needs a public domain + ACME). Cleartext is only safe for LAN-only deployments."
+    fi
+
     # Debian 12 check
     if ! grep -q "bookworm\|12" /etc/os-release 2>/dev/null; then
         warn "This script targets Debian 12 (Bookworm). Detected OS may differ — continuing."
@@ -810,6 +821,11 @@ configure_nginx() {
         local appsec_include="" appsec_auth="" appsec_http_extras="" appsec_access_log=""
         if [[ "$ENABLE_APPSEC" == "true" ]]; then
             appsec_include="    include ${NGINX_APPSEC_INCLUDE};"
+            # F11: auth_request fail-closes by design — if the AppSec daemon
+            # (127.0.0.1:7422) is down, nginx denies rather than bypasses the
+            # WAF. That trades availability for safety: an AppSec outage degrades
+            # to a gateway outage, never to an unprotected passthrough. This is
+            # intentional for a security gateway; do not "fix" it into fail-open.
             appsec_auth='
         auth_request      /crowdsec-appsec;
         auth_request_set  $appsec_action $upstream_http_x_crowdsec_action;'
@@ -838,6 +854,38 @@ limit_req_zone  \$binary_remote_addr zone=loxone_req:10m  rate=${RATE_LIMIT_REQ_
 limit_conn_zone \$binary_remote_addr zone=loxone_conn:10m;
 
 ${appsec_http_extras}
+# F7: WebSocket transparency. Loxone Gen 1 speaks plain ws:// on :80; with the
+# gateway terminating TLS the app connects wss:// and the Upgrade handshake must
+# be relayed to the backend. For ordinary (non-Upgrade) requests
+# \$connection_upgrade is empty, which leaves the Connection header empty and
+# preserves the upstream keepalive behaviour below — i.e. no change for the
+# HTTP-API path, native WebSocket now also works.
+map \$http_upgrade \$connection_upgrade {
+    default upgrade;
+    "" "";
+}
+
+# F3: scrubbed access-log format. nginx's default access_log uses the built-in
+# \`combined\` format, whose \$request field is the raw request line *including
+# the query string* — which for Loxone carries the gettoken HMAC/username and
+# base64 command args. Those then persist at rest in loxone-access.log (0640
+# www-data:adm) plus 14 days of rotated archives. This format reproduces the
+# same combined shape so the CrowdSec type:nginx parser still reads
+# verb/path/version/status/UA, but (a) the ?query is dropped (\$loxone_log_uri
+# derives from \$uri, which is the path only) and (b) the secret suffix of
+# path-embedded Loxone endpoints is redacted by the map below.
+# Confirmed live (2026-06-04): the app drives commands as
+# GET /jdev/sys/fenc/<encrypted-blob>?sk=<key> — the secret rides in BOTH the
+# path and the query, so \$uri alone is insufficient. The map masks the blob
+# while keeping the endpoint prefix visible for CrowdSec detection.
+map \$uri \$loxone_log_uri {
+    default                                                                      \$uri;
+    "~^(?<loxsens>/jdev/sys/(?:fenc|enc|gettoken|getjwt|keyexchange|getkey2?)/)" "\${loxsens}<redacted>";
+}
+log_format loxone_scrubbed '\$remote_addr - \$remote_user [\$time_local] '
+                           '"\$request_method \$loxone_log_uri \$server_protocol" \$status \$body_bytes_sent '
+                           '"\$http_referer" "\$http_user_agent"';
+
 upstream loxone_backend {
     server ${LOXONE_IP}:${LOXONE_PORT};
     keepalive 32;
@@ -847,7 +895,7 @@ server {
     listen 1080;
     server_name _;
 
-    access_log /var/log/nginx/loxone-access.log;
+    access_log /var/log/nginx/loxone-access.log loxone_scrubbed;
     error_log  /var/log/nginx/loxone-error.log;
 ${appsec_access_log}
 
@@ -883,7 +931,8 @@ ${appsec_include}
     location / {
 ${appsec_auth}
         proxy_http_version 1.1;
-        proxy_set_header Connection         "";
+        proxy_set_header Upgrade            \$http_upgrade;
+        proxy_set_header Connection         \$connection_upgrade;
         proxy_set_header Host               \$host;
         proxy_set_header X-Real-IP          \$remote_addr;
         proxy_set_header X-Forwarded-For    \$proxy_add_x_forwarded_for;
@@ -1230,9 +1279,20 @@ _loxprox_site_enable_tls() {
             printf "%s    ssl_certificate     %s/fullchain.pem;\n", indent, tls_dir
             printf "%s    ssl_certificate_key %s/privkey.pem;\n", indent, tls_dir
             printf "%s    ssl_protocols       TLSv1.3 TLSv1.2;\n", indent
+            # F6: explicit ECDHE-only cipher list so a TLS 1.2 client cannot
+            # negotiate a non-forward-secret (RSA key-exchange) suite. TLS 1.3
+            # suites are all AEAD+PFS by default and unaffected by ssl_ciphers.
+            printf "%s    ssl_ciphers         ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;\n", indent
             printf "%s    ssl_prefer_server_ciphers off;\n", indent
             printf "%s    ssl_session_cache   shared:loxprox_ssl:10m;\n", indent
             printf "%s    ssl_session_timeout 1d;\n", indent
+            # F6: disable TLS session tickets. The nginx default is a single
+            # auto-generated STEK that is never rotated for the master-process
+            # lifetime; with TLS 1.2 enabled that STEK encrypts the session
+            # master secret, so later key recovery would allow passive decryption
+            # of recorded 1.2 sessions (no forward secrecy). Server-side
+            # resumption via ssl_session_cache above stays forward-secret.
+            printf "%s    ssl_session_tickets off;\n", indent
             printf "%s    add_header          Strict-Transport-Security \"max-age=31536000\" always;\n", indent
             # v1.6.2 — plain-HTTP-to-HTTPS-port grace: nginx returns 400 ("The
             # plain HTTP request was sent to HTTPS port") when a client speaks
@@ -1528,6 +1588,25 @@ EOF
         cscli collections install crowdsecurity/appsec-virtual-patching --error || true
     fi
 
+    # F8: the 'cscli collections install ... || true' calls above swallow
+    # hub-outage / renamed-item failures, which would otherwise ship a gateway
+    # silently missing detection scenarios while the deploy reports success.
+    # Assert each expected collection is actually installed and warn if not.
+    local _expected_collections=(crowdsecurity/nginx crowdsecurity/sshd crowdsecurity/linux crowdsecurity/http-cve crowdsecurity/base-http-scenarios)
+    [[ "$ENABLE_APPSEC" == "true" ]] && _expected_collections+=(crowdsecurity/appsec-virtual-patching)
+    local _installed_collections _missing_collections=() _c
+    _installed_collections=$(cscli collections list -o json 2>/dev/null || echo '')
+    for _c in "${_expected_collections[@]}"; do
+        grep -qF "\"$_c\"" <<<"$_installed_collections" || _missing_collections+=("$_c")
+    done
+    if (( ${#_missing_collections[@]} > 0 )); then
+        warn "CrowdSec collections missing after install: ${_missing_collections[*]}"
+        warn "  The gateway is running with REDUCED detection coverage."
+        warn "  Check network + 'cscli hub update', then re-run deploy.sh."
+    else
+        info "All expected CrowdSec collections present."
+    fi
+
     # Intentionally NOT running 'cscli hub upgrade' — uncontrolled upgrades can
     # break parsers or scenarios. Upgrade manually after testing in staging.
     info "Hub components installed. Run 'cscli hub upgrade' manually when validated."
@@ -1537,6 +1616,20 @@ EOF
     mkdir -p /etc/crowdsec/parsers/s02-enrich
     local wl="/etc/crowdsec/parsers/s02-enrich/whitelist-loxone.yaml"
     backup_file "$wl"
+
+    # F10: a whitelist entry broader than a /24 disables CrowdSec for *every*
+    # host in that range — including untrusted devices that share it. A normal
+    # per-VLAN /24 is fine; warn on anything wider (/23, /16, ...).
+    local _w _pfx
+    for _w in "${CROWDSEC_WHITELIST_IPS[@]}"; do
+        if [[ "$_w" =~ /([0-9]+)$ ]]; then
+            _pfx="${BASH_REMATCH[1]}"
+            if (( _pfx < 24 )); then
+                warn "Whitelist entry '$_w' is broader than /24 — CrowdSec/IPS is disabled for ALL hosts in that range, trusted or not. Narrow it to specific trusted subnets if possible."
+            fi
+        fi
+    done
+
     {
         echo "name: whitelist-loxone"
         echo "description: \"Trusted networks — never blocked\""
