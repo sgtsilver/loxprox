@@ -2,7 +2,7 @@
 
 # Konfigurations-Guide
 
-Dieses Dokument erklärt jeden Wert, den LoxProx braucht. Seit v1.5.0 liegen diese Werte in `/etc/loxprox/deploy.conf` (nicht mehr am Anfang von `deploy.sh` wie in v1.4 und früher — siehe `docs/UPGRADE-to-v1.5.de.md`, falls du migrierst).
+Dieses Dokument erklärt jeden Wert, den LoxProx braucht. Seit v1.5.0 liegen diese Werte in `/etc/loxprox/deploy.conf` (nicht mehr am Anfang von `deploy.sh` wie in v1.3.x und früher — siehe `docs/UPGRADE-to-v1.5.de.md`, falls du migrierst).
 
 ---
 
