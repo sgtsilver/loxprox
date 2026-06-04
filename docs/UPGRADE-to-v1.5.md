@@ -13,7 +13,7 @@ If you're installing fresh on a new VM, skip to the bottom.
 
 ## Why this changed
 
-In v1.4.x and earlier, the values at the top of `deploy.sh` (`LOXONE_IP`,
+In v1.3.x and earlier, the values at the top of `deploy.sh` (`LOXONE_IP`,
 `SSH_ALLOWED_SUBNETS`, …) were placeholders that every operator was expected
 to hand-edit before running the script. The maintainer's own production VM
 demonstrated the failure mode on 2026-05-26: the hand-edited copy of
@@ -60,7 +60,7 @@ It prints the candidate file for review and asks "Write this to
 `/etc/loxprox/deploy.conf.bak-<timestamp>` before being overwritten.
 
 Rate limits, proxy timeouts, and buffer sizes are NOT extracted — `deploy.conf`
-is written with the repo defaults (which match every v1.0-v1.4 deploy). Edit
+is written with the repo defaults (which match every v1.0–v1.3.x deploy). Edit
 the file by hand if you customized those.
 
 ### Non-interactive deploys (Ansible, CI, etc.)
@@ -95,7 +95,7 @@ to live at the top of `deploy.sh` — no new conventions to learn.
   WebSocket location blocks and other operator hand-edits no longer get
   overwritten. Use `LOXPROX_FORCE_REGEN_NGINX=1 sudo bash deploy.sh` to
   regenerate from the template if you ever need to.
-- **AppSec map + log_format stay inline in the site config** (same as v1.4.0). A `conf.d/loxprox-appsec.conf` split was attempted and reverted — nginx rejects it because `$appsec_action` is registered by `auth_request_set` inside the location block, and any earlier reference fails parse-time validation. v1.5.0 cleans up the conf.d file if a v1.5.0-rc dev build wrote it.
+- **AppSec map + log_format stay inline in the site config** (same as v1.3.x). A `conf.d/loxprox-appsec.conf` split was attempted and reverted — nginx rejects it because `$appsec_action` is registered by `auth_request_set` inside the location block, and any earlier reference fails parse-time validation. v1.5.0 cleans up the conf.d file if a v1.5.0-rc dev build wrote it.
 - **`systemctl reload nginx`** (was `restart`) — graceful, preserves
   established upstream keepalives to the Miniserver.
 

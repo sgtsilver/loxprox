@@ -89,13 +89,13 @@ CROWDSEC_NGINX_ACQUIS="${CROWDSEC_NGINX_ACQUIS:-/etc/crowdsec/acquis.d/nginx.yam
 CROWDSEC_SSH_ACQUIS="${CROWDSEC_SSH_ACQUIS:-/etc/crowdsec/acquis.d/ssh.yaml}"
 CROWDSEC_APPSEC_ACQUIS="${CROWDSEC_APPSEC_ACQUIS:-/etc/crowdsec/acquis.d/appsec.yaml}"
 NGINX_APPSEC_INCLUDE="${NGINX_APPSEC_INCLUDE:-/etc/nginx/crowdsec-appsec.conf}"
-# v1.6.0 cleanup target. A v1.5.0-dev iteration moved http-scope AppSec
+# A future cleanup target. A v1.5.0-dev iteration moved http-scope AppSec
 # map + log_format here; that split was reverted (nginx rejects it — see
 # configure_nginx for the parse-order explanation). Path is retained so
 # `rm -f "$NGINX_APPSEC_AUDIT_CONF"` in configure_nginx can clean up any
 # leftover file from dev iterations or downgraded installs.
 NGINX_APPSEC_AUDIT_CONF="${NGINX_APPSEC_AUDIT_CONF:-/etc/nginx/conf.d/loxprox-appsec.conf}"
-# v1.6.0 — optional TLS via acme.sh + HTTP-01.
+# v1.5.0 — optional TLS via acme.sh + HTTP-01.
 NGINX_ACME_CONF="${NGINX_ACME_CONF:-/etc/nginx/conf.d/loxprox-acme.conf}"
 LOXPROX_TLS_DIR="${LOXPROX_TLS_DIR:-/etc/loxprox/tls}"
 ACME_HOME="${ACME_HOME:-/root/.acme.sh}"
@@ -170,7 +170,7 @@ validate_network() {
 
 # ─── Configuration loader ────────────────────────────────────────────────────
 #
-# v1.6.0 split: REQUIRED/OPTIONAL values live in /etc/loxprox/deploy.conf, not
+# v1.5.0 split: REQUIRED/OPTIONAL values live in /etc/loxprox/deploy.conf, not
 # in this script. The loader is permissive about the file's existence and
 # returns 1 instead of exiting, so main() can decide how to react (offer the
 # operator a bootstrap path versus refuse with a clear message).
@@ -230,7 +230,7 @@ _loxprox_extract_config_from_live_state() {
         fi
         # Whitespace-tolerant. Live nginx configs often have aligned columns
         # (`auth_request      /crowdsec-appsec;`), which a literal single-space
-        # match misses — that bug existed in the v1.5.0-dev branch (rolled into v1.6.0) and the maintainer's own
+        # match misses — that bug existed in an earlier v1.5.0-dev iteration and the maintainer's own
         # upgrade-from-v1.4.0 hit it (ENABLE_APPSEC=false was extracted from a
         # VM that obviously had AppSec on, because of the column alignment in
         # its hand-edited site config). Fixed in v1.5.1.
@@ -670,7 +670,7 @@ setup_firewall() {
     local ssh_set
     ssh_set=$(IFS=', '; echo "${SSH_ALLOWED_SUBNETS[*]}")
 
-    # v1.6.1: open :80 in the input chain when TLS is enabled so the ACME
+    # v1.5.0: open :80 in the input chain when TLS is enabled so the ACME
     # HTTP-01 challenge listener (and its 301-to-HTTPS catch-all) is reachable
     # from the public internet. Without this, the conf.d/loxprox-acme.conf
     # listener exists but nftables drops every inbound SYN — Let's Encrypt's
@@ -678,7 +678,7 @@ setup_firewall() {
     # Discovered the hard way on 2026-05-26 during the first live TLS deploy.
     local tls_port_rule=""
     if [[ "${ENABLE_TLS,,}" == "true" ]]; then
-        tls_port_rule=$'\n        # ACME HTTP-01 + HTTPS-on-1080 301 redirector (v1.6.1)\n        tcp dport 80 accept'
+        tls_port_rule=$'\n        # ACME HTTP-01 + HTTPS-on-1080 301 redirector (v1.5.0)\n        tcp dport 80 accept'
     fi
 
     cat > "$NFTABLES_CONF" <<EOF
@@ -1041,7 +1041,7 @@ EOF
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TLS (v1.6.0) — optional HTTPS on :1080 via acme.sh + HTTP-01
+# TLS (v1.5.0) — optional HTTPS on :1080 via acme.sh + HTTP-01
 # ═══════════════════════════════════════════════════════════════════════════════
 #
 # Toggle-friendly by design. The operator flips ENABLE_TLS in deploy.conf and
@@ -1131,7 +1131,7 @@ _loxprox_write_acme_listener() {
     mkdir -p "$(dirname "$NGINX_ACME_CONF")"
 
     cat > "$NGINX_ACME_CONF" <<EOF
-# LoxProx — ACME HTTP-01 challenge listener (v1.6.0).
+# LoxProx — ACME HTTP-01 challenge listener (v1.5.0).
 # Owned by deploy.sh — overwritten on every TLS-enabled deploy, removed on
 # disable. Operator router must forward WAN:80 → ${GATEWAY_IP}:80 for ACME
 # validation. Everything other than /.well-known/acme-challenge/ on :80 gets
@@ -1165,9 +1165,9 @@ _loxprox_acme_issue() {
     #   2 — "skipped, cert not near expiry yet" (success from operator's POV)
     #   anything else — actual failure
     #
-    # v1.6.1: capture rc OUTSIDE the `if !` — inside the then-branch, `$?` is
+    # v1.5.0-dev follow-up: capture rc OUTSIDE the `if !` — inside the then-branch, `$?` is
     # always the result of `!` itself (0 or 1), not the original command's
-    # exit code. The previous v1.6.0 code logged "rc=0" on real failures.
+    # exit code. An earlier v1.5.0-dev iteration logged "rc=0" on real failures.
     local rc=0
     "$ACME_HOME/acme.sh" --issue \
         --webroot "$ACME_WEBROOT" \
@@ -1294,7 +1294,7 @@ _loxprox_site_enable_tls() {
             # resumption via ssl_session_cache above stays forward-secret.
             printf "%s    ssl_session_tickets off;\n", indent
             printf "%s    add_header          Strict-Transport-Security \"max-age=31536000\" always;\n", indent
-            # v1.6.2 — plain-HTTP-to-HTTPS-port grace: nginx returns 400 ("The
+            # v1.5.0 — plain-HTTP-to-HTTPS-port grace: nginx returns 400 ("The
             # plain HTTP request was sent to HTTPS port") when a client speaks
             # cleartext to a `listen 1080 ssl` socket. CrowdSec'\''s
             # http-probing scenario interprets a burst of 400s as scanning
@@ -2448,7 +2448,7 @@ main() {
     touch "$LOG_FILE"
 
     # Re-entry point: extract deploy.conf from the live state of an existing
-    # install (v1.4.0 → v1.6.0 upgrade path). Does NOT proceed to deploy —
+    # install (the v1.5.0 config-split upgrade path). Does NOT proceed to deploy —
     # operator reviews the file, then runs `sudo bash deploy.sh` normally.
     if [[ "${1:-}" == "--bootstrap-config" ]]; then
         _loxprox_bootstrap_config_interactive
@@ -2465,7 +2465,7 @@ main() {
         exit 0
     fi
 
-    # v1.6.0 — TLS re-entry points. --renew-tls forces an acme.sh renewal;
+    # v1.5.0 — TLS re-entry points. --renew-tls forces an acme.sh renewal;
     # --remove-tls does a full nuke (site revert + cert + acme.sh + cron).
     # Both require deploy.conf to be loaded so they know TLS_DOMAIN.
     if [[ "${1:-}" == "--renew-tls" || "${1:-}" == "--remove-tls" ]]; then
