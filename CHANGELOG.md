@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-06-04
+
+Token-confidentiality audit follow-up. A multi-agent session-stealing re-audit
+on top of v1.5.0; the residual was confidentiality of the relayed Loxone token,
+not the (already-fixed) shell bugs a stale review re-raised. Every change was
+applied to the maintainer's production gateway and verified live before release.
+
 ### Security — session/token-confidentiality audit (2026-06-04)
 
 A full multi-agent re-audit focused on the confidentiality of the relayed Loxone
