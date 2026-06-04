@@ -293,6 +293,18 @@ test_monitoring() {
         fail "Discord alert script missing"
     fi
 
+    # Check the Discord webhook is actually configured. An empty webhook makes
+    # the monitor detect bans and then silently drop every alert — exactly the
+    # failure that hid for weeks after the v1.5.0 config split (--bootstrap-config
+    # cannot recover a webhook from live system state). Warn, don't fail: alerting
+    # is optional, but a silent-no-alerts gateway is worse than a loud warning.
+    if [[ -f /etc/loxprox/config.env ]] && \
+       grep -qE '^DISCORD_WEBHOOK_URL="https://' /etc/loxprox/config.env 2>/dev/null; then
+        pass "Discord webhook is configured"
+    else
+        warn "Discord webhook NOT configured in /etc/loxprox/config.env — ban/alert notifications are disabled (set DISCORD_WEBHOOK_URL)"
+    fi
+
     # Check monitor log
     if [[ -f /var/log/loxprox-monitor.log ]]; then
         pass "Monitor log exists"

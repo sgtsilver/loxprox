@@ -41,6 +41,11 @@ case "${SEVERITY^^}" in
     *)        COLOR=9807270  ;;  # grey
 esac
 
+# Callers pass multi-line text as a literal "\n" (bash double quotes don't expand
+# it). Convert those to real newlines so Discord renders line breaks instead of
+# showing a literal "\n". jq --arg then encodes the real newlines correctly.
+MESSAGE="${MESSAGE//\\n/$'\n'}"
+
 # Truncate message if too long for Discord embed (max 4096 for description)
 if [ ${#MESSAGE} -gt 4000 ]; then
     MESSAGE="${MESSAGE:0:4000}... [truncated]"
