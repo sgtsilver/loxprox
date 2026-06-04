@@ -62,7 +62,7 @@ Stack:
 - auditd for config tampering detection
 - Discord alerting on security events
 
-Deploy: one script (`deploy.sh`, ~1265 lines, idempotent). Validate: 50+ automated checks. Grade: A- across CIS Debian 12, OWASP Top 10, and OWASP IoT Top 10.
+Deploy: one script (`deploy.sh`, ~2550 lines, idempotent). Validate: 50+ automated checks. Grade: A- across CIS Debian 12, OWASP Top 10, and OWASP IoT Top 10.
 
 LAN bypasses the gateway entirely — only internet-facing traffic is hardened. Runs on a 1 vCPU / 1 GB VM (2 vCPU / 2 GB recommended for attack headroom) or a Raspberry Pi 4. **VM-only — LXC unsupported**, because several kernel-level defenses (sysctls including the Fragnesia mitigation, auditd, AppArmor enforcement, nftables) cannot be applied from inside a container and would silently no-op.
 
@@ -77,7 +77,7 @@ Published **LoxProx**, an open-source security gateway for Loxone Miniserver Gen
 LoxProx deploys a six-layer defense stack (nftables → nginx → CrowdSec IDS → AppSec WAF → firewall bouncer → AppArmor/auditd) on a Debian 12 VM, transparently protecting external access without affecting LAN users.
 
 Technical highlights:
-- Idempotent ~1265-line deployment script
+- Idempotent ~2550-line deployment script
 - 50+-check automated validation suite
 - Self-contained HTML security report (A- grade)
 - Raspberry Pi 4/5 compatible

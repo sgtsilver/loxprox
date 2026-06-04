@@ -326,7 +326,7 @@ test_crowdsec_install_no_curl_pipe() {
     fi
 }
 
-# ── v1.6.0 — config file separation + bootstrap ──────────────────────────────
+# ── v1.5.0 — config file separation + bootstrap ──────────────────────────────
 
 test_load_config_sources_values() {
     echo ""
@@ -504,7 +504,7 @@ EOF
     rm -f "$NGINX_SITE"
 }
 
-# ── v1.6.0 — optional TLS via acme.sh ────────────────────────────────────────
+# ── v1.5.0 — optional TLS via acme.sh ────────────────────────────────────────
 
 test_tls_validate_config() {
     echo ""
@@ -654,7 +654,7 @@ test_detect_live_install
 test_extract_config_from_live_state
 test_configure_nginx_preserves_existing_site
 
-# v1.6.0 — optional TLS
+# v1.5.0 — optional TLS
 test_tls_validate_config
 test_tls_site_mutation_round_trip
 test_tls_enable_refuses_noncanonical_listen

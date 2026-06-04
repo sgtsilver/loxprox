@@ -102,7 +102,9 @@ loxprox/
 
 ## Quick Start
 
-1. **Create a Debian 12 VM** (1 vCPU, 512MB RAM, 5GB disk minimum).
+> **New to Linux?** Own a Loxone Miniserver but never touched a terminal? No problem — we won't judge or gatekeep. Follow the gentle, copy-paste walkthrough instead: **[Installation for Linux Newbies](docs/INSTALL-FOR-NEWBIES.md)**.
+
+1. **Create a Debian 12 VM** (1 vCPU, 1 GB RAM, 5GB disk minimum).
    > ⚠️ **VM only — no LXC.** Several gateway defenses (kernel sysctls including the Fragnesia mitigation, auditd, AppArmor enforcement, nftables in unprivileged containers) cannot be applied from inside an LXC and are silently skipped by `deploy.sh`. The deployment looks green but does not deliver the documented security posture. See [Hardware Requirements](#hardware-requirements) and `CHANGELOG.md` for details. Operators who knowingly accept the reduced posture can deploy with `ALLOW_LXC=1 sudo ./deploy.sh`.
 2. **Set static IP:** Copy and run `set-static-ip.sh` inside the target.
 3. **Copy `deploy.sh`**, `detect-loxone.sh`, and `.env.example` into the target.

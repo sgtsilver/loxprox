@@ -14,7 +14,7 @@ Wenn du frisch auf einer neuen VM installierst, springe ans Ende.
 
 ## Warum sich das geändert hat
 
-In v1.4.x und früher waren die Werte oben in `deploy.sh` (`LOXONE_IP`,
+In v1.3.x und früher waren die Werte oben in `deploy.sh` (`LOXONE_IP`,
 `SSH_ALLOWED_SUBNETS`, …) Platzhalter, die jeder Operator von Hand
 anzupassen hatte, bevor er das Script gestartet hat. Die Produktions-VM
 des Maintainers selbst hat den Failure-Mode am 26.05.2026 demonstriert:
@@ -65,7 +65,7 @@ Es zeigt die Kandidaten-Datei zum Drüberlesen an und fragt "Write this to
 
 Rate Limits, Proxy-Timeouts und Buffer-Größen werden NICHT extrahiert —
 `deploy.conf` wird mit den Repo-Defaults geschrieben (die zu jedem
-v1.0–v1.4-Deploy passen). Wenn du da etwas angepasst hast, die Datei
+v1.0–v1.3.x-Deploy passen). Wenn du da etwas angepasst hast, die Datei
 von Hand nachziehen.
 
 ### Nicht-interaktive Deploys (Ansible, CI etc.)
@@ -103,7 +103,7 @@ lernen.
   `LOXPROX_FORCE_REGEN_NGINX=1 sudo bash deploy.sh` nutzen, um aus dem
   Template neu zu regenerieren, falls jemals nötig.
 - **AppSec-Map + log_format bleiben inline in der Site-Config** (wie in
-  v1.4.0). Ein Split nach `conf.d/loxprox-appsec.conf` wurde probiert
+  v1.3.x). Ein Split nach `conf.d/loxprox-appsec.conf` wurde probiert
   und wieder zurückgenommen — nginx weist das ab, weil `$appsec_action`
   über `auth_request_set` innerhalb des Location-Blocks registriert
   wird und jede frühere Referenz darauf bei der Parse-Zeit-Validierung
