@@ -25,6 +25,20 @@ TARGET_DNS2="8.8.8.8"        # fallback
 
 [[ $EUID -ne 0 ]] && { echo "Run as root."; exit 1; }
 
+# ── H7: refuse to run unedited / with invalid values ──────────────────────────
+# Run with the <placeholders> still in place, this script purges the DHCP client
+# and writes a bogus address into /etc/network/interfaces — leaving the box
+# unreachable with no DHCP to fall back on. Validate the CONFIG before any of that.
+_valid_ip() { [[ "$1" =~ ^(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])){3}$ ]]; }
+for _v in "$TARGET_IP" "$TARGET_GW" "$TARGET_DNS1" "$TARGET_DNS2"; do
+    case "$_v" in
+        *"<"*|*">"*) echo "ERROR: edit the CONFIG section first — '$_v' is still a <placeholder>."; exit 1 ;;
+    esac
+    _valid_ip "$_v" || { echo "ERROR: '$_v' is not a valid IPv4 address — fix the CONFIG section."; exit 1; }
+done
+{ [[ "$TARGET_CIDR" =~ ^[0-9]+$ ]] && [ "$TARGET_CIDR" -ge 1 ] && [ "$TARGET_CIDR" -le 32 ]; } \
+    || { echo "ERROR: TARGET_CIDR='$TARGET_CIDR' invalid (expect 1-32)."; exit 1; }
+
 # Detect primary interface (the one with the default route)
 IFACE=$(ip route show default 2>/dev/null | awk '/default/ {print $5}' | head -1)
 if [[ -z "$IFACE" ]]; then
@@ -89,9 +103,13 @@ echo "      Written: $NETCFG"
 
 # ── Step 4: Bring interface down/up cleanly ───────────────────────────────────
 echo "[4/5] Applying config — connection will drop briefly..."
-ifdown "$IFACE" 2>/dev/null || true
-sleep 1
-ifup "$IFACE"
+# H7: run the down/up DETACHED (setsid + nohup) so it survives this SSH session
+# dying the instant ifdown drops the address. Run inline, the script gets SIGHUP
+# when the connection drops and ifup never executes — locking the box out.
+nohup setsid bash -c "ifdown '$IFACE' 2>/dev/null; sleep 1; ifup '$IFACE'" \
+    >>/var/log/set-static-ip.log 2>&1 &
+echo "      Detached ifdown/ifup (pid $!) → /var/log/set-static-ip.log; waiting 8s to settle..."
+sleep 8
 
 # ── Step 5: Verify dhclient is truly gone ─────────────────────────────────────
 echo "[5/5] Verifying clean state..."

@@ -266,14 +266,18 @@ test_rollback_validation() {
     echo ""
     echo "━━━ rollback validation ━━━"
 
-    # MED-002: rollback should validate backups before restore.
-    # We can't fully test interactive rollback here, but we verify the
-    # validation functions exist and the logic is sound by checking the
-    # backup_file helper and rollback code structure.
-    if grep -q "Validating backup files before restore" "$PROJECT_DIR/deploy.sh"; then
-        pass "rollback validation code present in deploy.sh"
+    # H6: rollback must restore each file to its ORIGINAL path (manifest-based),
+    # validate the BACKED-UP config (not the live one), and restart everything it
+    # stopped. We verify the path-preserving restore + service restart are present.
+    if grep -q "manifest.txt" "$PROJECT_DIR/deploy.sh"; then
+        pass "rollback path-preserving restore (manifest) present in deploy.sh"
     else
-        fail "rollback validation code missing from deploy.sh"
+        fail "rollback path-preserving restore missing from deploy.sh"
+    fi
+    if grep -q "systemctl start crowdsec crowdsec-firewall-bouncer" "$PROJECT_DIR/deploy.sh"; then
+        pass "rollback restarts all stopped services (H6.3)"
+    else
+        fail "rollback does not restart all stopped services"
     fi
     if grep -q "pre-rollback snapshot" "$PROJECT_DIR/deploy.sh"; then
         pass "pre-rollback snapshot code present"

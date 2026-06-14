@@ -74,50 +74,30 @@ class TestRunCscli:
             assert pb.run_cscli(["decisions", "list"]) == []
 
 
-class TestCscliDecisionDelete:
-    def test_delete_success(self):
-        with patch.object(
-            pb.subprocess, "run",
-            return_value=FakeCompletedProcess(returncode=0),
-        ) as mock_run:
-            assert pb.cscli_decision_delete("42") is True
-            args, kwargs = mock_run.call_args
-            assert "decisions" in args[0]
-            assert "delete" in args[0]
-            assert kwargs["timeout"] == pb.CSCLI_TIMEOUT
+class TestCountOffenses:
+    """H1: offenses come from `cscli alerts list --ip` (durable history), because
+    scenario bans are origin 'crowdsec' (not 'cscli') and `decisions list` only ever
+    returns active decisions — the old counter never reached 2 and never escalated."""
 
-    def test_delete_failure(self):
-        with patch.object(
-            pb.subprocess, "run",
-            return_value=FakeCompletedProcess(returncode=1, stderr="fail"),
-        ):
-            assert pb.cscli_decision_delete("42") is False
+    def test_counts_alerts(self):
+        alerts = [{"a": 1}, {"a": 2}, {"a": 3}]
+        with patch.object(pb, "run_cscli", return_value=alerts):
+            assert pb.count_offenses("1.2.3.4") == 3
 
-    def test_delete_timeout(self):
-        with patch.object(
-            pb.subprocess, "run",
-            side_effect=subprocess.TimeoutExpired(cmd="cscli", timeout=30),
-        ):
-            assert pb.cscli_decision_delete("42") is False
+    def test_empty_alerts_floors_at_one(self):
+        with patch.object(pb, "run_cscli", return_value=[]):
+            assert pb.count_offenses("1.2.3.4") == 1
 
+    def test_cscli_error_floors_at_one(self):
+        # run_cscli returns None on cscli failure → at least the current offense.
+        with patch.object(pb, "run_cscli", return_value=None):
+            assert pb.count_offenses("1.2.3.4") == 1
 
-class TestCscliDecisionAdd:
-    def test_add_success(self):
-        with patch.object(
-            pb.subprocess, "run",
-            return_value=FakeCompletedProcess(returncode=0),
-        ) as mock_run:
-            assert pb.cscli_decision_add("1.2.3.4", "24h", "repeat-offender-2") is True
-            args, kwargs = mock_run.call_args
-            assert "add" in args[0]
-            assert kwargs["timeout"] == pb.CSCLI_TIMEOUT
-
-    def test_add_failure(self):
-        with patch.object(
-            pb.subprocess, "run",
-            return_value=FakeCompletedProcess(returncode=1, stderr="fail"),
-        ):
-            assert pb.cscli_decision_add("1.2.3.4", "24h", "reason") is False
+    def test_queries_by_ip(self):
+        with patch.object(pb, "run_cscli", return_value=[]) as mock_run:
+            pb.count_offenses("9.9.9.9")
+            args, _ = mock_run.call_args
+            assert args[0] == ["alerts", "list", "--ip", "9.9.9.9"]
 
 
 class TestStateFile:
@@ -126,234 +106,200 @@ class TestStateFile:
         state_path = tmp_path / "extended-decisions.json"
         monkeypatch.setattr(pb, "STATE_FILE", str(state_path))
 
-        all_decisions = [
-            {"value": "1.2.3.4", "id": "1", "origin": "cscli"},
-            {"value": "1.2.3.4", "id": "2", "origin": "cscli"},
-        ]
-        active = [{"value": "1.2.3.4", "id": "2", "origin": "cscli",
+        # New model: the ban to extend is origin "crowdsec" (a local scenario ban).
+        active = [{"value": "1.2.3.4", "id": "2", "origin": "crowdsec",
                    "duration": "3h58m", "scenario": "ssh-bf"}]
 
-        with patch.object(pb, "run_cscli", side_effect=[all_decisions, active]):
-            with patch.object(pb, "cscli_decision_delete", return_value=True):
-                with patch.object(pb, "cscli_decision_add", return_value=True):
-                    pb.main()
+        with patch.object(pb, "run_cscli", return_value=active):
+            with patch.object(pb, "count_offenses", return_value=2):
+                with patch.object(pb, "cscli_decision_delete", return_value=True):
+                    with patch.object(pb, "cscli_decision_add", return_value=True):
+                        pb.main()
 
         assert state_path.exists()
         state = json.loads(state_path.read_text())
         assert state["1.2.3.4"] == "24h"
 
-    def test_rerun_skips_ip_already_in_state_file(self, tmp_path, monkeypatch):
-        """A second run with the same IP already escalated should skip it."""
+    def test_rerun_skips_ip_already_at_target_tier(self, tmp_path, monkeypatch):
+        """Same-tier skip guard: a still-active local scenario ban whose IP is
+        already extended to the matching tier must NOT be re-extended.
+
+        This is the delete-failed-last-run case (F9): both the original
+        ``crowdsec`` ban and our ``cscli`` extension are active. The cscli
+        extension keeps the state entry off the prune list; the state guard then
+        skips re-extending the crowdsec ban that is already at its tier.
+        """
         state_path = tmp_path / "extended-decisions.json"
         monkeypatch.setattr(pb, "STATE_FILE", str(state_path))
-
-        # Pre-populate state file as if a previous run already extended it
         state_path.write_text(json.dumps({"1.2.3.4": "24h"}))
 
-        all_decisions = [
-            {"value": "1.2.3.4", "id": "1", "origin": "cscli"},
-            {"value": "1.2.3.4", "id": "2", "origin": "cscli"},
+        active = [
+            {"value": "1.2.3.4", "id": "2", "origin": "crowdsec",
+             "duration": "3h", "scenario": "ssh-bf"},
+            {"value": "1.2.3.4", "id": "3", "origin": "cscli",
+             "duration": "23h55m", "scenario": "ssh-bf"},
         ]
-        active = [{"value": "1.2.3.4", "id": "2", "origin": "cscli",
-                   "duration": "23h55m", "scenario": "ssh-bf"}]
 
-        with patch.object(pb, "run_cscli", side_effect=[all_decisions, active]):
-            with patch.object(pb, "cscli_decision_delete") as mock_del:
-                with patch.object(pb, "cscli_decision_add") as mock_add:
-                    pb.main()
-                    mock_del.assert_not_called()
-                    mock_add.assert_not_called()
+        with patch.object(pb, "run_cscli", return_value=active):
+            with patch.object(pb, "count_offenses", return_value=2):  # still tier-2 → 24h
+                with patch.object(pb, "cscli_decision_delete") as mock_del:
+                    with patch.object(pb, "cscli_decision_add") as mock_add:
+                        pb.main()
+                        mock_del.assert_not_called()
+                        mock_add.assert_not_called()
+        assert "1.2.3.4" in json.loads(state_path.read_text())  # cscli extension keeps it
 
-    def test_new_id_after_extend_is_not_re_extended(self, tmp_path, monkeypatch):
-        """After delete+add, active list has new ID — should not extend again."""
+    def test_higher_tier_re_extends(self, tmp_path, monkeypatch):
+        """When the offense count climbs to a higher tier, the IP is re-extended."""
         state_path = tmp_path / "extended-decisions.json"
         monkeypatch.setattr(pb, "STATE_FILE", str(state_path))
+        state_path.write_text(json.dumps({"1.2.3.4": "24h"}))  # previously tier-2
 
-        # First run: extend decision id=2 for ip 1.2.3.4
-        state_path.write_text(json.dumps({}))
-        all_decisions_run1 = [
-            {"value": "1.2.3.4", "id": "1", "origin": "cscli"},
-            {"value": "1.2.3.4", "id": "2", "origin": "cscli"},
-        ]
-        active_run1 = [{"value": "1.2.3.4", "id": "2", "origin": "cscli",
-                        "duration": "3h58m", "scenario": "ssh-bf"}]
-        with patch.object(pb, "run_cscli", side_effect=[all_decisions_run1, active_run1]):
-            with patch.object(pb, "cscli_decision_delete", return_value=True):
-                with patch.object(pb, "cscli_decision_add", return_value=True):
-                    pb.main()
-        # State should now track the IP, not the old ID
-        assert json.loads(state_path.read_text()) == {"1.2.3.4": "24h"}
+        active = [{"value": "1.2.3.4", "id": "7", "origin": "crowdsec",
+                   "duration": "3h58m", "scenario": "ssh-bf"}]
 
-        # Second run: CrowdSec gave the new decision id=99 (new ID after delete+add)
-        # Total offenses still 2 (id=1 expired, id=99 active; id=2 was deleted)
-        all_decisions_run2 = [
-            {"value": "1.2.3.4", "id": "1", "origin": "cscli"},
-            {"value": "1.2.3.4", "id": "99", "origin": "cscli"},
-        ]
-        active_run2 = [{"value": "1.2.3.4", "id": "99", "origin": "cscli",
-                        "duration": "23h55m", "scenario": "ssh-bf"}]
-        with patch.object(pb, "run_cscli", side_effect=[all_decisions_run2, active_run2]):
-            with patch.object(pb, "cscli_decision_delete") as mock_del:
-                with patch.object(pb, "cscli_decision_add") as mock_add:
-                    pb.main()
-                    mock_del.assert_not_called()  # must NOT extend again
-                    mock_add.assert_not_called()
+        with patch.object(pb, "run_cscli", return_value=active):
+            with patch.object(pb, "count_offenses", return_value=3):  # now tier-3 → 168h
+                with patch.object(pb, "cscli_decision_delete", return_value=True) as mock_del:
+                    with patch.object(pb, "cscli_decision_add", return_value=True) as mock_add:
+                        pb.main()
+                        mock_add.assert_called_once()
+                        args, _ = mock_add.call_args
+                        assert args[1] == "168h"
+        assert json.loads(state_path.read_text())["1.2.3.4"] == "168h"
 
     def test_stale_entries_pruned(self, tmp_path, monkeypatch):
-        """State entries for IPs no longer with active cscli bans should be removed."""
+        """State entries for IPs with no active extension (cscli decision) are removed."""
         state_path = tmp_path / "extended-decisions.json"
         monkeypatch.setattr(pb, "STATE_FILE", str(state_path))
-
-        # Pre-populate with one stale and one active entry
         state_path.write_text(json.dumps({"5.5.5.5": "24h", "1.2.3.4": "168h"}))
 
-        all_decisions = [
-            {"value": "1.2.3.4", "id": "1", "origin": "cscli"},
-            {"value": "1.2.3.4", "id": "2", "origin": "cscli"},
-            {"value": "1.2.3.4", "id": "3", "origin": "cscli"},
-        ]
+        # 1.2.3.4 still has our active extension (origin "cscli"); 5.5.5.5 has nothing.
         active = [{"value": "1.2.3.4", "id": "2", "origin": "cscli",
                    "duration": "6d23h", "scenario": "ssh-bf"}]
 
-        with patch.object(pb, "run_cscli", side_effect=[all_decisions, active]):
+        with patch.object(pb, "run_cscli", return_value=active):
             with patch.object(pb, "cscli_decision_delete") as mock_del:
                 with patch.object(pb, "cscli_decision_add") as mock_add:
                     pb.main()
-                    # IP 1.2.3.4 is already at 168h (offense 3), so no change needed
-                    mock_del.assert_not_called()
+                    mock_del.assert_not_called()  # cscli-origin is skipped from extension
                     mock_add.assert_not_called()
 
         state = json.loads(state_path.read_text())
         assert "5.5.5.5" not in state  # stale, pruned
-        assert "1.2.3.4" in state     # still active, kept
+        assert "1.2.3.4" in state      # active extension, kept
 
 
 class TestMain:
     def test_no_active_decisions(self):
-        with patch.object(pb, "run_cscli", side_effect=[
-            [],   # all decisions
-            [],   # active decisions
-        ]):
-            # Should exit cleanly with no errors
-            pb.main()
+        with patch.object(pb, "run_cscli", return_value=[]):
+            pb.main()  # should exit cleanly
 
     def test_single_offense_no_extension(self):
         """1st offense — not in ESCALATION table, should be skipped."""
-        all_decisions = [{"value": "1.2.3.4", "id": "1", "origin": "cscli"}]
-        active = [{"value": "1.2.3.4", "id": "1", "origin": "cscli",
+        active = [{"value": "1.2.3.4", "id": "1", "origin": "crowdsec",
                    "duration": "3h58m", "scenario": "ssh-bf"}]
-        with patch.object(pb, "run_cscli", side_effect=[all_decisions, active]):
-            with patch.object(pb, "cscli_decision_delete") as mock_del:
-                with patch.object(pb, "cscli_decision_add") as mock_add:
-                    pb.main()
-                    mock_del.assert_not_called()
-                    mock_add.assert_not_called()
+        with patch.object(pb, "run_cscli", return_value=active):
+            with patch.object(pb, "count_offenses", return_value=1):
+                with patch.object(pb, "cscli_decision_delete") as mock_del:
+                    with patch.object(pb, "cscli_decision_add") as mock_add:
+                        pb.main()
+                        mock_del.assert_not_called()
+                        mock_add.assert_not_called()
 
     def test_second_offense_extended(self):
-        """2nd offense — should extend to 24h."""
-        all_decisions = [
-            {"value": "1.2.3.4", "id": "1", "origin": "cscli"},
-            {"value": "1.2.3.4", "id": "2", "origin": "cscli"},
-        ]
-        active = [{"value": "1.2.3.4", "id": "2", "origin": "cscli",
+        """2nd offense on a local scenario ban — should extend to 24h."""
+        active = [{"value": "1.2.3.4", "id": "2", "origin": "crowdsec",
                    "duration": "3h58m", "scenario": "ssh-bf"}]
-        with patch.object(pb, "run_cscli", side_effect=[all_decisions, active]):
-            with patch.object(pb, "cscli_decision_delete", return_value=True) as mock_del:
-                with patch.object(pb, "cscli_decision_add", return_value=True) as mock_add:
-                    pb.main()
-                    mock_del.assert_called_once_with("2")
-                    mock_add.assert_called_once()
-                    args, _ = mock_add.call_args
-                    assert args[0] == "1.2.3.4"
-                    assert args[1] == "24h"
+        with patch.object(pb, "run_cscli", return_value=active):
+            with patch.object(pb, "count_offenses", return_value=2):
+                with patch.object(pb, "cscli_decision_delete", return_value=True) as mock_del:
+                    with patch.object(pb, "cscli_decision_add", return_value=True) as mock_add:
+                        pb.main()
+                        mock_del.assert_called_once_with("2")
+                        mock_add.assert_called_once()
+                        args, _ = mock_add.call_args
+                        assert args[0] == "1.2.3.4"
+                        assert args[1] == "24h"
 
     def test_capi_ban_skipped(self):
-        """CAPI origin bans should never be extended."""
-        all_decisions = [{"value": "1.2.3.4", "id": "1", "origin": "CAPI"}]
+        """CAPI-origin bans (community reputation) are never extended."""
         active = [{"value": "1.2.3.4", "id": "1", "origin": "CAPI",
                    "duration": "3h58m", "scenario": "crowdsecurity/http-bf"}]
-        with patch.object(pb, "run_cscli", side_effect=[all_decisions, active]):
-            with patch.object(pb, "cscli_decision_delete") as mock_del:
-                with patch.object(pb, "cscli_decision_add") as mock_add:
-                    pb.main()
-                    mock_del.assert_not_called()
-                    mock_add.assert_not_called()
+        with patch.object(pb, "run_cscli", return_value=active):
+            with patch.object(pb, "count_offenses", return_value=9) as mock_count:
+                with patch.object(pb, "cscli_decision_delete") as mock_del:
+                    with patch.object(pb, "cscli_decision_add") as mock_add:
+                        pb.main()
+                        mock_del.assert_not_called()
+                        mock_add.assert_not_called()
+                        mock_count.assert_not_called()  # skipped before counting
 
     def test_capi_history_does_not_inflate_local_offense_count(self):
-        """Mixed-origin decision history: only cscli bans count toward escalation.
+        """CAPI/community decisions must never drive escalation.
 
-        An IP with three CAPI community-blocklist entries and ONE local
-        cscli ban should be treated as a first-time local offender
-        (offense=1 → not in ESCALATION table → no extension). Without the
-        origin filter, it would be counted as four offenses and instantly
-        escalated to 30 days.
+        H1: offenses are counted from local ALERTS (count_offenses), and CAPI
+        community-blocklist entries produce no local alert. An IP with CAPI
+        decisions plus a single local scenario ban is a first-time local
+        offender (offense=1 → no extension). The CAPI decisions are also skipped
+        by the origin filter regardless.
         """
-        all_decisions = [
-            {"value": "1.2.3.4", "id": "10", "origin": "CAPI"},
-            {"value": "1.2.3.4", "id": "11", "origin": "CAPI"},
-            {"value": "1.2.3.4", "id": "12", "origin": "CAPI"},
-            {"value": "1.2.3.4", "id": "20", "origin": "cscli"},
+        active = [
+            {"value": "1.2.3.4", "id": "10", "origin": "CAPI",
+             "duration": "3h", "scenario": "capi"},
+            {"value": "1.2.3.4", "id": "20", "origin": "crowdsec",
+             "duration": "3h58m", "scenario": "ssh-bf"},
         ]
-        active = [{"value": "1.2.3.4", "id": "20", "origin": "cscli",
-                   "duration": "3h58m", "scenario": "ssh-bf"}]
-        with patch.object(pb, "run_cscli", side_effect=[all_decisions, active]):
-            with patch.object(pb, "cscli_decision_delete") as mock_del:
-                with patch.object(pb, "cscli_decision_add") as mock_add:
-                    pb.main()
-                    mock_del.assert_not_called()
-                    mock_add.assert_not_called()
+        with patch.object(pb, "run_cscli", return_value=active):
+            with patch.object(pb, "count_offenses", return_value=1):  # one local offense
+                with patch.object(pb, "cscli_decision_delete") as mock_del:
+                    with patch.object(pb, "cscli_decision_add") as mock_add:
+                        pb.main()
+                        mock_del.assert_not_called()
+                        mock_add.assert_not_called()
 
     # ── F9: fail-safe ban extension (add the new ban BEFORE deleting the old) ──
     def test_extend_adds_before_deletes(self):
         """F9: the extended ban is ADDED before the original is DELETED, so a
         crash/timeout between the two steps can only over-ban, never unban."""
-        all_decisions = [
-            {"value": "1.2.3.4", "id": "1", "origin": "cscli"},
-            {"value": "1.2.3.4", "id": "2", "origin": "cscli"},
-        ]
-        active = [{"value": "1.2.3.4", "id": "2", "origin": "cscli",
+        active = [{"value": "1.2.3.4", "id": "2", "origin": "crowdsec",
                    "duration": "3h58m", "scenario": "ssh-bf"}]
         order = []
-        with patch.object(pb, "run_cscli", side_effect=[all_decisions, active]):
-            with patch.object(pb, "cscli_decision_add",
-                              side_effect=lambda *a, **k: order.append("add") or True):
-                with patch.object(pb, "cscli_decision_delete",
-                                  side_effect=lambda *a, **k: order.append("delete") or True):
-                    pb.main()
+        with patch.object(pb, "run_cscli", return_value=active):
+            with patch.object(pb, "count_offenses", return_value=2):
+                with patch.object(pb, "cscli_decision_add",
+                                  side_effect=lambda *a, **k: order.append("add") or True):
+                    with patch.object(pb, "cscli_decision_delete",
+                                      side_effect=lambda *a, **k: order.append("delete") or True):
+                        pb.main()
         assert order == ["add", "delete"], f"expected add before delete, got {order}"
 
     def test_add_fails_leaves_original_ban(self):
         """F9: if the extended add fails, the original is NOT deleted — the IP
         stays banned (fail safe, never an unban)."""
-        all_decisions = [
-            {"value": "1.2.3.4", "id": "1", "origin": "cscli"},
-            {"value": "1.2.3.4", "id": "2", "origin": "cscli"},
-        ]
-        active = [{"value": "1.2.3.4", "id": "2", "origin": "cscli",
+        active = [{"value": "1.2.3.4", "id": "2", "origin": "crowdsec",
                    "duration": "3h58m", "scenario": "ssh-bf"}]
-        with patch.object(pb, "run_cscli", side_effect=[all_decisions, active]):
-            with patch.object(pb, "cscli_decision_add", return_value=False) as mock_add:
-                with patch.object(pb, "cscli_decision_delete") as mock_del:
-                    pb.main()
-                    mock_add.assert_called_once()
-                    mock_del.assert_not_called()
+        with patch.object(pb, "run_cscli", return_value=active):
+            with patch.object(pb, "count_offenses", return_value=2):
+                with patch.object(pb, "cscli_decision_add", return_value=False) as mock_add:
+                    with patch.object(pb, "cscli_decision_delete") as mock_del:
+                        pb.main()
+                        mock_add.assert_called_once()
+                        mock_del.assert_not_called()
 
     def test_add_succeeds_delete_fails_is_harmless(self):
         """F9: add succeeds but deleting the original fails — the IP stays
         banned via the new (longer) decision; the stale original just expires.
         main() must not crash and the delete must still have been attempted."""
-        all_decisions = [
-            {"value": "1.2.3.4", "id": "1", "origin": "cscli"},
-            {"value": "1.2.3.4", "id": "2", "origin": "cscli"},
-        ]
-        active = [{"value": "1.2.3.4", "id": "2", "origin": "cscli",
+        active = [{"value": "1.2.3.4", "id": "2", "origin": "crowdsec",
                    "duration": "3h58m", "scenario": "ssh-bf"}]
-        with patch.object(pb, "run_cscli", side_effect=[all_decisions, active]):
-            with patch.object(pb, "cscli_decision_add", return_value=True) as mock_add:
-                with patch.object(pb, "cscli_decision_delete", return_value=False) as mock_del:
-                    pb.main()
-                    mock_add.assert_called_once()
-                    mock_del.assert_called_once()
+        with patch.object(pb, "run_cscli", return_value=active):
+            with patch.object(pb, "count_offenses", return_value=2):
+                with patch.object(pb, "cscli_decision_add", return_value=True) as mock_add:
+                    with patch.object(pb, "cscli_decision_delete", return_value=False) as mock_del:
+                        pb.main()
+                        mock_add.assert_called_once()
+                        mock_del.assert_called_once()
 
 
 class TestEscalationTable:

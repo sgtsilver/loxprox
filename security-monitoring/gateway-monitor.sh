@@ -72,7 +72,7 @@ check_crowdsec_blocks() {
     # of IPs) is enforced by the bouncer separately and is reported here as a
     # background count, never per-IP (that would be thousands of alerts).
     local decisions_json seen_file="$STATE_DIR/seen_local_bans"
-    decisions_json=$(cscli decisions list -o json 2>/dev/null)
+    decisions_json=$(cscli decisions list -o json 2>/dev/null) || return 0  # M8: LAPI outage must not abort the whole cycle
     [[ -z "$decisions_json" ]] && return 0
 
     # Robust to all cscli JSON shapes (flat array / {decisions:[]} / array of
@@ -80,7 +80,7 @@ check_crowdsec_blocks() {
     local current
     current=$(echo "$decisions_json" | jq -r '
         [ .. | objects | select(has("value") and has("duration")) ]
-        | .[] | "\(.id)|\(.value)|\(.scenario // "?")|\(.origin // "?")"' 2>/dev/null | sort -u)
+        | .[] | "\(.id)|\(.value)|\(.scenario // "?")|\(.origin // "?")"' 2>/dev/null | sort -u) || true  # M8
 
     if [[ -z "$current" ]]; then
         : > "$seen_file" 2>/dev/null   # nothing active — forget previous IDs
@@ -101,7 +101,7 @@ check_crowdsec_blocks() {
     if [[ -n "$new_msg" ]]; then
         local community
         community=$(nft list set ip crowdsec crowdsec-blacklists 2>/dev/null \
-            | grep -coE '([0-9]{1,3}\.){3}[0-9]{1,3}' | tr -d ' ')
+            | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | wc -l | tr -d ' ') || true  # M6: count IPs not lines; never abort the send
         log "ALERT [WARNING]: New CrowdSec local ban(s)"
         "$DISCORD" "WARNING" "New CrowdSec Ban" \
             "Newly banned by a local scenario:\n${new_msg}\nBackground: ${community:-?} IPs currently enforced via the CrowdSec community blocklist." 2>/dev/null || true
@@ -121,7 +121,7 @@ check_nginx_errors() {
     [ "$current_pos" -le "$last_pos" ] && { echo "$current_pos" > "$last_check_file"; return 0; }
     
     local new_errors
-    new_errors=$(tail -c +$((last_pos + 1)) "$log" 2>/dev/null | grep -E "limiting requests|upstream prematurely|502|503|504" | head -20)
+    new_errors=$(tail -c +$((last_pos + 1)) "$log" 2>/dev/null | grep -E "limiting requests|upstream prematurely|502|503|504" | head -20) || true  # H2: no-match grep is normal
     
     echo "$current_pos" > "$last_check_file"
     
@@ -145,7 +145,7 @@ check_auth_attempts() {
     [ "$current_pos" -le "$last_pos" ] && { echo "$current_pos" > "$last_check_file"; return 0; }
     
     local failed_logins
-    failed_logins=$(tail -c +$((last_pos + 1)) "$log" 2>/dev/null | grep -E "Failed password|Invalid user|Connection closed by authenticating user" | head -20)
+    failed_logins=$(tail -c +$((last_pos + 1)) "$log" 2>/dev/null | grep -E "Failed password|Invalid user|Connection closed by authenticating user" | head -20) || true  # H2: no-match grep is normal
     
     echo "$current_pos" > "$last_check_file"
     
@@ -171,7 +171,7 @@ check_appsec_detections() {
     [ "$current_pos" -le "$last_pos" ] && { echo "$current_pos" > "$last_check_file"; return 0; }
     
     local detections
-    detections=$(tail -c +$((last_pos + 1)) "$log" 2>/dev/null | awk '{print $1}' | sort | uniq -c | sort -rn | head -10)
+    detections=$(tail -c +$((last_pos + 1)) "$log" 2>/dev/null | awk '{print $1}' | sort | uniq -c | sort -rn | head -10) || true  # H2-class: SIGPIPE/no-match must not abort
     
     echo "$current_pos" > "$last_check_file"
     
