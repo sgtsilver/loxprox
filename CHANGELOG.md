@@ -66,6 +66,51 @@ install upgrades with zero behavior change until `ENABLE_TUNNEL` is flipped.
   with the tunnel, TLS terminates at the relay (split-horizon wildcard via
   DNS-01 is the tracked follow-up).
 
+## [1.5.2] — 2026-06-14
+
+Full-project audit (`audits/2026-06-09-full-project-audit.md`) remediation: all
+HIGH findings plus the mechanical `set -euo pipefail` / `((var++))` error class
+across the deploy, monitoring, and ban scripts. Every runtime change was applied
+to the maintainer's production gateway and verified live (monitor completes,
+watchdog "Cycle passed", ban script clean, nginx/CrowdSec healthy) before release.
+
+### Fixed — HIGH
+- **H1 — progressive ban never escalated real attackers.** Offense counting used
+  `cscli decisions list -a` (only ever returns *active* decisions) and required
+  `origin == "cscli"`, but scenario/AppSec bans are origin `crowdsec`. Now offenses
+  come from `cscli alerts list --ip` (durable history) and `crowdsec`-origin bans
+  are the ones extended; `-a` dropped. Regression tests rewritten to the new model.
+- **H2 — security monitor aborted every clean cycle.** Under `set -euo pipefail` a
+  no-match `grep` in the nginx/auth/appsec checks exited non-zero and killed the
+  whole cycle (sticky — later checks never ran). `|| true` on each scan pipeline.
+- **H3 — watchdog reboot loop.** The give-up path `exit 1` combined with the unit's
+  `FailureAction=reboot` to reboot on every failed state; `((count++))` also aborted
+  `reboots_in_window` under `set -e`. Give-up now `exit 0`, `FailureAction=reboot`
+  removed (the script's own gated reboot remains), arithmetic made safe.
+- **H4 — `((retries++))` / `((failures++))` aborted the deploy** on bash ≥ 4.1
+  (the expression returns 1 when the var is 0). Switched to `$((var + 1))`.
+- **H5 — SSH bootstrap could lock out a root-only box.** The HARD drop-in now uses
+  `PermitRootLogin prohibit-password` (key login still works) instead of `no`.
+- **H6 — rollback was broken end to end.** Backups now preserve full paths
+  (mirror + manifest) and restore to their original locations (not flat into `/etc/`);
+  the BACKUP is validated (not the live config); nginx is `-t`'d after restore; and
+  every stopped service is restarted, not just nginx. Pre-format flat backups are refused.
+- **H7 — `set-static-ip.sh` could strand the box.** Refuses to run with `<placeholder>`
+  or invalid IPs, and runs `ifdown`/`ifup` detached (`setsid`+`nohup`) so it survives
+  the SSH session dropping the moment the address goes away.
+
+### Fixed — MEDIUM / LOW
+- **M6** — new-ban Discord alert no longer swallowed (community-count pipeline
+  `|| true`; counts IPs, not lines). **M8** — a cscli/LAPI outage no longer skips the
+  rest of the monitor (`|| return 0`). **M9** — backticks stripped from
+  attacker-controlled content before the Discord code fence (markdown injection).
+  **M11** — Loxone reachability probe uses `:` not `cat` (no false "Cannot reach").
+- **L3 + SIGPIPE** — the watchdog interface-IP check now anchors on the `/prefix`
+  (so `.5` ≠ `.50/24`) AND is a pure-bash substring match: the old
+  `ip addr … | grep -q` false-failed under `pipefail` (grep -q exits on the match →
+  `ip` takes SIGPIPE), which could spuriously reboot the box whenever
+  `WATCHDOG_EXPECTED_IP` is set. **L13** — sysctls header corrected LXC → VM.
+
 ## [1.5.1] — 2026-06-04
 
 Token-confidentiality audit follow-up. A multi-agent session-stealing re-audit

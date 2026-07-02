@@ -17,7 +17,6 @@ import logging
 import os
 import subprocess
 import sys
-from collections import defaultdict
 
 logging.basicConfig(
     level=logging.INFO,
@@ -117,25 +116,31 @@ def save_state(state: dict) -> None:
         logger.warning("Failed to write state file %s: %s", STATE_FILE, exc)
 
 
+def count_offenses(ip: str) -> int:
+    """Lifetime local offense count for an IP.
+
+    H1: scenario- and AppSec-triggered bans carry origin ``crowdsec`` (not
+    ``cscli`` — that origin is only manual ``cscli decisions add`` and this
+    script's own extensions). And ``cscli decisions list`` only ever returns
+    *currently-active* decisions (``-a`` merely un-hides CAPI/list entries, it
+    does NOT add expired ones), so the old per-IP counter saw at most 1 and the
+    2nd→24h / 3rd→7d policy never fired. CrowdSec **alerts** persist after a
+    decision expires, so they are the durable offense history — one alert per
+    local scenario trigger for the source IP.
+    """
+    alerts = run_cscli(["alerts", "list", "--ip", ip])
+    if not alerts:
+        return 1  # at minimum, the offense that produced the current ban
+    return max(1, len(alerts))
+
+
 def main():
     state = load_state()
 
-    # Get all decisions (active + expired) to count offenses per IP
-    all_decisions = run_cscli(["decisions", "list", "-a"])
-    if all_decisions is None:
-        sys.exit(1)
-
-    # Count only local (cscli) bans as "offenses" for escalation purposes.
-    # CAPI/AppSec decisions reflect global reputation, not repeated local
-    # misbehavior — counting them inflates the offense level and would
-    # instantly escalate a first-time local offender that happens to also
-    # be on a community blocklist.
-    ip_offenses = defaultdict(int)
-    for d in all_decisions:
-        ip = d.get("value", "")
-        origin = d.get("origin", "")
-        if ip and origin == "cscli":
-            ip_offenses[ip] += 1
+    # H1: offenses are counted per-IP from CrowdSec ALERTS (see count_offenses),
+    # which survive decision expiry — `cscli decisions list [-a]` only ever returns
+    # currently-active decisions, so the old counter never reached 2. `-a` is dropped
+    # entirely (it only un-hides CAPI/list decisions; it never returns expired ones).
 
     # Get currently active decisions
     active = run_cscli(["decisions", "list"])
@@ -168,12 +173,14 @@ def main():
         if not ip or not id_:
             continue
 
-        # Only extend local (cscli) bans, not CAPI community bans
-        if origin != "cscli":
+        # H1: extend local scenario/AppSec bans (origin "crowdsec"); skip CAPI /
+        # community-list decisions (global reputation, not repeat local misbehavior)
+        # and this script's own prior extensions (origin "cscli", guarded by state).
+        if origin != "crowdsec":
             skipped += 1
             continue
 
-        offenses = ip_offenses.get(ip, 1)
+        offenses = count_offenses(ip)
 
         if offenses >= 4:
             target = DEFAULT_EXTENDED

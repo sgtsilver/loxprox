@@ -134,7 +134,7 @@ reboots_in_window() {
     while read -r ts _rest; do
         # ts is epoch seconds written by handle_reboot
         [[ "$ts" =~ ^[0-9]+$ ]] || continue
-        [[ "$ts" -gt "$cutoff" ]] && ((count++))
+        [[ "$ts" -gt "$cutoff" ]] && count=$((count + 1))  # H4-class: ((count++)) returns 1 when count=0 → set -e abort
     done < "$REBOOT_LOG"
     echo "$count"
 }
@@ -162,7 +162,14 @@ check_nginx_local() {
 
 check_interface_ip() {
     [[ "$EXPECTED_IP" == "UNSET" ]] && return 0
-    ip addr show "$IFACE" 2>/dev/null | grep -q "inet ${EXPECTED_IP}"
+    # L3 + SIGPIPE-safe: read into a var and substring-match instead of
+    # `ip addr ... | grep -q`. Under `set -o pipefail` that pipe FALSE-FAILS —
+    # grep -q exits on the match, `ip` then gets SIGPIPE on its remaining output,
+    # and the non-zero propagates → watchdog thinks the IP vanished → spurious
+    # heal/reboot. The trailing "/" anchors the prefix so .5 never matches .50/24.
+    local addrs
+    addrs=$(ip addr show "$IFACE" 2>/dev/null) || true
+    [[ "$addrs" == *"inet ${EXPECTED_IP}/"* ]]
 }
 
 check_dhclient_anomaly() {
@@ -250,10 +257,13 @@ handle_reboot() {
         log "The upstream network (router/Fritzbox) may actually be down."
         send_discord "CRITICAL" "Watchdog Gave Up — Manual Intervention Required" \
             "$msg\n\nFailed checks: ${failed_checks}\n\n${diagnostics}\n\nAction: Check your upstream router/Fritzbox. If the router is up, SSH in and run:\njournalctl -u network-watchdog --since '1 hour ago'\ncat $LOG_FILE"
-        # Exit non-zero so systemd knows we failed. FailureAction=reboot is a
-        # last-resort safety net; the script-level counter (max 2/hour) is the
-        # primary loop protection.
-        exit 1
+        # H3: alerting IS the designed handling here — the watchdog has already
+        # rebooted MAX_REBOOTS_PER_HOUR times, so the cause is almost certainly an
+        # upstream outage a further reboot cannot fix. Exit 0 so systemd does NOT
+        # enter a failed state. FailureAction=reboot has been REMOVED from the unit
+        # (it fired on every non-zero exit, turning any incidental script error
+        # into a reboot loop); the gated handle_reboot above is the sole reboot path.
+        exit 0
     fi
 
     # Write persistent flag so post-reboot cycle can report recovery

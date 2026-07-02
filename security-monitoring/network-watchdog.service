@@ -7,12 +7,9 @@ After=network.target nginx.service
 # which is required to restart networking.service and call reboot.
 # No sudo configuration is needed. No passwordless access is granted.
 
-# systemd-level safety net: if the script exits non-zero, systemd can
-# trigger a reboot as last-resort recovery. StartLimitBurst=0 is required
-# because the timer fires every 60 s; a finite burst limit would block the
-# 4th start (~3 min) and falsely trigger FailureAction=reboot. The script
-# already has its own anti-loop counter (max 2 reboots/hour). Belongs in
-# [Unit] per systemd.unit(5); placing them in [Service] is silently ignored.
+# The watchdog timer fires every 60 s; StartLimitBurst=0 disables start-rate
+# limiting so systemd never refuses to run a cycle. There is intentionally NO
+# FailureAction (see [Service]) — nothing here reboots on a failed start.
 StartLimitIntervalSec=600
 StartLimitBurst=0
 
@@ -20,9 +17,12 @@ StartLimitBurst=0
 Type=oneshot
 ExecStart=/opt/loxprox/network-watchdog.sh
 
-# If the script exits non-zero after the burst limit is exhausted,
-# systemd triggers a reboot as a last-resort recovery measure.
-FailureAction=reboot
+# H3: FailureAction=reboot was REMOVED. systemd fires FailureAction immediately on
+# entering the failed state (StartLimitBurst gates StartLimitAction, NOT
+# FailureAction), so EVERY non-zero exit rebooted — a corrupt state file, a full
+# disk breaking log writes, or the old give-up `exit 1` all became reboot loops.
+# The script owns its own gated reboot (handle_reboot, max 2/hour) and now exits 0
+# on give-up. A broken script must alert/log, never silently reboot the box.
 
 # Logging
 StandardOutput=append:/var/log/loxprox-network-watchdog.log

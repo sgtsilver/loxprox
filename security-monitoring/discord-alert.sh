@@ -46,6 +46,11 @@ esac
 # showing a literal "\n". jq --arg then encodes the real newlines correctly.
 MESSAGE="${MESSAGE//\\n/$'\n'}"
 
+# M9: strip backticks from attacker-controlled content (request lines, invalid SSH
+# usernames, syslog tails) so a crafted ``` cannot close the code fence below and
+# inject arbitrary Discord markdown (spoofed alerts / phishing links) into the channel.
+MESSAGE="${MESSAGE//\`/}"
+
 # Truncate message if too long for Discord embed (max 4096 for description)
 if [ ${#MESSAGE} -gt 4000 ]; then
     MESSAGE="${MESSAGE:0:4000}... [truncated]"

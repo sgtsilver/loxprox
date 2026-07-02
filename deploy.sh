@@ -164,7 +164,15 @@ check_root()    { [[ $EUID -eq 0 ]] || { error "Run as root."; exit 1; }; }
 service_active(){ systemctl is-active --quiet "$1" 2>/dev/null; }
 
 backup_file() {
-    [[ -f "$1" ]] && { mkdir -p "$BACKUP_DIR"; cp "$1" "$BACKUP_DIR/"; info "Backed up: $1"; }
+    # H6: preserve each file's FULL path under $BACKUP_DIR/files/... plus a manifest,
+    # so rollback() restores to the original location. The old flat-basename store
+    # lost the path → restore sent the nginx site to /etc/loxone, etc.
+    [[ -f "$1" ]] || return 0
+    local dest="$BACKUP_DIR/files$1"
+    mkdir -p "$(dirname "$dest")"
+    cp -a "$1" "$dest"
+    printf '%s\n' "$1" >> "$BACKUP_DIR/manifest.txt"
+    info "Backed up: $1"
     return 0
 }
 
@@ -612,7 +620,7 @@ preflight() {
     fi
 
     info "Checking connectivity to Loxone ($LOXONE_IP:$LOXONE_PORT)..."
-    if timeout 5 bash -c "cat < /dev/tcp/$LOXONE_IP/$LOXONE_PORT" 2>/dev/null; then
+    if timeout 5 bash -c ": < /dev/tcp/$LOXONE_IP/$LOXONE_PORT" 2>/dev/null; then  # M11: ':' proves the open; 'cat' blocks for data an HTTP server never sends → false "Cannot reach"
         ok "Loxone is reachable"
     else
         warn "Cannot reach Loxone on $LOXONE_PORT — continuing anyway. Verify manually after deploy."
@@ -1034,7 +1042,7 @@ configure_appsec_nginx() {
         fi
         info "Waiting for bouncer API key..."
         sleep 2
-        ((retries++))
+        retries=$((retries + 1))  # H4: ((retries++)) returns 1 when retries=0 → set -e aborts on bash>=4.1
     done
 
     if [[ -z "$bouncer_key" ]]; then
@@ -2290,7 +2298,10 @@ _loxprox_write_hard_ssh_drop_in() {
 Protocol 2
 LogLevel VERBOSE
 MaxAuthTries 4
-PermitRootLogin no
+# H5: prohibit-password (not "no") — root login by KEY still works, so installing the
+# operator's key for root and then applying HARD mode does not lock a root-only box
+# out. Password root login stays denied (PasswordAuthentication no enforces it too).
+PermitRootLogin prohibit-password
 PermitEmptyPasswords no
 PasswordAuthentication no
 PubkeyAuthentication yes
@@ -2770,10 +2781,7 @@ health_check() {
                 ok "nftables enabled (one-shot service, not persistent)"
             else
                 error "$svc NOT active"
-                # v2.0 fix: ((failures++)) returns 1 on the first increment
-                # (post-increment of 0) and aborts the whole deploy under
-                # set -e before the failure summary can print.
-                failures=$((failures + 1))
+                failures=$((failures + 1))  # H4: ((failures++)) returns 1 when failures=0 → set -e aborts the rest of health_check
             fi
         fi
     done
@@ -2817,39 +2825,19 @@ rollback() {
     [[ ! "$yn" =~ ^[Yy]$ ]] && { info "Cancelled."; return; }
 
     local latest
-    latest=$(ls -td /root/loxprox-backup-[0-9]* 2>/dev/null | head -1)
+    latest=$(ls -td /root/loxprox-backup-[0-9]* 2>/dev/null | head -1) || true  # H6.4: no-match must not abort under pipefail
     [[ -z "$latest" ]] && { error "No backup found."; exit 1; }
-
-    info "Validating backup files before restore..."
-    local validation_errors=0
-
-    # Validate nginx config from backup (if present)
-    if [[ -f "$latest/loxone" ]]; then
-        if ! nginx -t -c /etc/nginx/nginx.conf 2>/dev/null; then
-            error "Current nginx config invalid — aborting rollback to avoid unstartable nginx."
-            validation_errors=$((validation_errors + 1))
-        fi
+    if [[ ! -f "$latest/manifest.txt" ]]; then
+        error "Backup '$latest' predates the path-preserving format (no manifest.txt)."
+        error "Refusing to restore — the old flat layout would write files to the wrong paths."
+        exit 1
     fi
 
-    # Validate nftables config from backup (if present)
-    if [[ -f "$latest/nftables.conf" ]]; then
-        if ! nft -c -f "$latest/nftables.conf" 2>/dev/null; then
-            error "Backup nftables.conf has syntax errors — aborting rollback."
-            validation_errors=$((validation_errors + 1))
-        fi
-    fi
-
-    # Validate CrowdSec config from backup (if present)
-    if [[ -f "$latest/config.yaml" ]]; then
-        if command -v cscli &>/dev/null; then
-            if ! cscli config show 2>/dev/null >/dev/null; then
-                warn "CrowdSec config show failed — proceeding with caution."
-            fi
-        fi
-    fi
-
-    if [[ $validation_errors -gt 0 ]]; then
-        error "$validation_errors validation error(s) found. Rollback aborted."
+    # H6.1: validate the BACKED-UP nftables file — NOT the live config. Validating
+    # the live config aborted rollback in exactly the broken-config case rollback
+    # exists for. nginx is validated AFTER restore (a site fragment can't be -t'd alone).
+    if [[ -f "$latest/files/etc/nftables.conf" ]] && ! nft -c -f "$latest/files/etc/nftables.conf" 2>/dev/null; then
+        error "Backup nftables.conf has syntax errors — aborting rollback."
         exit 1
     fi
 
@@ -2857,18 +2845,34 @@ rollback() {
     local snapshot_dir
     snapshot_dir="/root/loxprox-backup-pre-rollback-$(date +%Y%m%d-%H%M%S)"
     mkdir -p "$snapshot_dir"
-    cp /etc/nftables.conf "$snapshot_dir/" 2>/dev/null || true
-    cp /etc/nginx/sites-available/loxone "$snapshot_dir/" 2>/dev/null || true
-    cp /etc/crowdsec/config.yaml "$snapshot_dir/" 2>/dev/null || true
+    cp -a /etc/nftables.conf "$snapshot_dir/" 2>/dev/null || true
+    cp -a /etc/nginx/sites-available/loxone "$snapshot_dir/" 2>/dev/null || true
+    cp -a /etc/crowdsec/config.yaml "$snapshot_dir/" 2>/dev/null || true
 
     systemctl stop nginx crowdsec crowdsec-firewall-bouncer 2>/dev/null || true
 
-    for f in "$latest"/*; do
-        local name; name=$(basename "$f")
-        cp "$f" "/etc/$name" 2>/dev/null || cp "$f" "/$name" 2>/dev/null || true
-    done
+    # H6.2: restore each file to its recorded absolute path (from the manifest).
+    local restored=0 path
+    while IFS= read -r path; do
+        [[ -n "$path" && -f "$latest/files$path" ]] || continue
+        mkdir -p "$(dirname "$path")"
+        if cp -a "$latest/files$path" "$path"; then
+            info "Restored: $path"; restored=$((restored + 1))
+        fi
+    done < "$latest/manifest.txt"
+    info "Restored $restored file(s)."
 
-    systemctl start nginx || true
+    # H6.1 (cont.): validate the full nginx config now that the backed-up site is in
+    # place; only (re)start nginx if it passes, so a bad restore can't leave it dead-looping.
+    if nginx -t 2>/dev/null; then
+        ok "nginx config valid after restore."
+        systemctl start nginx 2>/dev/null || true
+    else
+        error "nginx -t FAILS after restore — NOT starting nginx. Inspect with: nginx -t"
+    fi
+
+    # H6.3: restart everything that was stopped, not just nginx.
+    systemctl start crowdsec crowdsec-firewall-bouncer 2>/dev/null || true
     ok "Rollback from $latest complete. Pre-rollback snapshot: $snapshot_dir"
 }
 

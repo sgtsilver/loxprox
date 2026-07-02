@@ -2,8 +2,8 @@
 
 **Status:** Published on GitHub  
 **Repo:** https://github.com/sgtsilver/loxprox  
-**Version:** 1.5.1 (released)  
-**Last updated:** 2026-06-04 (v1.5.1 — token-confidentiality audit: access-log scrubbing + path redaction, TLS PFS hardening, watchdog reboot-gate, fail-safe progressive ban; all verified live)
+**Version:** 1.5.2 (released)  
+**Last updated:** 2026-06-14 (v1.5.2 — full-project-audit remediation: all 7 HIGH (progressive-ban origins, monitor sticky-abort, watchdog reboot-loop, deploy `((var++))`, SSH lockout, rollback, static-ip) + M6/M8/M9/M11 + L3/SIGPIPE; all verified live)
 
 ---
 
@@ -249,19 +249,19 @@ All 23 findings from the 2026-05-06 Ezio audit have been addressed:
 | LOW-001–LOW-012 | All fixed (mktemp, stricter IP regex, logrotate, circuit breaker, proxy_hide_header, test split, webhook rotation docs, AppSec tests, nftables comment, email delta, rollback glob) |
 
 ### Cumulative Stats
-- **Total findings resolved:** 45 (23 audit + 10 handover + 12 second sweep)
-- **Test assertions:** 213 (37 pytest + 165 deploy integration + 11 scanner) — all green as of the v2.0.0 branch
+- **Total findings resolved:** 66 (23 audit + 10 handover + 12 second sweep + 13 full-project-audit v1.5.2 + 8 v2.0 tunnel pre-release)
+- **Test assertions:** 213 (36 pytest + 166 deploy integration + 11 scanner) — all green as of v2.0.0
 
 ## Test Infrastructure
 
 ```
 tests/
 ├── run-tests.sh              # unified test runner (runs all of tests/)
-├── test_progressive_ban.py   # 23 pytest cases for ban script
+├── test_progressive_ban.py   # 22 pytest cases for ban script
 ├── test_repo_hygiene.py      # 14 repo-hygiene guards (OpSec, versions, hardware,
 │                             #   config model, dead-file refs, links, bilingual,
 │                             #   naming) — the automated audit; tracked files only
-├── test_deploy_integration.sh # 165 assertions for deploy.sh logic (incl. v2.0 tunnel)
+├── test_deploy_integration.sh # 166 assertions for deploy.sh logic (incl. v2.0 tunnel)
 └── test_detect_loxone.sh     # 11 assertions for scanner logic
 ```
 
