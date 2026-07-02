@@ -2,8 +2,8 @@
 
 **Status:** Published on GitHub  
 **Repo:** https://github.com/sgtsilver/loxprox  
-**Version:** 2.0.0 (released)  
-**Last updated:** 2026-07-02 (v2.0.0 — zero-open-ports frp tunnel (opt-in, `ENABLE_TUNNEL`), `/ws/` WebSocket template fix, Tier-2 resilience: tunnel watchdog + ACME fallback CA; token configs locked 0640 before chown; layered on top of the v1.5.2 audit)
+**Version:** 2.0.1 (released)  
+**Last updated:** 2026-07-02 (v2.0.1 — fix: deploy.sh aborted on TLS hosts when the acme.sh cron line was written in acme.sh's quoted-home form; verified by a full clean deploy on the live production VM. v2.0.0 — zero-open-ports frp tunnel (opt-in, `ENABLE_TUNNEL`), `/ws/` WebSocket template fix, Tier-2 resilience: tunnel watchdog + ACME fallback CA; token configs locked 0640 before chown; layered on top of the v1.5.2 audit)
 
 ---
 
@@ -190,7 +190,7 @@ These settings are configured on the repo and affect how code lands in `main`:
 | Branch protection on `main` | ✅ Active | Requires PR + 1 approval + all CI checks pass |
 | Dependabot (Actions) | ✅ Active | Weekly checks; auto-opens PRs for action updates |
 | Secret scanning | ⏭️ Skipped | LAN-only project; no secrets committed |
-| Releases | ✅ Published | `v1.1.0`, `v1.2.0`, `v1.2.1`, `v1.3.1`, `v1.3.2`, `v1.3.3`, `v1.3.4`, `v1.5.0`, `v1.5.1`, `v1.5.2`, `v2.0.0` (latest). v1.3.0 was withdrawn — do not install. v1.4.0 and the v1.6.x same-day tags were retired and consolidated into v1.5.0 (see CHANGELOG). See [Releases](https://github.com/sgtsilver/loxprox/releases). |
+| Releases | ✅ Published | `v1.1.0`, `v1.2.0`, `v1.2.1`, `v1.3.1`, `v1.3.2`, `v1.3.3`, `v1.3.4`, `v1.5.0`, `v1.5.1`, `v1.5.2`, `v2.0.0`, `v2.0.1` (latest). v1.3.0 was withdrawn — do not install. v1.4.0 and the v1.6.x same-day tags were retired and consolidated into v1.5.0 (see CHANGELOG). See [Releases](https://github.com/sgtsilver/loxprox/releases). |
 
 ### Developer workflow (after branch protection)
 

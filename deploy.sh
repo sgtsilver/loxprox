@@ -1317,12 +1317,17 @@ _loxprox_ensure_acme_cron() {
     # acme.sh entry. Verify it's present after every TLS-enabled deploy and
     # reinstall via --install-cronjob if missing. Logged either way so the
     # operator can see "auto-renew is on" without grepping crontab.
+    # Match on the invariant "acme.sh --cron" substring, NOT "$ACME_HOME/acme.sh":
+    # acme.sh --install-cronjob writes the home path quoted ("/root/.acme.sh"/acme.sh
+    # --cron ...), so the path-prefixed pattern never matches its own cron line.
+    # `|| true` is mandatory (H6.4): a no-match grep exits 1, and under
+    # `set -euo pipefail` a bare pipe-assignment propagates that and aborts.
     local cron_line
-    cron_line=$(crontab -l 2>/dev/null | grep -F "$ACME_HOME/acme.sh --cron" | head -1)
+    cron_line=$(crontab -l 2>/dev/null | grep -F "acme.sh --cron" | head -1) || true
     if [[ -z "$cron_line" ]]; then
         warn "acme.sh cron line missing from root crontab — restoring."
         "$ACME_HOME/acme.sh" --install-cronjob >> "$LOG_FILE" 2>&1 || warn "acme.sh --install-cronjob failed"
-        cron_line=$(crontab -l 2>/dev/null | grep -F "$ACME_HOME/acme.sh --cron" | head -1)
+        cron_line=$(crontab -l 2>/dev/null | grep -F "acme.sh --cron" | head -1) || true
     fi
     if [[ -n "$cron_line" ]]; then
         ok "Auto-renewal cron active: $cron_line"

@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 > **v1.3.0 was withdrawn on 2026-05-18 — do not use.** The systemd unit change in v1.3.0 (moving `StartLimit*` from `[Service]` to `[Unit]`) activated a previously-silent `StartLimitBurst=3` that, combined with the watchdog's 60-second timer and `FailureAction=reboot`, caused an unbounded reboot loop on the 4th start. **v1.3.1 supersedes v1.3.0** and contains the same fixes plus the burst-value correction. Install v1.3.1 or later.
 
+## [2.0.1] — 2026-07-02
+
+### Fixed
+
+- **deploy.sh aborted mid-run on TLS-enabled hosts.** `_loxprox_ensure_acme_cron`
+  grepped the root crontab for `"$ACME_HOME/acme.sh --cron"`, but acme.sh's
+  `--install-cronjob` writes the home path quoted (`"/root/.acme.sh"/acme.sh --cron …`),
+  so the path-prefixed pattern never matched its own cron line. A no-match `grep`
+  exits 1, and under `set -euo pipefail` a bare pipe-assignment
+  (`cron_line=$(… | grep | head)`) propagates that as a hard exit — aborting the
+  deploy immediately after cert install, before the SSH-hardening, tunnel/network
+  watchdog, health-check and summary steps could run. Now matches the invariant
+  `acme.sh --cron` substring and guards both assignments with `|| true` (the H6.4
+  no-match-must-not-abort pattern already used elsewhere in deploy.sh). Verified by
+  a full clean deploy on a live TLS host.
+
 ## [2.0.0] — 2026-07-02 (tunnel hardening & WebSocket support)
 
 The v2.0 theme: remote access for connections that cannot forward a port
