@@ -7,8 +7,8 @@ authors:
   - name: "sgtsilver"
 repository-code: "https://github.com/sgtsilver/loxprox"
 license: LicenseRef-NC
-version: 1.5.2
-date-released: 2026-06-14
+version: 2.0.0
+date-released: 2026-07-02
 keywords:
   - loxone
   - smart-home

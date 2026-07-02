@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 > **v1.3.0 was withdrawn on 2026-05-18 — do not use.** The systemd unit change in v1.3.0 (moving `StartLimit*` from `[Service]` to `[Unit]`) activated a previously-silent `StartLimitBurst=3` that, combined with the watchdog's 60-second timer and `FailureAction=reboot`, caused an unbounded reboot loop on the 4th start. **v1.3.1 supersedes v1.3.0** and contains the same fixes plus the burst-value correction. Install v1.3.1 or later.
 
-## [Unreleased] — v2.0.0 (tunnel hardening & WebSocket support)
+## [2.0.0] — 2026-07-02 (tunnel hardening & WebSocket support)
 
 The v2.0 theme: remote access for connections that cannot forward a port
 (CGNAT / DS-Lite), plus Tier-2 resilience. Everything is opt-in; a v1.5.x
