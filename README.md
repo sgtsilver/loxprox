@@ -53,7 +53,8 @@ LoxProx setzt sich davor und liefert die gesamte fehlende Sicherheitsschicht.
 - **Drop-in & idempotent** — ein Script; `git pull && sudo bash deploy.sh` läuft gefahrlos erneut und übersteht Upgrades (inkl. deiner nginx-Handanpassungen).
 - **Defense in Depth** — nginx Reverse-Proxy + CrowdSec IDS + AppSec WAF + nftables + AppArmor + auditd, geschichtet.
 - **Transparent** — LAN-Traffic geht direkt zum Miniserver; nur Internet-Traffic wird geprüft, lokale Nutzer werden also nie ausgebremst.
-- **Optional HTTPS auf `:1080`** — TLS-Terminierung per `acme.sh` + Let's Encrypt, deckt das No-TLS-Gerät dahinter ab.
+- **Optional HTTPS auf `:1080`** — TLS-Terminierung per `acme.sh` + Let's Encrypt (mit ZeroSSL-Fallback), deckt das No-TLS-Gerät dahinter ab.
+- **Optional Fernzugriff ohne offene Ports (v2.0)** — frp-Tunnel über einen eigenen Relay-VPS für CGNAT-/DS-Lite-Anschlüsse; selbst gehostet, ohne Abo, mit eigenem Watchdog. Siehe [Tunnel-Setup](docs/TUNNEL-SETUP.de.md).
 - **Leichtgewichtig** — läuft auf einer 1-GB-VM oder einem Raspberry Pi 3+.
 - **Selbstheilend** — ein Netzwerk-Watchdog erkennt und repariert Stack-Ausfälle automatisch.
 - **Echtzeit-Alerts** — optionale Discord-Benachrichtigungen bei Blocks, Fehlern und Anomalien.
@@ -84,7 +85,8 @@ Das Deploy-Script ist **idempotent** und upgrade-sicher — `git pull && sudo ba
 
 **Gut zu wissen:**
 - **Upgrade von v1.3.x?** Einmalig `sudo bash deploy.sh --bootstrap-config` ausführen — liest deine aktiven Werte zurück nach `/etc/loxprox/deploy.conf`. Anleitung: [`docs/UPGRADE-to-v1.5.md`](docs/UPGRADE-to-v1.5.md).
-- **HTTPS gewünscht?** `ENABLE_TLS="true"` setzen (braucht öffentlichen DNS-Namen + eine `WAN:80 → Gateway:80`-Weiterleitung für ACME). Runbook: [`docs/TLS-SETUP.md`](docs/TLS-SETUP.md).
+- **HTTPS gewünscht?** `ENABLE_TLS="true"` setzen (braucht öffentlichen DNS-Namen + eine `WAN:80 → Gateway:80`-Weiterleitung für ACME). Runbook: [`docs/TLS-SETUP.de.md`](docs/TLS-SETUP.de.md).
+- **Hinter CGNAT / DS-Lite (keine Portweiterleitung möglich)?** Den v2.0-Tunnel aktivieren: ein kleiner Relay-VPS wird zum öffentlichen Einstiegspunkt, das Gateway wählt sich ausgehend ein. Runbook: [`docs/TUNNEL-SETUP.de.md`](docs/TUNNEL-SETUP.de.md).
 - **SSH sperrt dich nicht aus.** Existiert beim ersten Lauf kein `authorized_keys`, zeigt der Installer ein interaktives Menü (Key einfügen, Hilfe beim Anlegen, oder Passwort-Auth mit Warnung behalten) und fällt bei nicht-interaktiven Deploys in einen sicheren Modus. Details: [`CONFIGURATION-GUIDE.de.md`](CONFIGURATION-GUIDE.de.md) → „SSH Key Bootstrap".
 
 ---
@@ -98,7 +100,14 @@ LAN ─────────────────────────�
 
 **Design-Prinzip:** LAN-Geräte erreichen den Miniserver direkt; nur Internet-Traffic läuft durch das Gateway. Heißt: lokale Nutzer bleiben unberührt, und das Gateway konzentriert sich voll auf externe Bedrohungen. Jeder externe Request wird rate-limitiert, durch die CrowdSec-AppSec-WAF geschickt und gegen die Community-Blocklist geprüft, bevor nginx ihn überhaupt an den Miniserver weiterreicht.
 
-> **Was kommt als Nächstes?** Wir haben überlegt, ob LoxProx eines Tages Gen-1-Miniserver ohne VPN und ohne Hardware-Upgrade nach außen anbinden könnte. Die Recherche ging tiefer als erwartet. Die ganze Geschichte (samt aller Vorbehalte) steht in [#4](https://github.com/sgtsilver/loxprox/issues/4).
+**Kein Port-Forward möglich (CGNAT / DS-Lite)?** Seit v2.0 gibt es einen zweiten Weg nach draußen — die in [#4](https://github.com/sgtsilver/loxprox/issues/4) angeteaserte Recherche ist jetzt Feature:
+
+```
+App ──► https://deine-domain (Relay-VPS:443) ──► frp-Tunnel ──► Gateway:1080 ──► Loxone:80
+                                                  (ausgehend von zu Hause aufgebaut)
+```
+
+Das Gateway wählt sich ausgehend bei einem selbst gehosteten Relay-VPS ein; am Router muss kein einziger Port geöffnet werden. TLS terminiert am Relay, der komplette Security-Stack des Gateways bleibt auf dem Pfad, und das Relay ergänzt einen eigenen CrowdSec-Perimeter. Einrichtung in zwei Schritten: [`tunnel-relay/install-relay.sh`](tunnel-relay/README.de.md) auf dem VPS, dann `ENABLE_TUNNEL="true"` auf dem Gateway. Vollständiges Runbook: [Tunnel-Setup](docs/TUNNEL-SETUP.de.md).
 
 ---
 
@@ -137,6 +146,7 @@ RATE_LIMIT_BURST="100"
 ENABLE_APPSEC="true"
 APPSEC_MODE="enforce"                      # „monitor" oder „enforce"
 ENABLE_TLS="false"                         # optionales HTTPS auf :1080 (siehe TLS-SETUP)
+ENABLE_TUNNEL="false"                      # optionaler Fernzugriff ohne offene Ports (siehe TUNNEL-SETUP)
 DISCORD_WEBHOOK_URL=""                     # optionales Alerting — leer lassen zum Überspringen
 ```
 
@@ -232,6 +242,8 @@ Das komplette Incident-Response-Playbook steht in [`SECURITY.de.md`](SECURITY.de
 | [Installation für Linux-Einsteiger](docs/INSTALL-FOR-NEWBIES.de.md) · [EN](docs/INSTALL-FOR-NEWBIES.md) | Sanfte, jargonfreie Schritt-für-Schritt-Anleitung |
 | [Konfigurations-Guide](CONFIGURATION-GUIDE.de.md) · [EN](CONFIGURATION-GUIDE.md) | Jede `deploy.conf`-Einstellung erklärt |
 | [TLS-Setup](docs/TLS-SETUP.de.md) · [EN](docs/TLS-SETUP.md) | HTTPS auf `:1080` per acme.sh aktivieren |
+| [Tunnel-Setup](docs/TUNNEL-SETUP.de.md) · [EN](docs/TUNNEL-SETUP.md) | v2.0: Fernzugriff ohne offene Ports (CGNAT/DS-Lite) über einen Relay-VPS |
+| [Familien-Onboarding](docs/FAMILY-ONBOARDING.de.md) · [EN](docs/FAMILY-ONBOARDING.md) | QR-Code-Anbindung für Familien-Handys, Split-Horizon-DNS-Hinweise |
 | [Upgrade auf v1.5](docs/UPGRADE-to-v1.5.de.md) · [EN](docs/UPGRADE-to-v1.5.md) | Migration von v1.3.x (Config-Bootstrap) |
 | [Security](SECURITY.de.md) · [EN](SECURITY.md) | Bedrohungsmodell, Incident Response, Härtung |
 | [Phasen-Guides](phase1-hardening.de.md) | [1: Härtung](phase1-hardening.de.md) · [3: Cutover](phase3-cutover.de.md) · [4: Monitoring](phase4-monitoring.de.md) |

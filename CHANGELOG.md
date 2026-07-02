@@ -4,7 +4,67 @@ All notable changes to this project will be documented in this file.
 
 > **v1.3.0 was withdrawn on 2026-05-18 — do not use.** The systemd unit change in v1.3.0 (moving `StartLimit*` from `[Service]` to `[Unit]`) activated a previously-silent `StartLimitBurst=3` that, combined with the watchdog's 60-second timer and `FailureAction=reboot`, caused an unbounded reboot loop on the 4th start. **v1.3.1 supersedes v1.3.0** and contains the same fixes plus the burst-value correction. Install v1.3.1 or later.
 
-## [Unreleased]
+## [Unreleased] — v2.0.0 (tunnel hardening & WebSocket support)
+
+The v2.0 theme: remote access for connections that cannot forward a port
+(CGNAT / DS-Lite), plus Tier-2 resilience. Everything is opt-in; a v1.5.x
+install upgrades with zero behavior change until `ENABLE_TUNNEL` is flipped.
+
+### Added
+
+- **Zero-open-ports remote access via frp (opt-in, `ENABLE_TUNNEL`)** — the
+  gateway dials OUT to an operator-owned relay VPS (ADR-0002); the Loxone app
+  connects to the relay's domain. New `deploy.sh` tunnel module: pinned +
+  SHA256-verified frpc install (v0.69.1, amd64/arm64), `/etc/frp/frpc.toml`
+  (0640, token-authenticated, QUIC or TCP transport), hardened `frpc.service`
+  (dedicated unprivileged user, `ProtectSystem=strict`, empty capability set,
+  syscall filter, `MemoryMax=256M`), toggle-off + `--remove-tunnel` re-entry
+  point. Runbook: `docs/TUNNEL-SETUP.md`.
+- **Relay-side installer (`tunnel-relay/install-relay.sh`)** — one-shot
+  Debian 12 VPS setup: nftables input-drop, frps (pinned + verified,
+  sandboxed, `proxyBindAddr=127.0.0.1` so only nginx is public), nginx TLS
+  entry point with WS support and perimeter rate limits, scrubbed access-log
+  format (v1.5.1 token-confidentiality carried over to the relay), CrowdSec +
+  firewall bouncer (perimeter enforcement — where bans against tunneled
+  attackers actually bite), unattended upgrades. Config template:
+  `tunnel-relay/relay.conf.example`.
+- **Tunnel watchdog (`security-monitoring/tunnel-watchdog.{sh,service,timer}`)**
+  — 60s cycle: frpc service + full public-path probe, self-heal via frpc
+  restart, Discord CRITICAL alert rate-limited to 1/hour, recovery report.
+  Never reboots (a dead tunnel is a relay/ISP problem; LAN access is
+  unaffected).
+- **Real-IP restoration for tunneled traffic**
+  (`/etc/nginx/conf.d/loxprox-tunnel-realip.conf`) — trusts `X-Forwarded-For`
+  from loopback only, `real_ip_recursive off`; rate limits, access logs,
+  CrowdSec and the AppSec header see true client IPs instead of 127.0.0.1.
+- **Dedicated `/ws/` nginx location in the generated site** — the Loxone
+  native WebSocket endpoint gets 24h read/send timeouts and
+  `proxy_buffering off`; the server-wide ~15s slowloris timeouts previously
+  killed idle event sockets on freshly generated configs (production had it
+  hand-added; the template now matches). AppSec still inspects the upgrade
+  handshake.
+- **ACME fallback CA (`TLS_ACME_FALLBACK_SERVER`, default `zerossl`)** — a
+  Let's Encrypt outage or rate limit no longer takes cert issuance down;
+  applies to gateway (`setup_tls`) and relay alike.
+- **Family onboarding guide (`docs/FAMILY-ONBOARDING.md`)** — QR-code deep
+  link (`loxone://ms?host=…`), per-member credentials advice, one-URL app
+  limitation + split-horizon DNS mitigations.
+- **Docs (bilingual EN/DE):** `docs/TUNNEL-SETUP`, `docs/FAMILY-ONBOARDING`,
+  `tunnel-relay/README`; new tunnel sections in README, CONFIGURATION-GUIDE
+  and SECURITY (threat model: enforcement point moves to the relay for
+  tunneled traffic).
+
+### Changed
+
+- `deploy.sh` gains config keys `ENABLE_TUNNEL`, `TUNNEL_SERVER_ADDR`,
+  `TUNNEL_SERVER_PORT`, `TUNNEL_PROTOCOL`, `TUNNEL_TOKEN`,
+  `TUNNEL_PROXY_NAME`, `TUNNEL_REMOTE_PORT`, `TUNNEL_PUBLIC_HOST`,
+  `TLS_ACME_FALLBACK_SERVER` (all defaulted — existing deploy.conf files
+  keep working unchanged), health-check/summary coverage for frpc + tunnel
+  watchdog, and runtime-config passthrough for the watchdog.
+- `ENABLE_TLS=true` + `ENABLE_TUNNEL=true` is refused with a clear error:
+  with the tunnel, TLS terminates at the relay (split-horizon wildcard via
+  DNS-01 is the tracked follow-up).
 
 ## [1.5.1] — 2026-06-04
 

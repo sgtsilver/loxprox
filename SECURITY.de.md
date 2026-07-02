@@ -58,6 +58,16 @@ Das Gateway terminiert TLS auf `:1080` und proxyt **Klartext-HTTP** zum Miniserv
 
 Das Gateway exponiert `:22` ausschließlich gegenüber `SSH_ALLOWED_SUBNETS` via nftables. Aus dem Internet ist SSH auf diesem Host nie sichtbar — es gibt **keinen** `endlessh`-artigen Tarpit, weil es auf Port 22 keine öffentliche Angriffsfläche gibt, die ihn absorbieren müsste. Die Härtung greift ausschließlich im Inside-the-LAN-Angreifer-Szenario: ein kompromittiertes Laptop, Smart-TV oder IoT-Toaster, der vom LAN aufs Gateway pivotieren will. `deploy.sh` liefert ein CIS-Debian-12-§5.2-Drop-in (Key-only, kein Root, VERBOSE-Log) inklusive First-Deploy-Bootstrap, der das Lock-yourself-out-Henne-Ei-Problem verhindert (siehe `CONFIGURATION-GUIDE.md` → "SSH Key Bootstrap").
 
+### Tunnel-Pfad (v2.0, optional) — wo die Durchsetzung lebt
+
+Mit `ENABLE_TUNNEL=true` (siehe [`docs/TUNNEL-SETUP.de.md`](docs/TUNNEL-SETUP.de.md)) kommt externer Traffic über einen betreibereigenen Relay-VPS herein und erreicht das nginx des Gateways **über Loopback** (den frpc-Prozess). Drei Konsequenzen sind fürs Bedrohungsmodell relevant:
+
+1. **Gateway-seitige nftables-Bans können getunnelte Angreifer nicht aussperren** — deren Pakete kreuzen nie das WAN-Interface des Gateways. Die Perimeter-Durchsetzung lebt deshalb auf dem **Relay** (eigenes CrowdSec + Firewall-Bouncer, von `install-relay.sh` standardmäßig installiert), wo die echte Quell-IP sichtbar ist. AppSec-WAF, Rate Limits und CrowdSec-*Erkennung* des Gateways greifen weiterhin für jede getunnelte Anfrage — echte Client-IPs werden via `X-Forwarded-For` wiederhergestellt, nur von Loopback vertraut, mit `real_ip_recursive off` (ein vom Client mitgeschickter Header kann die Quelle nicht fälschen).
+2. **Das Relay ist Angriffsfläche in eigener Hand.** Es folgt derselben Philosophie wie das Gateway: nftables Input-Drop, versionsgepinnte SHA256-verifizierte Binaries, gesandboxte systemd-Units, Unattended Upgrades, CrowdSec mit Community-Blocklisten. Ein kompromittiertes Relay kann externen Traffic beobachten und manipulieren (es terminiert TLS), besitzt aber keine Miniserver-Zugangsdaten und erreicht im LAN nichts außer dem einen getunnelten Port.
+3. **Das Tunnel-Token ist ein Credential.** Wer es besitzt, kann einen fremden frpc mit dem Relay verbinden; `proxyBindAddr = 127.0.0.1` plus `allowPorts` begrenzen den Schaden auf das Kapern des einen Loopback-Ports (Denial of Service / Traffic-Interception am Relay). Auf beiden Seiten 0640 gespeichert; jährlich und bei jedem Verdacht rotieren.
+
+frpc selbst läuft auf dem Gateway als dedizierter unprivilegierter Benutzer in einer strikten systemd-Sandbox (`ProtectSystem=strict`, leeres Capability-Set, `@system-service`-Syscall-Filter, `MemoryMax=256M`) — ein kompromittierter frpc-Prozess kann außerhalb seines Laufzeit-States nichts schreiben und nicht eskalieren.
+
 ### Was der Miniserver NICHT kann (Gen-1-Grenzen)
 
 - Kein HTTPS/TLS (Hardware verkraftet die SSL-CPU-Last nicht)

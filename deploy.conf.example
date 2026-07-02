@@ -183,12 +183,63 @@ TLS_EMAIL=""
 #   - "zerossl"          → ZeroSSL production (default in upstream acme.sh)
 TLS_ACME_SERVER="letsencrypt"
 
+# v2.0 — Secondary CA tried automatically when the primary --issue fails
+# (CA outage, rate limit). acme.sh registers the ZeroSSL account on the fly
+# using TLS_EMAIL — no manual EAB credentials needed. Set to "" to disable.
+TLS_ACME_FALLBACK_SERVER="zerossl"
+
 # Extra arguments passed through to `acme.sh --issue`. Empty by default.
 #   Examples:
 #     "--keylength ec-256"       # request an ECDSA cert instead of RSA
 #     "--debug"                  # noisy logs during issuance
 #     "--days 60"                # custom renewal threshold
 TLS_ACME_EXTRA=""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# OPTIONAL — Tunnel (v2.0): zero-open-ports remote access via a relay VPS
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# For connections where no port can be forwarded (CGNAT / DS-Lite). The
+# gateway dials OUT to your own relay VPS (set up with
+# tunnel-relay/install-relay.sh); the Loxone app connects to the relay's
+# domain. No router configuration needed at all.
+# Full runbook: docs/TUNNEL-SETUP.md
+#
+# NOTE: ENABLE_TUNNEL=true and ENABLE_TLS=true are mutually exclusive in
+# v2.0 — with the tunnel, TLS terminates at the relay.
+#
+# Manual operations:
+#   sudo bash deploy.sh --remove-tunnel   # full removal — binary, config, units
+#
+
+# Enable the frp tunnel. Default: false (classic router port-forward path).
+ENABLE_TUNNEL="false"
+
+# [REQUIRED if enabled] Relay VPS public IP or DNS name (the frps host).
+TUNNEL_SERVER_ADDR=""
+
+# frp control-channel port on the relay. Must match FRP_BIND_PORT there.
+# The relay listens on this port number for BOTH tcp and quic (udp).
+TUNNEL_SERVER_PORT="7000"
+
+# Tunnel transport: "quic" (UDP; NAT-friendly, connection migration —
+# recommended) or "tcp" (fallback for networks that drop UDP).
+TUNNEL_PROTOCOL="quic"
+
+# [REQUIRED if enabled] Shared tunnel secret — SAME value as TUNNEL_TOKEN in
+# the relay's /etc/loxprox-relay/relay.conf. Generate: openssl rand -hex 32
+TUNNEL_TOKEN=""
+
+# Proxy name inside frp (cosmetic, shows up in frps logs).
+TUNNEL_PROXY_NAME="loxone"
+
+# Loopback-bound port on the relay that carries tunneled traffic to its
+# nginx. Must match TUNNEL_REMOTE_PORT in the relay's relay.conf.
+TUNNEL_REMOTE_PORT="8443"
+
+# Public domain served by the relay (its RELAY_DOMAIN). Used by the tunnel
+# watchdog for full-path health probes and printed in the deploy summary.
+TUNNEL_PUBLIC_HOST=""
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # OPTIONAL — Maintenance

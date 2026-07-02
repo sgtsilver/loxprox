@@ -8,8 +8,8 @@ broken internal links, bilingual-pair completeness, naming casing, and
 deprecated patterns.
 
 SCOPE: only files **tracked by git** are checked — i.e. the public GitHub
-deployment. The gitignored `local-deployment/` (the live wiener gateway's real
-config) is never enumerated by `git ls-files`, so it can hold whatever it wants.
+deployment. The gitignored `local-deployment/` (the live production gateway's
+real config) is never enumerated by `git ls-files`, so it can hold whatever it wants.
 
 Run: `pytest tests/test_repo_hygiene.py -v`  (or the whole `tests/` dir).
 """
@@ -85,7 +85,7 @@ def fmt(violations):
 
 # ── 1. OpSec: no real production details in the public repo ───────────────────
 
-# Real prod identifiers for the live wiener gateway. These must NEVER appear in a
+# Real prod identifiers for the live production gateway. These must NEVER appear in a
 # tracked (public) file. Placeholders (192.168.1.x, 10.0.0.x, 1.2.3.4) and the
 # generic DDNS provider name "selfhost.eu" are fine and deliberately not matched.
 OPSEC_FORBIDDEN = [
@@ -281,6 +281,13 @@ MONOLINGUAL_OK = {
     "grafana-integration/README.md",        # optional add-on, EN-only
 }
 
+# Directory prefixes that are exempt as a class:
+#   audits/   — append-only audit history
+#   docs/adr/ — architecture decision records; ADRs are immutable-once-accepted
+#               single-language records by convention (translating append-only
+#               history would double maintenance for zero operator value)
+MONOLINGUAL_OK_PREFIXES = ("audits/", "docs/adr/")
+
 
 def test_bilingual_pairs_complete():
     missing = []
@@ -289,7 +296,7 @@ def test_bilingual_pairs_complete():
         if a in tracked_files() and b not in tracked_files():
             missing.append(f"{a} has no {b}")
     for f in md_files():
-        if f in MONOLINGUAL_OK or f.startswith("audits/"):
+        if f in MONOLINGUAL_OK or f.startswith(MONOLINGUAL_OK_PREFIXES):
             continue
         if f.endswith(".de.md"):
             en = f[:-6] + ".md"

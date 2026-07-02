@@ -34,12 +34,14 @@ Internet ──► Router:1080 ──► Gateway:1080 ──► Loxone:80
 
 | File | Purpose |
 |------|---------|
-| `deploy.sh` | One-shot Debian 12 hardening & installation (~2550 lines, idempotent) |
+| `deploy.sh` | One-shot Debian 12 hardening & installation (~3000 lines, idempotent) |
 | `detect-loxone.sh` | Network autodetector — finds your Miniserver by MAC OUI and API fingerprint |
 | `test-gateway.sh` | 50+ automated checks — run after deploy to verify every control |
 | `set-static-ip.sh` | Pre-deploy VM network configuration |
 | `security-monitoring/` | Discord alerts, health monitor, config backup, GeoIP block script, network watchdog |
 | `security-monitoring/network-watchdog.sh` | Self-healing network stack monitor |
+| `security-monitoring/tunnel-watchdog.sh` | v2.0: self-healing frp-tunnel monitor (restart + Discord alert, no reboots) |
+| `tunnel-relay/install-relay.sh` | v2.0: one-shot relay-VPS installer (frps + nginx TLS + CrowdSec perimeter) |
 | `security-monitoring/network-watchdog.service` | systemd system service (root) |
 | `security-monitoring/network-watchdog.timer` | Runs watchdog every 60 seconds |
 
@@ -248,7 +250,7 @@ All 23 findings from the 2026-05-06 Ezio audit have been addressed:
 
 ### Cumulative Stats
 - **Total findings resolved:** 45 (23 audit + 10 handover + 12 second sweep)
-- **Test assertions:** 165 (37 pytest + 117 deploy integration + 11 scanner) — all green as of v1.5.1
+- **Test assertions:** 213 (37 pytest + 165 deploy integration + 11 scanner) — all green as of the v2.0.0 branch
 
 ## Test Infrastructure
 
@@ -259,7 +261,7 @@ tests/
 ├── test_repo_hygiene.py      # 14 repo-hygiene guards (OpSec, versions, hardware,
 │                             #   config model, dead-file refs, links, bilingual,
 │                             #   naming) — the automated audit; tracked files only
-├── test_deploy_integration.sh # 117 assertions for deploy.sh logic
+├── test_deploy_integration.sh # 165 assertions for deploy.sh logic (incl. v2.0 tunnel)
 └── test_detect_loxone.sh     # 11 assertions for scanner logic
 ```
 

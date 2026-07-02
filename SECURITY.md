@@ -58,6 +58,16 @@ The gateway terminates TLS on `:1080` and proxies **plaintext HTTP** to the Mini
 
 The gateway exposes `:22` only to `SSH_ALLOWED_SUBNETS` via nftables. The internet never sees SSH on this host — there is **no** `endlessh`-style tarpit because there is no public attack surface on port 22 to absorb. The hardening matters for the inside-the-LAN attacker scenario only: a compromised laptop, smart-TV, or IoT toaster trying to pivot from the LAN to the gateway. `deploy.sh` ships a CIS Debian 12 §5.2 drop-in (key-only, no root, VERBOSE log) with a first-deploy bootstrap that prevents the lock-yourself-out chicken-and-egg (see `CONFIGURATION-GUIDE.md` → "SSH Key Bootstrap").
 
+### Tunnel path (v2.0, optional) — where enforcement lives
+
+With `ENABLE_TUNNEL=true` (see [`docs/TUNNEL-SETUP.md`](docs/TUNNEL-SETUP.md)) external traffic enters via an operator-owned relay VPS and reaches the gateway's nginx **from loopback** (the frpc process). Three consequences matter for the threat model:
+
+1. **Gateway-side nftables bans cannot drop tunneled attackers** — their packets never cross the gateway's WAN interface. Perimeter enforcement therefore lives on the **relay** (its own CrowdSec + firewall bouncer, installed by default by `install-relay.sh`), where the true source IP is visible. The gateway's AppSec WAF, rate limits and CrowdSec *detection* still apply to every tunneled request — real client IPs are restored via `X-Forwarded-For`, trusted from loopback only with `real_ip_recursive off` (a client-supplied header cannot spoof its source).
+2. **The relay is attack surface you own.** It runs the same philosophy as the gateway: nftables input-drop, version-pinned SHA256-verified binaries, sandboxed systemd units, unattended upgrades, CrowdSec with community blocklists. A compromised relay can observe and manipulate external traffic (it terminates TLS) but holds no Miniserver credentials and cannot reach the LAN beyond the single tunneled port.
+3. **The tunnel token is a credential.** Anyone holding it can connect a rogue frpc to your relay; `proxyBindAddr = 127.0.0.1` plus `allowPorts` limit the blast radius to hijacking the one loopback port (denial of service / traffic interception at the relay). Stored 0640 on both sides; rotate yearly and on any suspicion.
+
+frpc itself runs on the gateway as a dedicated unprivileged user under a strict systemd sandbox (`ProtectSystem=strict`, empty capability set, `@system-service` syscall filter, `MemoryMax=256M`) — a compromised frpc process cannot write outside its runtime state or escalate.
+
 ### What the Miniserver CANNOT Do (Gen 1 Limitations)
 
 - No HTTPS/TLS (hardware can't handle SSL CPU load)

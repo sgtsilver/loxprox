@@ -622,6 +622,192 @@ test_tls_acme_listener_written() {
     ACME_WEBROOT="$saved_webroot"
 }
 
+# ── v2.0 — tunnel module ─────────────────────────────────────────────────────
+
+test_tunnel_validate_config() {
+    echo ""
+    echo "━━━ _loxprox_tunnel_validate_config() ━━━"
+
+    # Baseline: everything valid.
+    ENABLE_TLS="false"
+    TUNNEL_SERVER_ADDR="203.0.113.10"
+    TUNNEL_SERVER_PORT="7000"
+    TUNNEL_PROTOCOL="quic"
+    TUNNEL_TOKEN="deadbeefdeadbeefdeadbeefdeadbeef"
+    TUNNEL_PROXY_NAME="loxone"
+    TUNNEL_REMOTE_PORT="8443"
+    if _loxprox_tunnel_validate_config 2>/dev/null; then pass "valid config accepted"; else fail "valid config rejected"; fi
+
+    TUNNEL_SERVER_ADDR=""
+    if ! _loxprox_tunnel_validate_config 2>/dev/null; then pass "empty server addr rejected"; else fail "empty server addr accepted"; fi
+    TUNNEL_SERVER_ADDR="203.0.113.10"
+
+    TUNNEL_TOKEN=""
+    if ! _loxprox_tunnel_validate_config 2>/dev/null; then pass "empty token rejected"; else fail "empty token accepted"; fi
+    TUNNEL_TOKEN="deadbeefdeadbeefdeadbeefdeadbeef"
+
+    TUNNEL_SERVER_PORT="99999"
+    if ! _loxprox_tunnel_validate_config 2>/dev/null; then pass "port >65535 rejected"; else fail "port >65535 accepted"; fi
+    TUNNEL_SERVER_PORT="abc"
+    if ! _loxprox_tunnel_validate_config 2>/dev/null; then pass "non-numeric port rejected"; else fail "non-numeric port accepted"; fi
+    TUNNEL_SERVER_PORT="7000"
+
+    TUNNEL_PROTOCOL="carrier-pigeon"
+    if ! _loxprox_tunnel_validate_config 2>/dev/null; then pass "unknown protocol rejected"; else fail "unknown protocol accepted"; fi
+    TUNNEL_PROTOCOL="tcp"
+    if _loxprox_tunnel_validate_config 2>/dev/null; then pass "tcp protocol accepted"; else fail "tcp protocol rejected"; fi
+    TUNNEL_PROTOCOL="quic"
+
+    TUNNEL_PROXY_NAME="bad name;rm -rf"
+    if ! _loxprox_tunnel_validate_config 2>/dev/null; then pass "shell-metachar proxy name rejected"; else fail "shell-metachar proxy name accepted"; fi
+    TUNNEL_PROXY_NAME="loxone"
+
+    # v2.0 hard limitation: gateway TLS + tunnel are mutually exclusive.
+    ENABLE_TLS="true"
+    if ! _loxprox_tunnel_validate_config 2>/dev/null; then pass "ENABLE_TLS+ENABLE_TUNNEL combination refused"; else fail "ENABLE_TLS+ENABLE_TUNNEL combination accepted"; fi
+    ENABLE_TLS="false"
+}
+
+test_tunnel_frpc_config_generation() {
+    echo ""
+    echo "━━━ _loxprox_write_frpc_config() ━━━"
+
+    FRP_DIR="$MOCK_ROOT/etc/frp"
+    FRPC_CONF="$FRP_DIR/frpc.toml"
+    TUNNEL_SERVER_ADDR="203.0.113.10"
+    TUNNEL_SERVER_PORT="7000"
+    TUNNEL_PROTOCOL="quic"
+    TUNNEL_TOKEN="deadbeefdeadbeefdeadbeefdeadbeef"
+    TUNNEL_PROXY_NAME="loxone"
+    TUNNEL_REMOTE_PORT="8443"
+
+    _loxprox_write_frpc_config
+
+    if [[ -f "$FRPC_CONF" ]]; then pass "frpc.toml written"; else fail "frpc.toml missing"; fi
+    grep -q 'serverAddr = "203.0.113.10"' "$FRPC_CONF" && pass "serverAddr rendered" || fail "serverAddr missing"
+    grep -q 'serverPort = 7000' "$FRPC_CONF" && pass "serverPort rendered" || fail "serverPort missing"
+    grep -q 'auth.token = "deadbeefdeadbeefdeadbeefdeadbeef"' "$FRPC_CONF" && pass "token rendered" || fail "token missing"
+    grep -q 'transport.protocol = "quic"' "$FRPC_CONF" && pass "quic transport rendered" || fail "transport missing"
+    grep -q 'transport.tls.enable = true' "$FRPC_CONF" && pass "transport TLS enabled" || fail "transport TLS missing"
+    grep -q 'localIP = "127.0.0.1"' "$FRPC_CONF" && pass "localIP loopback" || fail "localIP wrong"
+    grep -q 'localPort = 1080' "$FRPC_CONF" && pass "localPort 1080" || fail "localPort wrong"
+    grep -q 'remotePort = 8443' "$FRPC_CONF" && pass "remotePort rendered" || fail "remotePort missing"
+
+    # Token file must be group-readable at most (0640).
+    local mode
+    mode=$(stat -c '%a' "$FRPC_CONF" 2>/dev/null || stat -f '%OLp' "$FRPC_CONF" 2>/dev/null)
+    [[ "$mode" == "640" ]] && pass "frpc.toml mode 0640" || fail "frpc.toml mode is $mode (expected 640)"
+}
+
+test_tunnel_frpc_unit_hardening() {
+    echo ""
+    echo "━━━ _loxprox_write_frpc_unit() ━━━"
+
+    FRPC_UNIT="$MOCK_ROOT/etc/systemd/system/frpc.service"
+    mkdir -p "$(dirname "$FRPC_UNIT")"
+    _loxprox_write_frpc_unit
+
+    if [[ -f "$FRPC_UNIT" ]]; then pass "frpc.service written"; else fail "frpc.service missing"; fi
+    grep -q '^User=frpc' "$FRPC_UNIT" && pass "runs as unprivileged user" || fail "User=frpc missing"
+    grep -q '^ProtectSystem=strict' "$FRPC_UNIT" && pass "ProtectSystem=strict" || fail "ProtectSystem missing"
+    grep -q '^CapabilityBoundingSet=$' "$FRPC_UNIT" && pass "empty capability set" || fail "CapabilityBoundingSet not empty"
+    grep -q '^SystemCallFilter=@system-service' "$FRPC_UNIT" && pass "syscall filter present" || fail "syscall filter missing"
+    grep -q '^MemoryMax=256M' "$FRPC_UNIT" && pass "memory cap present" || fail "memory cap missing"
+    grep -q '^Restart=always' "$FRPC_UNIT" && pass "Restart=always" || fail "Restart=always missing"
+    grep -q '^StartLimitIntervalSec=0' "$FRPC_UNIT" && pass "no start-limit lockout (keeps retrying)" || fail "StartLimitIntervalSec=0 missing"
+    grep -q '^NoNewPrivileges=true' "$FRPC_UNIT" && pass "NoNewPrivileges" || fail "NoNewPrivileges missing"
+}
+
+test_tunnel_realip_conf() {
+    echo ""
+    echo "━━━ _loxprox_write_tunnel_realip_conf() ━━━"
+
+    NGINX_TUNNEL_CONF="$MOCK_ROOT/etc/nginx/conf.d/loxprox-tunnel-realip.conf"
+    _loxprox_write_tunnel_realip_conf
+
+    if [[ -f "$NGINX_TUNNEL_CONF" ]]; then pass "realip conf written"; else fail "realip conf missing"; fi
+    grep -q 'set_real_ip_from 127.0.0.1;' "$NGINX_TUNNEL_CONF" && pass "trusts loopback only" || fail "set_real_ip_from wrong"
+    grep -q 'real_ip_header X-Forwarded-For;' "$NGINX_TUNNEL_CONF" && pass "XFF header source" || fail "real_ip_header wrong"
+    grep -q 'real_ip_recursive off;' "$NGINX_TUNNEL_CONF" && pass "recursive off (spoof-proof)" || fail "real_ip_recursive wrong"
+    # Must NOT trust any non-loopback source.
+    if grep 'set_real_ip_from' "$NGINX_TUNNEL_CONF" | grep -vq '127\.0\.0\.1'; then
+        fail "unexpected extra trusted proxy"
+    else
+        pass "no extra trusted proxies"
+    fi
+}
+
+test_nginx_ws_location() {
+    echo ""
+    echo "━━━ configure_nginx() — /ws/ WebSocket location (v2.0) ━━━"
+
+    # Force a FRESH generation — the preserve-operator-edits guard would
+    # otherwise keep the site file from the earlier test.
+    rm -f "$NGINX_SITE"
+    configure_nginx
+
+    grep -q 'location /ws/ {' "$NGINX_SITE" && pass "/ws/ location present" || fail "/ws/ location missing"
+    grep -q 'proxy_read_timeout  86400s;' "$NGINX_SITE" && pass "24h read timeout on /ws/" || fail "24h read timeout missing"
+    grep -q 'proxy_send_timeout  86400s;' "$NGINX_SITE" && pass "24h send timeout on /ws/" || fail "24h send timeout missing"
+    grep -q 'proxy_buffering     off;' "$NGINX_SITE" && pass "buffering off on /ws/" || fail "buffering off missing"
+    # AppSec must still guard the WS handshake (two auth_request lines: / and /ws/).
+    local auth_count
+    auth_count=$(grep -c 'auth_request      /crowdsec-appsec;' "$NGINX_SITE")
+    [[ "$auth_count" -eq 2 ]] && pass "AppSec guards both / and /ws/" || fail "expected 2 auth_request lines, got $auth_count"
+}
+
+test_acme_fallback_ca() {
+    echo ""
+    echo "━━━ _loxprox_acme_issue() — fallback CA (v2.0) ━━━"
+
+    # Mock acme.sh: fails for letsencrypt, succeeds for zerossl.
+    local saved_home="$ACME_HOME"
+    ACME_HOME="$MOCK_ROOT/acme-home"
+    mkdir -p "$ACME_HOME"
+    cat > "$ACME_HOME/acme.sh" <<'MOCK'
+#!/bin/bash
+server=""
+prev=""
+for a in "$@"; do
+    [[ "$prev" == "--server" ]] && server="$a"
+    prev="$a"
+done
+[[ "$server" == "zerossl" ]] && exit 0
+exit 1
+MOCK
+    chmod +x "$ACME_HOME/acme.sh"
+
+    TLS_DOMAIN="loxprox.example.com"
+    TLS_ACME_SERVER="letsencrypt"
+    TLS_ACME_FALLBACK_SERVER="zerossl"
+    ACME_WEBROOT="$MOCK_ROOT/var/www/acme"
+    mkdir -p "$ACME_WEBROOT"
+
+    if _loxprox_acme_issue >/dev/null 2>&1; then
+        pass "primary CA failure falls back to zerossl"
+    else
+        fail "fallback CA not used on primary failure"
+    fi
+
+    TLS_ACME_FALLBACK_SERVER=""
+    if ! _loxprox_acme_issue >/dev/null 2>&1; then
+        pass "no fallback configured → failure propagates"
+    else
+        fail "issue succeeded despite failing primary and no fallback"
+    fi
+
+    # Primary success path (mock returns 0 for zerossl as primary).
+    TLS_ACME_FALLBACK_SERVER="zerossl"
+    TLS_ACME_SERVER="zerossl"
+    if _loxprox_acme_issue >/dev/null 2>&1; then
+        pass "primary success path intact"
+    else
+        fail "primary success path broken"
+    fi
+    TLS_ACME_SERVER="letsencrypt"
+    ACME_HOME="$saved_home"
+}
+
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 
 cleanup() {
@@ -659,6 +845,14 @@ test_tls_validate_config
 test_tls_site_mutation_round_trip
 test_tls_enable_refuses_noncanonical_listen
 test_tls_acme_listener_written
+
+# v2.0 — optional tunnel + resilience
+test_tunnel_validate_config
+test_tunnel_frpc_config_generation
+test_tunnel_frpc_unit_hardening
+test_tunnel_realip_conf
+test_nginx_ws_location
+test_acme_fallback_ca
 
 echo ""
 echo "═══════════════════════════════════════════════════════════════════════════════"
