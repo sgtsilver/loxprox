@@ -351,8 +351,10 @@ maxPortsPerClient = 1
 log.to = "console"
 log.level = "info"
 EOF
-    chown root:frps "$FRPS_CONF"
+    # Lock the token file down before the chown, independent of umask, so it is
+    # never world-readable even briefly (root writes, group frps reads, world nothing).
     chmod 0640 "$FRPS_CONF"
+    chown root:frps "$FRPS_CONF"
 
     cat > "$FRPS_UNIT" <<'EOF'
 # LoxProx relay — frp server unit (v2.0 tunnel)

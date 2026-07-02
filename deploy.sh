@@ -1739,14 +1739,17 @@ localIP = "127.0.0.1"
 localPort = 1080
 remotePort = ${TUNNEL_REMOTE_PORT}
 EOF
-    # The token lives in this file — root writes, group frpc reads, world nothing.
+    # The token lives in this file. Lock the mode down FIRST — before the chown
+    # and independent of the caller's umask — so it is never world-readable even
+    # briefly, and even if the chown below fails (root writes, group frpc reads,
+    # world nothing).
+    chmod 0640 "$FRPC_CONF"
     if ! chown root:frpc "$FRPC_CONF" 2>/dev/null; then
         if [[ $EUID -eq 0 ]]; then
             error "Could not chown $FRPC_CONF to root:frpc — token file ownership is a hard requirement."
             return 1
         fi
     fi
-    chmod 0640 "$FRPC_CONF"
     info "frpc config written to $FRPC_CONF (0640 root:frpc)."
 }
 
