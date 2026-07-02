@@ -368,6 +368,74 @@ test_backup() {
     fi
 }
 
+# ── Tunnel Tests (v2.0, only when ENABLE_TUNNEL=true) ───────────────────────
+
+test_tunnel() {
+    # Read the runtime config to know whether the tunnel is supposed to be on.
+    local enable_tunnel="false" public_host=""
+    if [[ -f /etc/loxprox/config.env ]]; then
+        enable_tunnel=$(awk -F'"' '/^ENABLE_TUNNEL=/{print $2}' /etc/loxprox/config.env)
+        public_host=$(awk -F'"' '/^TUNNEL_PUBLIC_HOST=/{print $2}' /etc/loxprox/config.env)
+    fi
+    [[ "${enable_tunnel,,}" == "true" ]] || return 0
+
+    test_header "Tunnel (v2.0)"
+
+    if systemctl is-active --quiet frpc 2>/dev/null; then
+        pass "frpc is running"
+    else
+        fail "frpc is NOT running"
+    fi
+
+    if systemctl is-enabled --quiet tunnel-watchdog.timer 2>/dev/null; then
+        pass "tunnel watchdog timer is enabled"
+    else
+        fail "tunnel watchdog timer NOT enabled"
+    fi
+
+    if [[ -f /etc/frp/frpc.toml ]]; then
+        local mode owner
+        mode=$(stat -c '%a' /etc/frp/frpc.toml)
+        owner=$(stat -c '%U:%G' /etc/frp/frpc.toml)
+        [[ "$mode" == "640" ]] && pass "frpc.toml mode 0640" || fail "frpc.toml mode is $mode (expected 640)"
+        [[ "$owner" == "root:frpc" ]] && pass "frpc.toml owned root:frpc" || fail "frpc.toml owner is $owner (expected root:frpc)"
+    else
+        fail "/etc/frp/frpc.toml missing"
+    fi
+
+    if [[ -f /etc/nginx/conf.d/loxprox-tunnel-realip.conf ]]; then
+        pass "real-IP restoration conf present"
+        grep -q 'set_real_ip_from 127.0.0.1;' /etc/nginx/conf.d/loxprox-tunnel-realip.conf \
+            && pass "real-IP trusts loopback only" \
+            || fail "real-IP trust anchor wrong"
+    else
+        fail "loxprox-tunnel-realip.conf missing"
+    fi
+
+    # frpc must run unprivileged.
+    local frpc_user
+    frpc_user=$(ps -o user= -C frpc 2>/dev/null | head -1 | tr -d ' ')
+    if [[ "$frpc_user" == "frpc" ]]; then
+        pass "frpc runs as unprivileged user"
+    elif [[ -n "$frpc_user" ]]; then
+        fail "frpc runs as '$frpc_user' (expected 'frpc')"
+    else
+        warn "frpc process not found for user check"
+    fi
+
+    # Full public path — the definitive end-to-end check.
+    if [[ -n "$public_host" ]]; then
+        local code
+        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://${public_host}/" 2>/dev/null || echo "000")
+        case "$code" in
+            000|502|503|504) fail "public path https://${public_host}/ unreachable (HTTP $code)" ;;
+            *)               pass "public path answers (HTTP $code)" ;;
+        esac
+    else
+        warn "TUNNEL_PUBLIC_HOST not set — skipping public-path check"
+    fi
+}
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 main() {
@@ -386,6 +454,7 @@ main() {
     test_monitoring
     test_sysctl
     test_backup
+    test_tunnel
 
     echo ""
     echo "═══════════════════════════════════════════════════════════════════════════════"

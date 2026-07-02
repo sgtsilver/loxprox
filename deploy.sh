@@ -70,7 +70,22 @@ ENABLE_TLS="${ENABLE_TLS-false}"
 TLS_DOMAIN="${TLS_DOMAIN-}"
 TLS_EMAIL="${TLS_EMAIL-}"
 TLS_ACME_SERVER="${TLS_ACME_SERVER-letsencrypt}"
+# v2.0 — secondary CA tried automatically when the primary --issue fails.
+# Set to "" to disable the fallback. acme.sh registers the ZeroSSL account
+# automatically using TLS_EMAIL — no manual EAB credentials needed.
+TLS_ACME_FALLBACK_SERVER="${TLS_ACME_FALLBACK_SERVER-zerossl}"
 TLS_ACME_EXTRA="${TLS_ACME_EXTRA-}"
+# v2.0 — optional frp tunnel (zero-open-ports remote access via relay VPS).
+# See docs/TUNNEL-SETUP.md. Default off — the classic router port-forward
+# path keeps working exactly as before.
+ENABLE_TUNNEL="${ENABLE_TUNNEL-false}"
+TUNNEL_SERVER_ADDR="${TUNNEL_SERVER_ADDR-}"
+TUNNEL_SERVER_PORT="${TUNNEL_SERVER_PORT-7000}"
+TUNNEL_PROTOCOL="${TUNNEL_PROTOCOL-quic}"
+TUNNEL_TOKEN="${TUNNEL_TOKEN-}"
+TUNNEL_PROXY_NAME="${TUNNEL_PROXY_NAME-loxone}"
+TUNNEL_REMOTE_PORT="${TUNNEL_REMOTE_PORT-8443}"
+TUNNEL_PUBLIC_HOST="${TUNNEL_PUBLIC_HOST-}"
 
 # Operator config file path. Override via env (LOXPROX_DEPLOY_CONF=/path) for
 # testing only — production callers should use the default.
@@ -109,6 +124,20 @@ ACME_WEBROOT="${ACME_WEBROOT:-/var/www/acme}"
 # moment and a fresh install.
 ACMESH_VER="${ACMESH_VER:-3.1.3}"
 ACMESH_SHA256="${ACMESH_SHA256:-efd12b265252f8875269960b6b31830731ccce2b3e6ff8e7ecfbee21fde35ab4}"
+# v2.0 — frp pinned version + per-arch tarball SHA256s. Update all three
+# together when bumping. Refresh procedure:
+#   curl -s https://api.github.com/repos/fatedier/frp/releases/latest | grep tag_name
+#   curl -sL https://github.com/fatedier/frp/releases/download/v<ver>/frp_sha256_checksums.txt
+# The pin protects against tarball substitution between upstream's release
+# moment and a fresh install (same rationale as the acme.sh pin above).
+FRP_VER="${FRP_VER:-0.69.1}"
+FRP_SHA256_AMD64="${FRP_SHA256_AMD64:-7be257b72dbbc60bcb3e0e25a5afd1dfac7b63f897084864d3c956dd3d5674e1}"
+FRP_SHA256_ARM64="${FRP_SHA256_ARM64:-bbc0c75e896af3f292fb46ba09c844a04fa9b5ea3530c039c7af20637f836355}"
+FRP_DIR="${FRP_DIR:-/etc/frp}"
+FRPC_BIN="${FRPC_BIN:-/usr/local/bin/frpc}"
+FRPC_CONF="${FRPC_CONF:-$FRP_DIR/frpc.toml}"
+FRPC_UNIT="${FRPC_UNIT:-/etc/systemd/system/frpc.service}"
+NGINX_TUNNEL_CONF="${NGINX_TUNNEL_CONF:-/etc/nginx/conf.d/loxprox-tunnel-realip.conf}"
 SYSCTL_CONF="${SYSCTL_CONF:-/etc/sysctl.d/99-security-gateway.conf}"
 NFTABLES_CONF="${NFTABLES_CONF:-/etc/nftables.conf}"
 LOGROTATE_CONF="${LOGROTATE_CONF:-/etc/logrotate.d/loxone-nginx}"
@@ -187,6 +216,10 @@ _loxprox_load_config() {
     if [[ ! -f "$LOXPROX_DEPLOY_CONF" ]]; then
         return 1
     fi
+    # v2.0: the file may now carry TUNNEL_TOKEN. The bootstrap path installs
+    # it 0640, but a hand-copied `cp deploy.conf.example` yields 0644 —
+    # tighten on every load (best-effort: tests run unprivileged).
+    chmod 0640 "$LOXPROX_DEPLOY_CONF" 2>/dev/null || true
     # shellcheck disable=SC1090
     source "$LOXPROX_DEPLOY_CONF"
     return 0
@@ -868,6 +901,11 @@ ${appsec_http_extras}
 # \$connection_upgrade is empty, which leaves the Connection header empty and
 # preserves the upstream keepalive behaviour below — i.e. no change for the
 # HTTP-API path, native WebSocket now also works.
+# v2.0: long-lived WS sessions additionally get a dedicated location /ws/
+# below — the server-wide slowloris read/send timeouts (~15s) would otherwise
+# kill an idle event socket, because the app's keepalive interval can be far
+# longer than that. Only /ws/ gets the 24h timeouts; the HTTP-API path keeps
+# the strict slowloris limits.
 map \$http_upgrade \$connection_upgrade {
     default upgrade;
     "" "";
@@ -945,6 +983,26 @@ ${appsec_auth}
         proxy_set_header X-Real-IP          \$remote_addr;
         proxy_set_header X-Forwarded-For    \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto  \$scheme;
+        proxy_pass http://loxone_backend;
+    }
+
+    # v2.0 — Loxone native WebSocket endpoint (/ws/rfc6455). Long-lived event
+    # stream: 24h read/send timeouts (an idle event socket must survive the
+    # app's keepalive interval), buffering off so events reach the app in
+    # real time. The AppSec WAF still inspects the upgrade handshake — it is
+    # an ordinary GET and auth_request completes before the 101 switch.
+    location /ws/ {
+${appsec_auth}
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade            \$http_upgrade;
+        proxy_set_header Connection         "upgrade";
+        proxy_set_header Host               \$host;
+        proxy_set_header X-Real-IP          \$remote_addr;
+        proxy_set_header X-Forwarded-For    \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto  \$scheme;
+        proxy_read_timeout  86400s;
+        proxy_send_timeout  86400s;
+        proxy_buffering     off;
         proxy_pass http://loxone_backend;
     }
 }
@@ -1094,7 +1152,7 @@ _loxprox_install_acme_sh() {
     local tmp tarball extract_dir
     tmp=$(mktemp -d -t loxprox-acmesh.XXXXXX) || return 1
     # shellcheck disable=SC2064
-    trap "rm -rf '$tmp'" RETURN
+    trap "rm -rf '$tmp'; trap - RETURN" RETURN
 
     tarball="$tmp/acme.sh-${ACMESH_VER}.tar.gz"
     if ! curl -fsSL -o "$tarball" "https://github.com/acmesh-official/acme.sh/archive/refs/tags/${ACMESH_VER}.tar.gz"; then
@@ -1166,9 +1224,8 @@ EOF
     chmod 0644 "$NGINX_ACME_CONF"
 }
 
-_loxprox_acme_issue() {
-    info "Requesting cert for $TLS_DOMAIN from $TLS_ACME_SERVER via HTTP-01..."
-    # acme.sh --issue is idempotent. Exit codes:
+_loxprox_acme_issue_with_server() {
+    # One issue attempt against a specific CA. Exit codes from acme.sh --issue:
     #   0 — issued / re-issued successfully
     #   2 — "skipped, cert not near expiry yet" (success from operator's POV)
     #   anything else — actual failure
@@ -1176,34 +1233,63 @@ _loxprox_acme_issue() {
     # v1.5.0-dev follow-up: capture rc OUTSIDE the `if !` — inside the then-branch, `$?` is
     # always the result of `!` itself (0 or 1), not the original command's
     # exit code. An earlier v1.5.0-dev iteration logged "rc=0" on real failures.
-    local rc=0
+    local server="$1" rc=0
     "$ACME_HOME/acme.sh" --issue \
         --webroot "$ACME_WEBROOT" \
         -d "$TLS_DOMAIN" \
-        --server "$TLS_ACME_SERVER" \
+        --server "$server" \
         --accountemail "${TLS_EMAIL:-noreply@invalid}" \
         ${TLS_ACME_EXTRA} \
         >> "$LOG_FILE" 2>&1 || rc=$?
+    return "$rc"
+}
+
+_loxprox_acme_issue() {
+    info "Requesting cert for $TLS_DOMAIN from $TLS_ACME_SERVER via HTTP-01..."
+    local rc=0
+    _loxprox_acme_issue_with_server "$TLS_ACME_SERVER" || rc=$?
 
     case "$rc" in
         0)
             ok "Cert issued for $TLS_DOMAIN."
+            return 0
             ;;
         2)
             info "Cert already valid; acme.sh skipped re-issue."
-            ;;
-        *)
-            error "acme.sh --issue failed (rc=$rc). See $LOG_FILE for details."
-            error "Common causes (most likely first):"
-            error "  1. nftables on this gateway does not allow :80 — fixed by v1.5.0's setup_firewall"
-            error "     conditional rule. If your install predates v1.5.0, re-run sudo bash deploy.sh."
-            error "  2. Router WAN:80 → gateway:80 forward not in place (LE probes from outside)."
-            error "  3. DNS A record for $TLS_DOMAIN not pointing at your WAN IP — verify with"
-            error "     'dig +short A $TLS_DOMAIN' from a system outside your LAN (phone on cellular)."
-            error "  4. ACME rate limit hit (use TLS_ACME_SERVER=letsencrypt_test while debugging)."
-            return 1
+            return 0
             ;;
     esac
+
+    # v2.0 — Tier-2 cert resilience: primary CA failed, try the fallback CA
+    # (default ZeroSSL) before giving up. A CA-side outage or a Let's Encrypt
+    # rate limit must not take remote access down with it. Skipped when the
+    # fallback is disabled ("") or identical to the primary.
+    if [[ -n "$TLS_ACME_FALLBACK_SERVER" && "$TLS_ACME_FALLBACK_SERVER" != "$TLS_ACME_SERVER" ]]; then
+        warn "acme.sh --issue via $TLS_ACME_SERVER failed (rc=$rc) — trying fallback CA: $TLS_ACME_FALLBACK_SERVER"
+        rc=0
+        _loxprox_acme_issue_with_server "$TLS_ACME_FALLBACK_SERVER" || rc=$?
+        case "$rc" in
+            0)
+                ok "Cert issued for $TLS_DOMAIN via fallback CA $TLS_ACME_FALLBACK_SERVER."
+                warn "Primary CA $TLS_ACME_SERVER was failing — investigate before the next renewal window."
+                return 0
+                ;;
+            2)
+                info "Cert already valid; acme.sh skipped re-issue."
+                return 0
+                ;;
+        esac
+    fi
+
+    error "acme.sh --issue failed (rc=$rc). See $LOG_FILE for details."
+    error "Common causes (most likely first):"
+    error "  1. nftables on this gateway does not allow :80 — fixed by v1.5.0's setup_firewall"
+    error "     conditional rule. If your install predates v1.5.0, re-run sudo bash deploy.sh."
+    error "  2. Router WAN:80 → gateway:80 forward not in place (LE probes from outside)."
+    error "  3. DNS A record for $TLS_DOMAIN not pointing at your WAN IP — verify with"
+    error "     'dig +short A $TLS_DOMAIN' from a system outside your LAN (phone on cellular)."
+    error "  4. ACME rate limit hit (use TLS_ACME_SERVER=letsencrypt_test while debugging)."
+    return 1
 }
 
 _loxprox_acme_install_cert() {
@@ -1459,6 +1545,383 @@ _loxprox_tls_remove() {
     rm -rf "$LOXPROX_TLS_DIR"
     ok "TLS fully removed: site reverted, acme.sh uninstalled, $LOXPROX_TLS_DIR deleted."
     ok "Operator: also remove the WAN:80 → gateway:80 router forward (no longer needed)."
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tunnel (v2.0) — optional zero-open-ports remote access via frp
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Architecture (ADR-0002): frpc on this gateway dials OUT to frps on an
+# operator-owned relay VPS (tunnel-relay/install-relay.sh sets that side up).
+# The relay's nginx terminates TLS on :443 and forwards into the tunnel; the
+# tunnel delivers to this gateway's nginx on 127.0.0.1:1080. No inbound router
+# port is needed — this is the CGNAT/DS-Lite escape hatch Loxone never shipped
+# for Gen 1.
+#
+#   App → relay:443 (TLS, WS headers, XFF) → frps → tunnel → frpc → nginx:1080 → Loxone:80
+#
+# Toggle-friendly like setup_tls: flip ENABLE_TUNNEL in deploy.conf, re-run.
+#   ENABLE_TUNNEL=true  → install pinned frpc, write /etc/frp/frpc.toml,
+#                         hardened systemd unit (dedicated user, strict
+#                         sandbox), nginx real-IP restoration, tunnel watchdog.
+#   ENABLE_TUNNEL=false → stop + disable the units, remove the real-IP conf.
+#                         Binary/config are KEPT for cheap re-enable.
+#                         `--remove-tunnel` does the full nuke.
+#
+# Real client IPs: tunneled requests reach nginx from loopback (frpc). The
+# relay's nginx appends the true client IP to X-Forwarded-For; the real-IP
+# conf below trusts XFF from 127.0.0.1 ONLY (real_ip_recursive off → the last,
+# relay-appended hop wins; a client-supplied XFF cannot spoof it). Rate
+# limits, access logs, CrowdSec detection and the AppSec header all see the
+# true client IP again.
+#
+# Enforcement note (threat model, see SECURITY.md): a ban on THIS gateway's
+# nftables cannot drop tunneled attackers — their packets arrive via the
+# loopback tunnel, not the WAN interface. Perimeter enforcement lives on the
+# relay (its own CrowdSec + firewall bouncer, installed by install-relay.sh).
+# The gateway's AppSec WAF still inspects and blocks every tunneled request.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_loxprox_tunnel_validate_config() {
+    local fail=0
+    if [[ -z "$TUNNEL_SERVER_ADDR" ]]; then
+        error "ENABLE_TUNNEL=true but TUNNEL_SERVER_ADDR is empty."
+        error "Set it to your relay VPS public IP or DNS name in $LOXPROX_DEPLOY_CONF."
+        fail=1
+    fi
+    if [[ -z "$TUNNEL_TOKEN" ]]; then
+        error "ENABLE_TUNNEL=true but TUNNEL_TOKEN is empty."
+        error "Generate a shared secret and put the SAME value on gateway and relay:"
+        error "    openssl rand -hex 32"
+        fail=1
+    fi
+    if [[ ! "$TUNNEL_SERVER_PORT" =~ ^[0-9]+$ ]] || (( TUNNEL_SERVER_PORT < 1 || TUNNEL_SERVER_PORT > 65535 )); then
+        error "TUNNEL_SERVER_PORT='$TUNNEL_SERVER_PORT' is not a valid port."
+        fail=1
+    fi
+    if [[ ! "$TUNNEL_REMOTE_PORT" =~ ^[0-9]+$ ]] || (( TUNNEL_REMOTE_PORT < 1 || TUNNEL_REMOTE_PORT > 65535 )); then
+        error "TUNNEL_REMOTE_PORT='$TUNNEL_REMOTE_PORT' is not a valid port."
+        fail=1
+    fi
+    case "$TUNNEL_PROTOCOL" in
+        quic|tcp) ;;
+        *)
+            error "TUNNEL_PROTOCOL='$TUNNEL_PROTOCOL' — expected 'quic' or 'tcp'."
+            fail=1
+            ;;
+    esac
+    if [[ ! "$TUNNEL_PROXY_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        error "TUNNEL_PROXY_NAME='$TUNNEL_PROXY_NAME' — letters, digits, '.', '_', '-' only."
+        fail=1
+    fi
+    # v2.0 limitation: gateway-side TLS termination and the tunnel are
+    # mutually exclusive. The relay terminates TLS for the tunnel path; a
+    # `listen 1080 ssl` gateway would answer the tunnel's plain-HTTP frames
+    # with a TLS alert and break everything. Split-horizon TLS on both paths
+    # needs DNS-01 wildcard issuance — tracked for a later release.
+    if [[ "${ENABLE_TLS,,}" == "true" ]]; then
+        error "ENABLE_TLS=true and ENABLE_TUNNEL=true cannot be combined (v2.0)."
+        error "The relay terminates TLS for the tunnel path. Set ENABLE_TLS=false,"
+        error "or keep the direct port-forward path and disable the tunnel."
+        error "Background + roadmap: docs/TUNNEL-SETUP.md."
+        fail=1
+    fi
+    return "$fail"
+}
+
+_loxprox_frp_arch() {
+    # frp release naming: linux_amd64 / linux_arm64. Matches the project's
+    # supported hardware floor (Debian 12 amd64 VMs, Pi 3+ on 64-bit OS).
+    local deb_arch
+    deb_arch=$(dpkg --print-architecture 2>/dev/null || uname -m)
+    case "$deb_arch" in
+        amd64|x86_64)  echo "amd64" ;;
+        arm64|aarch64) echo "arm64" ;;
+        *)
+            error "Unsupported architecture for frp: '$deb_arch' (need amd64 or arm64)."
+            return 1
+            ;;
+    esac
+}
+
+_loxprox_install_frp() {
+    # Idempotent: skip when the pinned version is already installed.
+    if [[ -x "$FRPC_BIN" ]]; then
+        local have_ver
+        have_ver=$("$FRPC_BIN" --version 2>/dev/null || echo "unknown")
+        if [[ "$have_ver" == "$FRP_VER" ]]; then
+            info "frpc $FRP_VER already installed at $FRPC_BIN"
+            return 0
+        fi
+        info "frpc version drift: installed=$have_ver pinned=$FRP_VER — reinstalling."
+    fi
+
+    local arch expected_sha
+    arch=$(_loxprox_frp_arch) || return 1
+    case "$arch" in
+        amd64) expected_sha="$FRP_SHA256_AMD64" ;;
+        arm64) expected_sha="$FRP_SHA256_ARM64" ;;
+    esac
+
+    info "Installing frp ${FRP_VER} (${arch}, SHA256-pinned tarball, no curl|bash)..."
+    local tmp tarball
+    tmp=$(mktemp -d -t loxprox-frp.XXXXXX) || return 1
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmp'; trap - RETURN" RETURN
+
+    tarball="$tmp/frp_${FRP_VER}_linux_${arch}.tar.gz"
+    if ! curl -fsSL -o "$tarball" \
+        "https://github.com/fatedier/frp/releases/download/v${FRP_VER}/frp_${FRP_VER}_linux_${arch}.tar.gz"; then
+        error "Failed to download frp ${FRP_VER} (${arch})."
+        return 1
+    fi
+
+    local computed
+    computed=$(sha256sum "$tarball" | awk '{print $1}')
+    if [[ "$computed" != "$expected_sha" ]]; then
+        error "frp tarball SHA256 mismatch — refusing to install."
+        error "  expected: $expected_sha"
+        error "  got:      $computed"
+        error "If frp has released a new version, update FRP_VER + FRP_SHA256_* in deploy.sh."
+        return 1
+    fi
+    info "Tarball SHA256 verified."
+
+    tar -xzf "$tarball" -C "$tmp"
+    local extract_dir="$tmp/frp_${FRP_VER}_linux_${arch}"
+    [[ -f "$extract_dir/frpc" ]] || { error "frpc binary not found in tarball."; return 1; }
+    install -m 0755 -o root -g root "$extract_dir/frpc" "$FRPC_BIN"
+    ok "frpc ${FRP_VER} installed at $FRPC_BIN"
+}
+
+_loxprox_ensure_frpc_user() {
+    # Dedicated unprivileged system account. frpc only dials out — it binds
+    # nothing locally and needs no capabilities whatsoever.
+    if ! getent passwd frpc >/dev/null 2>&1; then
+        useradd --system --no-create-home --home-dir /nonexistent \
+                --shell /usr/sbin/nologin frpc
+        info "Created system user 'frpc'."
+    fi
+}
+
+_loxprox_write_frpc_config() {
+    # On the production VM this runs as root; in the test suite we may not
+    # be root, so soften ownership failures there (and only there — as root,
+    # a failed chown on the token-bearing file is a hard error below).
+    mkdir -p "$FRP_DIR"
+    chmod 0750 "$FRP_DIR" 2>/dev/null || true
+    chown root:frpc "$FRP_DIR" 2>/dev/null || true
+    backup_file "$FRPC_CONF"
+    cat > "$FRPC_CONF" <<EOF
+# LoxProx — frp client (v2.0 tunnel)
+# Generated by deploy.sh on $(date -Iseconds)
+# DO NOT EDIT MANUALLY — edit $LOXPROX_DEPLOY_CONF and re-run deploy.sh.
+#
+# TUNNEL_PROTOCOL=quic rides UDP; the relay's frps listens on the SAME port
+# number for both TCP (bindPort) and QUIC (quicBindPort), so switching
+# protocol never means changing TUNNEL_SERVER_PORT.
+serverAddr = "${TUNNEL_SERVER_ADDR}"
+serverPort = ${TUNNEL_SERVER_PORT}
+
+auth.method = "token"
+auth.token = "${TUNNEL_TOKEN}"
+
+transport.protocol = "${TUNNEL_PROTOCOL}"
+transport.tls.enable = true
+
+log.to = "console"
+log.level = "info"
+
+[[proxies]]
+name = "${TUNNEL_PROXY_NAME}"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 1080
+remotePort = ${TUNNEL_REMOTE_PORT}
+EOF
+    # The token lives in this file. Lock the mode down FIRST — before the chown
+    # and independent of the caller's umask — so it is never world-readable even
+    # briefly, and even if the chown below fails (root writes, group frpc reads,
+    # world nothing).
+    chmod 0640 "$FRPC_CONF"
+    if ! chown root:frpc "$FRPC_CONF" 2>/dev/null; then
+        if [[ $EUID -eq 0 ]]; then
+            error "Could not chown $FRPC_CONF to root:frpc — token file ownership is a hard requirement."
+            return 1
+        fi
+    fi
+    info "frpc config written to $FRPC_CONF (0640 root:frpc)."
+}
+
+_loxprox_write_frpc_unit() {
+    cat > "$FRPC_UNIT" <<'EOF'
+# LoxProx — frp client unit (v2.0 tunnel)
+# Generated by deploy.sh — DO NOT EDIT MANUALLY (re-run deploy.sh).
+# Hardening per ADR-0002: outbound-only client, unprivileged user, strict
+# sandbox, memory cap. StartLimitIntervalSec=0 — the tunnel must keep trying
+# forever; the tunnel watchdog escalates to Discord if it stays down.
+[Unit]
+Description=LoxProx frp client (tunnel to relay)
+Documentation=https://github.com/sgtsilver/loxprox
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=frpc
+Group=frpc
+ExecStart=/usr/local/bin/frpc -c /etc/frp/frpc.toml
+Restart=always
+RestartSec=10
+
+# Sandbox — frpc needs the network and nothing else.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+UMask=0077
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 0644 "$FRPC_UNIT"
+}
+
+_loxprox_write_tunnel_realip_conf() {
+    mkdir -p "$(dirname "$NGINX_TUNNEL_CONF")"
+    cat > "$NGINX_TUNNEL_CONF" <<'EOF'
+# LoxProx — tunnel real-IP restoration (v2.0)
+# Generated by deploy.sh — removed automatically when ENABLE_TUNNEL=false.
+#
+# Tunneled requests reach nginx from frpc on loopback; the relay's nginx
+# appends the real client IP to X-Forwarded-For. Trust XFF from loopback
+# ONLY. real_ip_recursive off → nginx takes the LAST (relay-appended)
+# address, so a client-supplied X-Forwarded-For cannot spoof its source.
+set_real_ip_from 127.0.0.1;
+real_ip_header X-Forwarded-For;
+real_ip_recursive off;
+EOF
+    chmod 0644 "$NGINX_TUNNEL_CONF"
+}
+
+_loxprox_install_tunnel_watchdog() {
+    local install_dir="/opt/loxprox"
+    local src_dir="${SCRIPT_DIR:-.}"
+    mkdir -p "$install_dir"
+
+    local script_src="$src_dir/security-monitoring/tunnel-watchdog.sh"
+    local service_src="$src_dir/security-monitoring/tunnel-watchdog.service"
+    local timer_src="$src_dir/security-monitoring/tunnel-watchdog.timer"
+
+    if [[ ! -f "$script_src" ]]; then
+        warn "tunnel-watchdog.sh not found at $script_src — tunnel self-heal NOT installed."
+        return 0
+    fi
+    install -m 0755 "$script_src" "$install_dir/tunnel-watchdog.sh"
+    if [[ -f "$service_src" && -f "$timer_src" ]]; then
+        cp "$service_src" /etc/systemd/system/tunnel-watchdog.service
+        cp "$timer_src"   /etc/systemd/system/tunnel-watchdog.timer
+        systemctl daemon-reload
+        systemctl enable --now tunnel-watchdog.timer
+        ok "Tunnel watchdog armed (60s cycle: check → heal → alert)."
+    else
+        warn "tunnel-watchdog systemd units not found — timer not installed."
+    fi
+}
+
+setup_tunnel() {
+    case "${ENABLE_TUNNEL,,}" in
+        true|yes|1)
+            banner "Tunnel — enable (frp client + real-IP + watchdog)"
+            _loxprox_tunnel_validate_config || return 1
+            _loxprox_install_frp || return 1
+            _loxprox_ensure_frpc_user
+            _loxprox_write_frpc_config
+            _loxprox_write_frpc_unit
+            _loxprox_write_tunnel_realip_conf
+            if ! nginx -t >> "$LOG_FILE" 2>&1; then
+                error "nginx -t failed after writing $NGINX_TUNNEL_CONF; rolling back."
+                rm -f "$NGINX_TUNNEL_CONF"
+                return 1
+            fi
+            systemctl reload nginx
+            systemctl daemon-reload
+            systemctl enable frpc
+            systemctl restart frpc
+            _loxprox_install_tunnel_watchdog
+            ok "Tunnel active → ${TUNNEL_SERVER_ADDR}:${TUNNEL_SERVER_PORT} (${TUNNEL_PROTOCOL})."
+            if [[ -n "$TUNNEL_PUBLIC_HOST" ]]; then
+                ok "  Test from outside the LAN: curl -vI https://${TUNNEL_PUBLIC_HOST}/"
+            else
+                warn "TUNNEL_PUBLIC_HOST is empty — the watchdog can only check the frpc"
+                warn "service, not the full public path. Set it to the relay's domain."
+            fi
+            ;;
+        false|no|0|"")
+            # Only act if there's anything to undo — keeps re-runs of a
+            # never-tunneled host quiet.
+            if [[ -f "$FRPC_UNIT" || -f "$NGINX_TUNNEL_CONF" ]]; then
+                banner "Tunnel — disable (stop units, remove real-IP conf)"
+                systemctl disable --now tunnel-watchdog.timer 2>/dev/null || true
+                systemctl disable --now frpc 2>/dev/null || true
+                rm -f "$NGINX_TUNNEL_CONF"
+                if nginx -t >> "$LOG_FILE" 2>&1; then
+                    systemctl reload nginx
+                else
+                    error "nginx -t failed after tunnel disable — inspect the nginx config manually."
+                    return 1
+                fi
+                ok "Tunnel disabled. Binary/config kept at $FRPC_BIN / $FRPC_CONF (use --remove-tunnel to nuke)."
+            fi
+            ;;
+        *)
+            error "Invalid ENABLE_TUNNEL value: '$ENABLE_TUNNEL' (expected true/false)."
+            return 1
+            ;;
+    esac
+}
+
+# Full tunnel nuke (--remove-tunnel): units, binary, config, watchdog, user.
+# Intentionally invasive — only run when you mean it.
+_loxprox_tunnel_remove() {
+    banner "Tunnel — full removal"
+    systemctl disable --now tunnel-watchdog.timer 2>/dev/null || true
+    systemctl disable --now frpc 2>/dev/null || true
+    rm -f /etc/systemd/system/tunnel-watchdog.service /etc/systemd/system/tunnel-watchdog.timer
+    rm -f "$FRPC_UNIT"
+    systemctl daemon-reload 2>/dev/null || true
+    rm -f "$NGINX_TUNNEL_CONF" /opt/loxprox/tunnel-watchdog.sh
+    rm -rf "$FRP_DIR"
+    rm -f "$FRPC_BIN"
+    if getent passwd frpc >/dev/null 2>&1; then
+        userdel frpc 2>/dev/null || warn "Could not remove user 'frpc' — remove manually."
+    fi
+    if command -v nginx >/dev/null 2>&1 && nginx -t >> "$LOG_FILE" 2>&1; then
+        systemctl reload nginx 2>/dev/null || true
+    fi
+    ok "Tunnel fully removed: frpc, config, units, watchdog and user deleted."
+    ok "Operator: decommission or repurpose the relay VPS separately."
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2292,6 +2755,10 @@ AUTOREBOOT_TIME="$AUTOREBOOT_TIME"
 # Watchdog expects this IP on the primary interface. Auto-detected at runtime
 # if unset, but pinning it here prevents false positives after IP changes.
 WATCHDOG_EXPECTED_IP="$GATEWAY_IP"
+# v2.0 — tunnel watchdog inputs. TUNNEL_PUBLIC_HOST enables the full
+# public-path probe (empty → service-level checks only).
+ENABLE_TUNNEL="$ENABLE_TUNNEL"
+TUNNEL_PUBLIC_HOST="${TUNNEL_PUBLIC_HOST:-}"
 EOF
 
     chmod 640 "$GATEWAY_CONFIG_FILE"
@@ -2306,7 +2773,9 @@ health_check() {
     banner "Health Check"
     local failures=0
 
-    for svc in nginx crowdsec crowdsec-firewall-bouncer nftables auditd unattended-upgrades; do
+    local services=(nginx crowdsec crowdsec-firewall-bouncer nftables auditd unattended-upgrades)
+    [[ "${ENABLE_TUNNEL,,}" == "true" ]] && services+=(frpc)
+    for svc in "${services[@]}"; do
         if service_active "$svc"; then
             ok "$svc active"
         else
@@ -2422,6 +2891,7 @@ Loxone backend:     ${LOXONE_IP}:${LOXONE_PORT}
 Gateway IP:         ${GATEWAY_IP}
 Rate limit:         ${RATE_LIMIT_REQ_PER_SEC} req/s (burst ${RATE_LIMIT_BURST}), ${RATE_LIMIT_CONN_PER_IP} conn/IP
 AppSec WAF:         ${ENABLE_APPSEC} (mode: ${APPSEC_MODE})
+Tunnel:             ${ENABLE_TUNNEL}$([[ "${ENABLE_TUNNEL,,}" == "true" ]] && echo " → ${TUNNEL_SERVER_ADDR}:${TUNNEL_SERVER_PORT} (${TUNNEL_PROTOCOL})")
 Auto-reboot:        ${AUTOREBOOT_TIME} (kernel patches)
 Backups:            ${BACKUP_DIR}
 
@@ -2431,7 +2901,9 @@ Services:
   crowdsec-firewall-bouncer → $(service_active crowdsec-firewall-bouncer && echo "running" || echo "NOT RUNNING")
   auditd                    → $(service_active auditd     && echo "running" || echo "NOT RUNNING")
   unattended-upgrades       → $(service_active unattended-upgrades && echo "running" || echo "NOT RUNNING")
-  network-watchdog          → $(systemctl is-active --quiet network-watchdog.timer 2>/dev/null && echo "armed" || echo "NOT ARMED")
+  network-watchdog          → $(systemctl is-active --quiet network-watchdog.timer 2>/dev/null && echo "armed" || echo "NOT ARMED")$([[ "${ENABLE_TUNNEL,,}" == "true" ]] && echo "
+  frpc (tunnel)             → $(service_active frpc && echo "running" || echo "NOT RUNNING")
+  tunnel-watchdog           → $(systemctl is-active --quiet tunnel-watchdog.timer 2>/dev/null && echo "armed" || echo "NOT ARMED")")
 
 Next steps:
   1. Verify proxy: curl -v http://127.0.0.1:1080/jdev/cfg/api
@@ -2484,6 +2956,15 @@ main() {
         exit $?
     fi
 
+    # v2.0 — tunnel re-entry point. --remove-tunnel does a full nuke (frpc
+    # binary + config + units + watchdog + user). Config not strictly needed,
+    # loaded best-effort so path overrides in deploy.conf are honoured.
+    if [[ "${1:-}" == "--remove-tunnel" ]]; then
+        _loxprox_load_config || true
+        _loxprox_tunnel_remove
+        exit $?
+    fi
+
     banner "LoxProx — Debian 12 VM Deploy"
     info "Log: $LOG_FILE"
 
@@ -2516,6 +2997,19 @@ main() {
     fi
     info "Configuration loaded from $LOXPROX_DEPLOY_CONF"
 
+    # v2.0 — enforce the TLS/Tunnel mutual exclusion BEFORE any module runs.
+    # setup_tls executes before setup_tunnel in the pipeline; without this
+    # early gate, an invalid combination would burn a real (rate-limited)
+    # ACME issuance and mutate the site to `listen 1080 ssl` before the
+    # tunnel validation finally aborts the deploy.
+    if [[ "${ENABLE_TLS,,}" == "true" && "${ENABLE_TUNNEL,,}" == "true" ]]; then
+        error "ENABLE_TLS=true and ENABLE_TUNNEL=true cannot be combined (v2.0)."
+        error "The relay terminates TLS for the tunnel path. Set ENABLE_TLS=false,"
+        error "or keep the direct port-forward path and disable the tunnel."
+        error "Background + roadmap: docs/TUNNEL-SETUP.md."
+        exit 1
+    fi
+
     preflight
     apply_sysctls
     setup_tmp_mount
@@ -2538,6 +3032,7 @@ main() {
     configure_appsec_nginx
     setup_apparmor
     setup_tls
+    setup_tunnel
     setup_ssh_hardening
     setup_unattended_upgrades
     setup_auditd

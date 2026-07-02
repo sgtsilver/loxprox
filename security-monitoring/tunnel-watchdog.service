@@ -1,0 +1,18 @@
+[Unit]
+Description=LoxProx Tunnel Watchdog (v2.0)
+Documentation=https://github.com/sgtsilver/loxprox
+After=network.target frpc.service
+
+# systemd SYSTEM service — root is required to restart frpc.service.
+# Unlike the network watchdog there is NO FailureAction=reboot here: a dead
+# tunnel is a relay/ISP problem; rebooting the gateway would not fix it and
+# would drop every live LAN Loxone session.
+
+[Service]
+Type=oneshot
+ExecStart=/opt/loxprox/tunnel-watchdog.sh
+
+# Logging
+StandardOutput=append:/var/log/loxprox-tunnel-watchdog.log
+StandardError=append:/var/log/loxprox-tunnel-watchdog.log
+SyslogIdentifier=loxprox-tunnel-watchdog

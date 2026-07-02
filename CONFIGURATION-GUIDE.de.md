@@ -351,6 +351,7 @@ Das Gateway schirmt den TLS-losen Miniserver dahinter ohnehin ab; für viele Hom
 | `TLS_DOMAIN` | `""` | Vollqualifizierter öffentlicher Hostname (z. B. `loxprox.example.com`). Bei `ENABLE_TLS=true` Pflicht; wird mit klarer Fehlermeldung verweigert, wenn er fehlt oder kein FQDN ist. |
 | `TLS_EMAIL` | `""` | Wird beim ACME-Provider registriert. |
 | `TLS_ACME_SERVER` | `"letsencrypt"` | Akzeptiert auch `letsencrypt_test` (Staging — zum Debuggen zuerst verwenden), `zerossl`, `buypass`, `buypass_test`, `sslcom` oder eine vollständige Directory-URL. |
+| `TLS_ACME_FALLBACK_SERVER` | `"zerossl"` | v2.0: sekundäre CA, die automatisch versucht wird, wenn das primäre `--issue` fehlschlägt (CA-Ausfall, Rate Limit). `""` deaktiviert den Fallback. |
 | `TLS_ACME_EXTRA` | `""` | Passthrough an `acme.sh --issue` (z. B. `--keylength ec-256`). |
 
 **Beispiel:**
@@ -400,6 +401,54 @@ sudo bash deploy.sh --remove-tls
 
 - **Komplettes TLS-Runbook:** [`docs/TLS-SETUP.md`](docs/TLS-SETUP.md)
 - **Upgrade-Anleitung (v1.3.x → v1.5):** [`docs/UPGRADE-to-v1.5.de.md`](docs/UPGRADE-to-v1.5.de.md)
+
+---
+
+## Optionaler Tunnel (v2.0) — Fernzugriff ohne offene Ports
+
+Für Anschlüsse, an denen keine Portweiterleitung möglich ist (CGNAT /
+DS-Lite). Das Gateway wählt sich ausgehend bei einem eigenen Relay-VPS ein;
+die Loxone App verbindet sich mit der Domain des Relays. Zuerst das Relay
+mit `tunnel-relay/install-relay.sh` einrichten — dessen Zusammenfassung gibt
+die exakten Werte unten aus.
+
+> ⚠️ `ENABLE_TUNNEL=true` und `ENABLE_TLS=true` schließen sich in v2.0
+> gegenseitig aus — mit dem Tunnel terminiert TLS am Relay. `deploy.sh`
+> verweigert die Kombination mit einer klaren Fehlermeldung.
+
+### Config-Schlüssel
+
+| Schlüssel | Default | Zweck |
+|-----------|---------|-------|
+| `ENABLE_TUNNEL` | `"false"` | Hauptschalter. Auf `"true"` stellen zum Aktivieren. |
+| `TUNNEL_SERVER_ADDR` | `""` | Öffentliche IP oder DNS-Name des Relay-VPS. Pflicht bei aktiviertem Tunnel. |
+| `TUNNEL_SERVER_PORT` | `"7000"` | frp-Steuerkanal-Port — muss dem `FRP_BIND_PORT` des Relays entsprechen. Dieselbe Nummer bedient tcp UND quic. |
+| `TUNNEL_PROTOCOL` | `"quic"` | `quic` (UDP, NAT-freundlich — empfohlen) oder `tcp` (Fallback, wenn UDP verworfen wird). |
+| `TUNNEL_TOKEN` | `""` | Gemeinsames Geheimnis, derselbe Wert wie `TUNNEL_TOKEN` am Relay. Erzeugen: `openssl rand -hex 32`. Pflicht bei aktiviertem Tunnel. |
+| `TUNNEL_PROXY_NAME` | `"loxone"` | Kosmetischer Proxy-Name in den frps-Logs. |
+| `TUNNEL_REMOTE_PORT` | `"8443"` | Loopback-gebundener Port am Relay, der Tunnel-Traffic zu dessen nginx trägt — muss dem Relay-Wert entsprechen. |
+| `TUNNEL_PUBLIC_HOST` | `""` | Öffentliche Domain des Relays (`RELAY_DOMAIN`). Aktiviert die Ganzer-Pfad-Probe des Tunnel-Watchdogs. |
+
+### Was bei `sudo bash deploy.sh` mit `ENABLE_TUNNEL=true` passiert
+
+1. frpc wird aus einem SHA256-gepinnten GitHub-Release-Tarball installiert (versionsgepinnt, amd64/arm64) — kein `curl | bash`.
+2. `/etc/frp/frpc.toml` wird geschrieben (Mode `0640 root:frpc`) mit dem Token und einem einzelnen TCP-Proxy `127.0.0.1:1080 → Relay:TUNNEL_REMOTE_PORT`.
+3. Eine gehärtete `frpc.service` startet unter dem dedizierten, unprivilegierten Benutzer `frpc` (`ProtectSystem=strict`, leeres Capability-Set, Syscall-Filter, `MemoryMax=256M`).
+4. `/etc/nginx/conf.d/loxprox-tunnel-realip.conf` stellt echte Client-IPs aus dem `X-Forwarded-For` des Relays wieder her (nur von Loopback vertraut) — Logs, Rate Limits, CrowdSec und AppSec sehen wieder echte Quellen.
+5. Der Tunnel-Watchdog wird scharfgestellt (60 s: frpc prüfen + `https://TUNNEL_PUBLIC_HOST/` proben → frpc neu starten → Discord-Alarm, max. 1/Stunde, niemals ein Reboot).
+
+### Verhalten beim Ausschalten (`ENABLE_TUNNEL="false"`)
+
+Stoppt und deaktiviert `frpc` + Watchdog und entfernt die Real-IP-Conf.
+Binary und Config bleiben **erhalten** für günstiges Wiederaktivieren.
+Vollständige Entfernung (Binary, Config, Units, Benutzer):
+`sudo bash deploy.sh --remove-tunnel`.
+
+### Verweise
+
+- **Komplettes Tunnel-Runbook (Setup, Verifikation, Troubleshooting, Bedrohungsmodell):** [`docs/TUNNEL-SETUP.de.md`](docs/TUNNEL-SETUP.de.md)
+- **Relay-Seite:** [`tunnel-relay/README.de.md`](tunnel-relay/README.de.md)
+- **Familien-Handy-Onboarding:** [`docs/FAMILY-ONBOARDING.de.md`](docs/FAMILY-ONBOARDING.de.md)
 
 ---
 

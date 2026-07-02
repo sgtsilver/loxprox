@@ -34,12 +34,14 @@ Internet ──► Router:1080 ──► Gateway:1080 ──► Loxone:80
 
 | File | Purpose |
 |------|---------|
-| `deploy.sh` | One-shot Debian 12 hardening & installation (~2550 lines, idempotent) |
+| `deploy.sh` | One-shot Debian 12 hardening & installation (~3000 lines, idempotent) |
 | `detect-loxone.sh` | Network autodetector — finds your Miniserver by MAC OUI and API fingerprint |
 | `test-gateway.sh` | 50+ automated checks — run after deploy to verify every control |
 | `set-static-ip.sh` | Pre-deploy VM network configuration |
 | `security-monitoring/` | Discord alerts, health monitor, config backup, GeoIP block script, network watchdog |
 | `security-monitoring/network-watchdog.sh` | Self-healing network stack monitor |
+| `security-monitoring/tunnel-watchdog.sh` | v2.0: self-healing frp-tunnel monitor (restart + Discord alert, no reboots) |
+| `tunnel-relay/install-relay.sh` | v2.0: one-shot relay-VPS installer (frps + nginx TLS + CrowdSec perimeter) |
 | `security-monitoring/network-watchdog.service` | systemd system service (root) |
 | `security-monitoring/network-watchdog.timer` | Runs watchdog every 60 seconds |
 
@@ -247,8 +249,8 @@ All 23 findings from the 2026-05-06 Ezio audit have been addressed:
 | LOW-001–LOW-012 | All fixed (mktemp, stricter IP regex, logrotate, circuit breaker, proxy_hide_header, test split, webhook rotation docs, AppSec tests, nftables comment, email delta, rollback glob) |
 
 ### Cumulative Stats
-- **Total findings resolved:** 58 (23 audit + 10 handover + 12 second sweep + 13 full-project-audit v1.5.2)
-- **Test assertions:** 165 (36 pytest + 118 deploy integration + 11 scanner) — all green as of v1.5.2
+- **Total findings resolved:** 66 (23 audit + 10 handover + 12 second sweep + 13 full-project-audit v1.5.2 + 8 v2.0 tunnel pre-release)
+- **Test assertions:** 213 (36 pytest + 166 deploy integration + 11 scanner) — all green as of v2.0.0
 
 ## Test Infrastructure
 
@@ -259,7 +261,7 @@ tests/
 ├── test_repo_hygiene.py      # 14 repo-hygiene guards (OpSec, versions, hardware,
 │                             #   config model, dead-file refs, links, bilingual,
 │                             #   naming) — the automated audit; tracked files only
-├── test_deploy_integration.sh # 118 assertions for deploy.sh logic
+├── test_deploy_integration.sh # 166 assertions for deploy.sh logic (incl. v2.0 tunnel)
 └── test_detect_loxone.sh     # 11 assertions for scanner logic
 ```
 

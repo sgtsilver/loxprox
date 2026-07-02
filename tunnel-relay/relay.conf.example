@@ -1,0 +1,47 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# LoxProx Relay — per-host configuration (v2.0 tunnel, server side)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Copy to /etc/loxprox-relay/relay.conf and fill in the [REQUIRED] values:
+#     sudo install -d -m 0750 /etc/loxprox-relay
+#     sudo cp relay.conf.example /etc/loxprox-relay/relay.conf
+#     sudo $EDITOR /etc/loxprox-relay/relay.conf
+#     sudo bash install-relay.sh
+#
+# This file is sourced by bash — keep the VAR="value" shape.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# [REQUIRED] Public FQDN for the Loxone app. Point its DNS A record at THIS
+# VPS. Privacy note: pick a neutral, user-chosen name — never embed the
+# Miniserver serial number or your street address in it.
+RELAY_DOMAIN="loxone.example.com"
+
+# [REQUIRED] Email for the ACME (Let's Encrypt / ZeroSSL) account.
+RELAY_EMAIL="you@example.com"
+
+# [REQUIRED] Shared tunnel secret. Generate once, put the SAME value in the
+# gateway's /etc/loxprox/deploy.conf as TUNNEL_TOKEN:
+#     openssl rand -hex 32
+TUNNEL_TOKEN=""
+
+# frp control channel port (tcp + quic/udp on the same number). The gateway's
+# TUNNEL_SERVER_PORT must match.
+FRP_BIND_PORT="7000"
+
+# Loopback-bound port frps hands tunneled traffic to nginx on. The gateway's
+# TUNNEL_REMOTE_PORT must match. Never exposed to the internet.
+TUNNEL_REMOTE_PORT="8443"
+
+# ACME CAs. The fallback fires automatically when the primary fails (outage,
+# rate limit). Use "letsencrypt_test" as primary while debugging DNS.
+RELAY_ACME_SERVER="letsencrypt"
+RELAY_ACME_FALLBACK_SERVER="zerossl"
+
+# Perimeter IDS + enforcement. Strongly recommended: for tunneled traffic
+# the relay is where bans actually drop packets (the gateway's firewall
+# never sees the attacker's source IP — see SECURITY.md).
+RELAY_ENABLE_CROWDSEC="true"
+
+# Perimeter rate limits (per client IP).
+RELAY_RATE_LIMIT_REQ_PER_SEC="10"
+RELAY_RATE_LIMIT_BURST="100"
+RELAY_RATE_LIMIT_CONN_PER_IP="20"

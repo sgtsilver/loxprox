@@ -351,6 +351,7 @@ The gateway already shields the no-TLS Miniserver behind it; for many home deplo
 | `TLS_DOMAIN` | `""` | Fully-qualified public hostname (e.g. `loxprox.example.com`). Required when `ENABLE_TLS=true`; refused with a clear error if missing or non-FQDN. |
 | `TLS_EMAIL` | `""` | Registered with the ACME provider. |
 | `TLS_ACME_SERVER` | `"letsencrypt"` | Also accepts `letsencrypt_test` (staging — use first while debugging), `zerossl`, `buypass`, `buypass_test`, `sslcom`, or a full directory URL. |
+| `TLS_ACME_FALLBACK_SERVER` | `"zerossl"` | v2.0: secondary CA tried automatically when the primary `--issue` fails (CA outage, rate limit). Set `""` to disable. |
 | `TLS_ACME_EXTRA` | `""` | Passthrough to `acme.sh --issue` (e.g. `--keylength ec-256`). |
 
 **Example:**
@@ -400,6 +401,52 @@ sudo bash deploy.sh --remove-tls
 
 - **Full TLS runbook:** [`docs/TLS-SETUP.md`](docs/TLS-SETUP.md)
 - **Upgrade walkthrough (v1.3.x → v1.5):** [`docs/UPGRADE-to-v1.5.md`](docs/UPGRADE-to-v1.5.md)
+
+---
+
+## Optional Tunnel (v2.0) — zero-open-ports remote access
+
+For connections where no port can be forwarded (CGNAT / DS-Lite). The gateway
+dials OUT to a relay VPS you own; the Loxone app connects to the relay's
+domain. Set the relay up first with `tunnel-relay/install-relay.sh` — its
+summary prints the exact values below.
+
+> ⚠️ `ENABLE_TUNNEL=true` and `ENABLE_TLS=true` are mutually exclusive in
+> v2.0 — with the tunnel, TLS terminates at the relay. `deploy.sh` refuses
+> the combination with a clear error.
+
+### Config keys
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `ENABLE_TUNNEL` | `"false"` | Master toggle. Flip to `"true"` to opt in. |
+| `TUNNEL_SERVER_ADDR` | `""` | Relay VPS public IP or DNS name. Required when enabled. |
+| `TUNNEL_SERVER_PORT` | `"7000"` | frp control-channel port — must match the relay's `FRP_BIND_PORT`. Same number serves tcp AND quic. |
+| `TUNNEL_PROTOCOL` | `"quic"` | `quic` (UDP, NAT-friendly — recommended) or `tcp` (fallback when UDP is dropped). |
+| `TUNNEL_TOKEN` | `""` | Shared secret, same value as the relay's `TUNNEL_TOKEN`. Generate: `openssl rand -hex 32`. Required when enabled. |
+| `TUNNEL_PROXY_NAME` | `"loxone"` | Cosmetic proxy name in frps logs. |
+| `TUNNEL_REMOTE_PORT` | `"8443"` | Loopback-bound port on the relay carrying tunneled traffic to its nginx — must match the relay's value. |
+| `TUNNEL_PUBLIC_HOST` | `""` | The relay's public domain (`RELAY_DOMAIN`). Enables the tunnel watchdog's full-path probe. |
+
+### What happens on `sudo bash deploy.sh` with `ENABLE_TUNNEL=true`
+
+1. frpc is installed from a SHA256-pinned GitHub release tarball (version-pinned, amd64/arm64) — no `curl | bash`.
+2. `/etc/frp/frpc.toml` is written (mode `0640 root:frpc`) with the token and a single TCP proxy `127.0.0.1:1080 → relay:TUNNEL_REMOTE_PORT`.
+3. A hardened `frpc.service` starts under the dedicated unprivileged `frpc` user (`ProtectSystem=strict`, empty capability set, syscall filter, `MemoryMax=256M`).
+4. `/etc/nginx/conf.d/loxprox-tunnel-realip.conf` restores real client IPs from the relay's `X-Forwarded-For` (trusted from loopback only) — logs, rate limits, CrowdSec and AppSec see true sources again.
+5. The tunnel watchdog is armed (60s: check frpc + probe `https://TUNNEL_PUBLIC_HOST/` → restart frpc → Discord alert, max 1/hour, never a reboot).
+
+### Toggle-off behavior (`ENABLE_TUNNEL="false"`)
+
+Stops and disables `frpc` + watchdog and removes the real-IP conf. Binary and
+config are **kept** for cheap re-enable. Full removal (binary, config, units,
+user): `sudo bash deploy.sh --remove-tunnel`.
+
+### Pointers
+
+- **Full tunnel runbook (setup, verification, troubleshooting, threat model):** [`docs/TUNNEL-SETUP.md`](docs/TUNNEL-SETUP.md)
+- **Relay side:** [`tunnel-relay/README.md`](tunnel-relay/README.md)
+- **Family phone onboarding:** [`docs/FAMILY-ONBOARDING.md`](docs/FAMILY-ONBOARDING.md)
 
 ---
 
