@@ -624,6 +624,9 @@ test_tls_acme_listener_written() {
 
 # ── v2.0 — tunnel module ─────────────────────────────────────────────────────
 
+# The config globals set below are consumed by the deploy.sh functions under
+# test (sourced above), not read within this file — silence SC2034.
+# shellcheck disable=SC2034
 test_tunnel_validate_config() {
     echo ""
     echo "━━━ _loxprox_tunnel_validate_config() ━━━"
@@ -668,6 +671,7 @@ test_tunnel_validate_config() {
     ENABLE_TLS="false"
 }
 
+# shellcheck disable=SC2034  # globals consumed by sourced deploy.sh helpers
 test_tunnel_frpc_config_generation() {
     echo ""
     echo "━━━ _loxprox_write_frpc_config() ━━━"
@@ -756,6 +760,7 @@ test_nginx_ws_location() {
     [[ "$auth_count" -eq 2 ]] && pass "AppSec guards both / and /ws/" || fail "expected 2 auth_request lines, got $auth_count"
 }
 
+# shellcheck disable=SC2034  # globals consumed by sourced deploy.sh helpers
 test_acme_fallback_ca() {
     echo ""
     echo "━━━ _loxprox_acme_issue() — fallback CA (v2.0) ━━━"

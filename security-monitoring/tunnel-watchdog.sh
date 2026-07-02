@@ -130,6 +130,7 @@ collect_diagnostics() {
     diag+="Failed checks: ${failed}\n"
     diag+="frpc service: $(systemctl is-active frpc 2>/dev/null || echo 'unknown')\n"
     diag+="Public host: ${TUNNEL_PUBLIC_HOST:-<not configured>}\n"
+    diag+="Local log: ${LOG_FILE}\n"
     diag+="--- Last 10 frpc journal lines ---\n"
     diag+="$(journalctl -u frpc -n 10 --no-pager 2>/dev/null || echo 'journal unavailable')\n"
     printf '%s' "$diag"
