@@ -450,6 +450,55 @@ user): `sudo bash deploy.sh --remove-tunnel`.
 
 ---
 
+## LoxProx Panel (GUI)
+
+Optional (on by default) LAN-only web UI for status tiles, log viewing,
+config editing, and one-click support actions (unban an IP, restart a
+service, force a TLS renew, send a test alert). Runs on the gateway itself
+and is reachable only from `LAN_SUBNET` + `SSH_ALLOWED_SUBNETS` — never
+from the internet.
+
+### Config keys
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `ENABLE_GUI` | `"true"` | Master toggle. Set `"false"` to disable. |
+| `GUI_PORT` | `"1081"` | TCP port the panel listens on. |
+| `GUI_PASSWORD` | `""` | Empty = no auth. Set to require the `X-LoxProx-Auth` header on every mutating request — recommended if untrusted devices (guests, IoT, kids' tablets) share your LAN. |
+
+Full feature tour, security model, and troubleshooting:
+[`docs/GUI-PANEL.md`](docs/GUI-PANEL.md).
+
+---
+
+## Backup & Restore
+
+`deploy.sh` installs a daily backup timer that archives to
+`/root/loxprox-backups/*.tar.gz` (mode `0600` — the tarball now contains
+key material). As of v2.1 the daily backup also includes:
+
+- `/etc/loxprox/deploy.conf`
+- `/etc/loxprox/tls/fullchain.pem` + `privkey.pem` (when TLS is enabled)
+- `/etc/frp/frpc.toml` (when the tunnel is enabled)
+- `/etc/ssh/sshd_config.d/99-loxprox.conf`
+
+on top of the nginx site, CrowdSec config, and nftables ruleset it already
+backed up.
+
+### Restoring from a backup
+
+```bash
+sudo bash deploy.sh --restore /root/loxprox-backups/<tarball>.tar.gz
+```
+
+This takes a pre-restore safety snapshot, extracts the tarball, and writes
+the known files back with their correct modes. **Re-run `sudo bash
+deploy.sh` afterwards** to reconcile services, firewall rules, and units
+against the restored config — `--restore` only puts files back, it doesn't
+re-apply them.
+
+---
+
 ## Troubleshooting
 
 ### "I don't know my Loxone's IP"

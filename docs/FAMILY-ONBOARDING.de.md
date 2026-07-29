@@ -1,7 +1,19 @@
 # Familien-Onboarding — Ein QR-Code, funktioniert überall
 
+**Sprache:** Deutsch · [English](FAMILY-ONBOARDING.md)
+
 Das Handy eines Familienmitglieds anzubinden sollte unter einer Minute
 dauern und null technische Erklärung brauchen. So geht's.
+
+> ⚠️ **Lies das, bevor du den QR-Code verteilst.** Das klassische
+> Port-Forward-Setup hat standardmäßig `ENABLE_TLS="false"` — Klartext-HTTP
+> auf `:1080`. Das heißt: der Miniserver-Login und das Passwort jedes
+> Familienmitglieds queren das Internet als **Klartext**. Jeder auf dem Weg
+> (ein kompromittierter WLAN-Hotspot, ein neugieriger Provider) kann
+> mitlesen. Schalte TLS ein ([`TLS-SETUP.de.md`](TLS-SETUP.de.md)) oder nutze
+> den Tunnel ([`TUNNEL-SETUP.de.md`](TUNNEL-SETUP.de.md)) — beide
+> terminieren HTTPS — bevor du das an Handys ausrollst, die du nicht selbst
+> kontrollierst.
 
 ## Was du einmalig brauchst
 
@@ -29,6 +41,15 @@ enthält nur den Hostnamen, keine Zugangsdaten.
    vorausgefüllter Miniserver-Adresse.
 3. Einmal Miniserver-Benutzername + Passwort eingeben. Fertig.
 
+> **Wenn Scannen nichts tut:** Das Handy braucht die Loxone App *zuerst*
+> installiert — ein nackter `loxone://`-Link tut ohne sie nichts (Schritt 1
+> oben, in dieser Reihenfolge). Auf Android kann das Betriebssystem einen
+> App-Auswahl-Dialog zeigen, wenn neben der aktuellen App noch eine alte
+> "Loxone Classic" installiert ist — wähle die App, die du wirklich nutzen
+> willst. Scannt es immer noch nicht? Die Adresse lässt sich immer auch von
+> Hand eintippen: App öffnen → Miniserver hinzufügen → `<HOST>` manuell
+> eingeben.
+
 Dieselbe URL funktioniert überall — zu Hause, über Mobilfunk, im Urlaub.
 Nichts umzuschalten, nichts zu erklären.
 
@@ -44,12 +65,31 @@ Nichts umzuschalten, nichts zu erklären.
    Handy — siehe Troubleshooting in [TUNNEL-SETUP.de.md](TUNNEL-SETUP.de.md)
    bzw. [TLS-SETUP.de.md](TLS-SETUP.de.md).
 2. **Von CrowdSec blockiert?** Geteilte/VPN-IPs landen gelegentlich auf
-   Blocklisten. Die Person `https://ip.sb` öffnen lassen und prüfen:
+   Blocklisten. iPhones nutzen standardmäßig **iCloud Private Relay**, dessen
+   geteilte Egress-IPs überdurchschnittlich oft auf Blocklisten landen —
+   siehe [`SECURITY.de.md`](../SECURITY.de.md#legitimer-nutzer-geblockt)
+   ("Roaming-/Shared-Egress-Clients") für die ausführliche Anleitung. Die
+   Person `https://ip.sb` öffnen lassen und prüfen:
    `sudo cscli decisions list` → `sudo cscli decisions delete --ip <deren-ip>`
    (auf dem Relay beim Tunnel-Setup, sonst auf dem Gateway).
 3. **App hängt bei „Verbindung wird hergestellt":** bekannte
    Gen-1-App-Macke — App-Cache leeren (Android) oder Miniserver löschen und
    neu anlegen (iOS), dann den QR-Code neu scannen.
+4. **Der ganze Haushalt teilt sich eine öffentliche IP?** Was Rate Limits
+   und Bans angeht, ist jeder hinter demselben Heimrouter diese eine IP. Ein
+   einzelnes störendes Gerät (eine hängende Refresh-Schleife, eine
+   fehlerhafte Automatisierung) kann das Rate-Limit oder einen Ban für die
+   ganze Familie auslösen, nicht nur für sich selbst. Der Fix ist derselbe
+   Unban-Flow wie oben — keine Config-Änderung.
+
+## Neu in v2.1 — Self-Service über das LoxProx Panel
+
+Ab v2.1 ist vieles davon auch als Self-Service verfügbar: das
+**LoxProx Panel**, eine LAN-only Web-Seite am Gateway unter
+`http://<gateway-ip>:1081`, zeigt denselben QR-Code, den aktuellen
+Verbindungsstatus und einen Ein-Klick-**Unban**-Button für genau die
+„von CrowdSec blockiert"-Fälle oben — kein SSH nötig. Vollständige Tour:
+[`GUI-PANEL.de.md`](GUI-PANEL.de.md).
 
 ## Bekannte Einschränkung: eine URL pro Miniserver
 

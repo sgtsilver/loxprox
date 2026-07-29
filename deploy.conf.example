@@ -242,6 +242,36 @@ TUNNEL_REMOTE_PORT="8443"
 TUNNEL_PUBLIC_HOST=""
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# OPTIONAL — LoxProx Panel (GUI) (v2.1)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# A small web panel on the gateway itself: QR-code invitation for family
+# members, service/cert/ban status at a glance, and an editor for the
+# non-lockout config keys with one-click apply (re-runs deploy.sh).
+# Full runbook: docs/GUI-PANEL.md
+#
+# The panel is LAN-only by construction — deploy.sh writes an nftables rule
+# that accepts GUI_PORT ONLY from LAN_SUBNET and SSH_ALLOWED_SUBNETS, and the
+# panel additionally rejects requests whose Host header is not the gateway
+# (anti DNS-rebinding). Never forward GUI_PORT on your router.
+#
+# Toggle anytime: edit ENABLE_GUI, re-run `sudo bash deploy.sh`. Off removes
+# the service and the firewall rule.
+#
+
+# LAN-only web panel with family QR invitation, status, config editing;
+# never internet-reachable — nftables only accepts LAN_SUBNET +
+# SSH_ALLOWED_SUBNETS sources; set "false" to remove.
+ENABLE_GUI="true"
+
+# TCP port the panel listens on. Must not collide with 22, 80 or 1080.
+GUI_PORT="1081"
+
+# Empty = no password; if set, panel mutations — unban/restart/config/apply —
+# require it; recommended when untrusted devices share the LAN.
+GUI_PASSWORD=""
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # OPTIONAL — Maintenance
 # ═══════════════════════════════════════════════════════════════════════════════
 

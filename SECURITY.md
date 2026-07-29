@@ -201,7 +201,7 @@ The Miniserver itself still cannot speak TLS (Gen 1 CPU constraint — unchanged
 
 ```bash
 # Verify all components
-sudo bash /tmp/test-gateway.sh
+sudo bash test-gateway.sh
 
 # Check CrowdSec decisions
 sudo cscli decisions list
@@ -228,7 +228,7 @@ sudo cscli decisions add --ip 1.2.3.4 --duration 4h --reason "manual-ban"
 sudo cscli decisions delete --ip 1.2.3.4
 
 # Re-run full deployment
-sudo bash /tmp/deploy.sh
+sudo bash deploy.sh
 ```
 
 ---
@@ -257,7 +257,7 @@ sudo bash /tmp/deploy.sh
 2. Verify gateway health: `systemctl status nginx`
 3. Verify gateway → Loxone reachability: `curl http://<LOXONE_IP>:80/jdev/cfg/api`
 4. Check nginx error log for backend timeouts
-5. Run test suite: `sudo bash /tmp/test-gateway.sh`
+5. Run test suite: `sudo bash test-gateway.sh`
 
 ### Discord Webhook Rotation
 

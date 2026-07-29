@@ -4,6 +4,59 @@ All notable changes to this project will be documented in this file.
 
 > **v1.3.0 was withdrawn on 2026-05-18 — do not use.** The systemd unit change in v1.3.0 (moving `StartLimit*` from `[Service]` to `[Unit]`) activated a previously-silent `StartLimitBurst=3` that, combined with the watchdog's 60-second timer and `FailureAction=reboot`, caused an unbounded reboot loop on the 4th start. **v1.3.1 supersedes v1.3.0** and contains the same fixes plus the burst-value correction. Install v1.3.1 or later.
 
+## [Unreleased]
+
+### Added
+
+- **LoxProx Panel — LAN-only web GUI (`ENABLE_GUI`, default `true`, port 1081).**
+  New `gui/loxprox-gui.py` (Python 3.11 stdlib, no pip dependencies) served as
+  `loxprox-gui.service`: family QR invitation (`loxone://ms?host=…`, format
+  re-verified against the official Loxone KB — host only, never credentials)
+  with a printable DE/EN `/invite` page and share-link copy; live status tiles
+  (services, TLS cert days remaining, Miniserver reachability, active CrowdSec
+  decisions, AppSec hits today, last-backup age, disk/RAM/load, mode); log
+  viewer; guarded `deploy.conf` editor (lockout-critical keys `GATEWAY_IP` /
+  `LAN_SUBNET` / `SSH_ALLOWED_SUBNETS` deliberately excluded) with one-click
+  apply and live job log; support actions — unban IP, restart
+  nginx/CrowdSec/bouncer/frpc, force TLS renew, Discord test alert. Security
+  model: never internet-reachable (nftables accepts only `LAN_SUBNET` +
+  `SSH_ALLOWED_SUBNETS` sources), Host-header allowlist against DNS rebinding,
+  `X-LoxProx-Gui` header required on every mutation (CSRF), optional
+  `GUI_PASSWORD` enforced on mutations. Docs: `docs/GUI-PANEL.md` (+ `.de`).
+- **`deploy.sh --restore <tarball>`** — restore path for the daily backups
+  (previously none existed): pre-restore snapshot, `/var/tmp` staging,
+  per-file mode/owner restoration, `nginx -t` / `sshd -t` validation with
+  revert on failure.
+- **`deploy.sh --help`**, and unknown flags now error out (exit 2) instead of
+  silently running a full deploy.
+- **`test-gateway.sh`: TLS + Panel live checks** — cert presence and >21-day
+  validity, `listen 1080 ssl`, `error_page 497` redirect, ACME listener conf,
+  renewal cron (quote-tolerant pattern); Panel service/port/HTTP-200/CSRF-403
+  checks. TLS previously had zero live-suite coverage.
+
+### Fixed
+
+- **Daily backups could silently never run** — `gateway-backup.sh`'s helper
+  returned non-zero for an absent source file, aborting the whole script under
+  `set -e` before `tar` (first hit: `appsec.yaml` on `ENABLE_APPSEC=false`
+  hosts). Missing files are now skipped with a log line.
+- **Daily backups omitted the recovery-critical files** — now also archives
+  `/etc/loxprox/deploy.conf`, the TLS cert + key, `/etc/frp/frpc.toml`, and
+  the SSH drop-in; the tarball is `chmod 0600` (it now contains key material).
+- **Docs corrected:** `SECURITY.md` referenced non-existent `/tmp/deploy.sh`
+  paths; `INSTALL-FOR-NEWBIES.md` overstated what `detect-loxone.sh` suggests;
+  `FAMILY-ONBOARDING.md` now warns about cleartext HTTP without TLS, iCloud
+  Private Relay ban false-positives, the shared household IP (one device can
+  ban the family), and QR-scan fallbacks.
+
+### Audit
+
+- Fourth full audit sweep completed (four parallel review streams over
+  deploy.sh, the relay installer, the monitoring scripts, and all docs). This
+  release ships the backup/restore fixes, the CLI hardening, and the doc
+  corrections from it; the remaining findings are tracked in the maintainer's
+  local audit log and will land in follow-up releases.
+
 ## [2.0.1] — 2026-07-02
 
 ### Fixed

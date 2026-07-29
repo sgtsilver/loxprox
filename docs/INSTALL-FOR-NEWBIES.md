@@ -114,7 +114,7 @@ sudo nano /etc/loxprox/deploy.conf
 
 - `LOXONE_IP` — your Miniserver's address (from Step 5).
 - `GATEWAY_IP` — this gateway's own address (from Step 6).
-- `LAN_SUBNET` — your home network range (the scanner suggests it; usually something like `192.168.1.0/24`).
+- `LAN_SUBNET` — your home network range. `detect-loxone.sh` shows it too: if you ran it with no arguments, look near the top of its output for a line reading `Auto-detected subnet: ...` — that's your value (it isn't repeated in the "Suggested deploy.sh configuration" block below it, which only lists `LOXONE_IP`/`LOXONE_PORT`). Otherwise it's usually something like `192.168.1.0/24`.
 - `SSH_ALLOWED_SUBNETS` — who's allowed to log in to the gateway; your home network is fine to start.
 - `DISCORD_WEBHOOK_URL` *(optional)* — paste a Discord webhook URL here to get phone alerts. Skip it for now if you like.
 

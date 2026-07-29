@@ -42,6 +42,9 @@ export CROWDSEC_WHITELIST_IPS=("192.168.1.0/24" "10.0.0.0/24")
 export DISCORD_WEBHOOK_URL=""
 export ALERT_EMAIL=""
 export AUTOREBOOT_TIME="03:00"
+export ENABLE_GUI="true"
+export GUI_PORT="1081"
+export GUI_PASSWORD=""
 
 # Override paths to use mock root
 export LOG_FILE="$MOCK_ROOT/var/log/loxprox-deploy.log"
@@ -60,8 +63,10 @@ export LOGROTATE_CONF="$MOCK_ROOT/etc/logrotate.d/loxone-nginx"
 export GATEWAY_CONFIG_DIR="$MOCK_ROOT/etc/loxprox"
 export GATEWAY_CONFIG_FILE="$GATEWAY_CONFIG_DIR/config.env"
 export LOXPROX_DEPLOY_CONF="$MOCK_ROOT/etc/loxprox/deploy.conf"
+export GUI_UNIT="$MOCK_ROOT/etc/systemd/system/loxprox-gui.service"
+export GUI_APP="$MOCK_ROOT/opt/loxprox/loxprox-gui.py"
 
-mkdir -p "$MOCK_ROOT"/{etc/nginx/sites-available,etc/nginx/sites-enabled,etc/nginx/conf.d,etc/crowdsec/acquis.d,etc/crowdsec/parsers/s02-enrich,etc/sysctl.d,etc/logrotate.d,etc/loxprox,var/log,root}
+mkdir -p "$MOCK_ROOT"/{etc/nginx/sites-available,etc/nginx/sites-enabled,etc/nginx/conf.d,etc/crowdsec/acquis.d,etc/crowdsec/parsers/s02-enrich,etc/sysctl.d,etc/logrotate.d,etc/loxprox,etc/systemd/system,opt/loxprox,var/log,root}
 
 # Mock system commands
 systemctl() { true; }
@@ -108,6 +113,8 @@ LOGROTATE_CONF="$MOCK_ROOT/etc/logrotate.d/loxone-nginx"
 GATEWAY_CONFIG_DIR="$MOCK_ROOT/etc/loxprox"
 GATEWAY_CONFIG_FILE="$GATEWAY_CONFIG_DIR/config.env"
 LOXPROX_DEPLOY_CONF="$MOCK_ROOT/etc/loxprox/deploy.conf"
+GUI_UNIT="$MOCK_ROOT/etc/systemd/system/loxprox-gui.service"
+GUI_APP="$MOCK_ROOT/opt/loxprox/loxprox-gui.py"
 
 # ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -260,6 +267,15 @@ test_write_runtime_config() {
     if grep -q "LOXONE_IP=" "$GATEWAY_CONFIG_FILE"; then pass "LOXONE_IP in config"; else fail "LOXONE_IP missing"; fi
     if grep -q "GATEWAY_IP=" "$GATEWAY_CONFIG_FILE"; then pass "GATEWAY_IP in config"; else fail "GATEWAY_IP missing"; fi
     if grep -q "LAN_SUBNET=" "$GATEWAY_CONFIG_FILE"; then pass "LAN_SUBNET in config"; else fail "LAN_SUBNET missing"; fi
+    # v2.1 — panel inputs: test-gateway.sh gates on ENABLE_GUI/GUI_PORT, the
+    # panel itself runs LOXPROX_DEPLOY_SH for its apply/renew jobs.
+    if grep -q '^ENABLE_GUI=' "$GATEWAY_CONFIG_FILE"; then pass "ENABLE_GUI in config"; else fail "ENABLE_GUI missing"; fi
+    if grep -q '^GUI_PORT="1081"' "$GATEWAY_CONFIG_FILE"; then pass "GUI_PORT in config"; else fail "GUI_PORT missing"; fi
+    if grep -qE '^LOXPROX_DEPLOY_SH="/.*deploy\.sh"$' "$GATEWAY_CONFIG_FILE"; then
+        pass "LOXPROX_DEPLOY_SH is an absolute deploy.sh path"
+    else
+        fail "LOXPROX_DEPLOY_SH missing or not absolute"
+    fi
 }
 
 test_rollback_validation() {
@@ -817,6 +833,136 @@ MOCK
     ACME_HOME="$saved_home"
 }
 
+# ── v2.1 — LoxProx Panel (GUI) ───────────────────────────────────────────────
+
+test_gui_setup() {
+    echo ""
+    echo "━━━ setup_gui() ━━━"
+
+    rm -f "$GUI_UNIT" "$GUI_APP"
+
+    ENABLE_GUI="true" setup_gui >/dev/null 2>&1
+    if [[ -f "$GUI_UNIT" ]]; then pass "unit written"; else fail "unit missing"; fi
+    if [[ -f "$GUI_APP" ]]; then pass "panel script installed"; else fail "panel script not installed"; fi
+    grep -q '^Description=LoxProx Panel (LAN-only GUI)$' "$GUI_UNIT" && pass "Description present" || fail "Description wrong"
+    grep -qE "^ExecStart=/usr/bin/python3 .*/loxprox-gui\.py$" "$GUI_UNIT" && pass "ExecStart runs python3 + panel" || fail "ExecStart wrong"
+    grep -q '^Restart=always$' "$GUI_UNIT" && pass "Restart=always" || fail "Restart=always missing"
+    grep -q '^RestartSec=5$' "$GUI_UNIT" && pass "RestartSec=5" || fail "RestartSec missing"
+    grep -q '^PrivateTmp=true$' "$GUI_UNIT" && pass "PrivateTmp=true" || fail "PrivateTmp missing"
+    grep -q '^StandardOutput=append:/var/log/loxprox-gui.log$' "$GUI_UNIT" && pass "log to loxprox-gui.log" || fail "StandardOutput wrong"
+    grep -q '^WantedBy=multi-user.target$' "$GUI_UNIT" && pass "install target present" || fail "WantedBy missing"
+    # Root + no ProtectSystem is deliberate — the unit must say why.
+    grep -q 'ProtectSystem' "$GUI_UNIT" && pass "unit documents the missing sandbox" || fail "no rationale for absent ProtectSystem"
+
+    # Idempotency: a second run must produce a byte-identical unit.
+    local before_hash after_hash
+    before_hash=$(sha256sum "$GUI_UNIT" | awk '{print $1}')
+    ENABLE_GUI="true" setup_gui >/dev/null 2>&1
+    after_hash=$(sha256sum "$GUI_UNIT" | awk '{print $1}')
+    [[ "$before_hash" == "$after_hash" ]] && pass "re-run is idempotent (unit unchanged)" || fail "re-run mutated the unit"
+
+    # Disable → unit and installed script removed.
+    ENABLE_GUI="false" setup_gui >/dev/null 2>&1
+    [[ ! -f "$GUI_UNIT" ]] && pass "ENABLE_GUI=false removes the unit" || fail "unit survived disable"
+    [[ ! -f "$GUI_APP" ]] && pass "ENABLE_GUI=false removes the panel script" || fail "panel script survived disable"
+
+    # Disabling twice must stay quiet and succeed.
+    ENABLE_GUI="false" setup_gui >/dev/null 2>&1
+    [[ $? -eq 0 ]] && pass "second disable is a no-op" || fail "second disable returned non-zero"
+
+    # Typo → hard error, never a silent skip.
+    ENABLE_GUI="ture" setup_gui >/dev/null 2>&1
+    [[ $? -eq 1 ]] && pass "invalid ENABLE_GUI value rejected" || fail "invalid ENABLE_GUI accepted"
+    [[ ! -f "$GUI_UNIT" ]] && pass "invalid value writes nothing" || fail "invalid value still wrote the unit"
+}
+
+test_gui_firewall_rule() {
+    echo ""
+    echo "━━━ setup_firewall() — LoxProx Panel rule (v2.1) ━━━"
+
+    local saved_ssh=("${SSH_ALLOWED_SUBNETS[@]}")
+
+    ENABLE_GUI="true"
+    setup_firewall >/dev/null 2>&1
+
+    grep -q "tcp dport 1081 ip saddr" "$NFTABLES_CONF" && pass "panel rule emitted" || fail "panel rule missing"
+    grep -q "LoxProx Panel — LAN only (v2.1)" "$NFTABLES_CONF" && pass "rule is commented" || fail "rule comment missing"
+
+    local gui_line
+    gui_line=$(grep 'tcp dport 1081' "$NFTABLES_CONF")
+    grep -q '192.168.1.0/24' <<<"$gui_line" && pass "LAN_SUBNET in the source set" || fail "LAN_SUBNET missing from source set"
+    grep -q '10.0.0.0/24' <<<"$gui_line" && pass "SSH subnet in the source set" || fail "SSH subnet missing from source set"
+
+    # Dedup: LAN_SUBNET is also an SSH_ALLOWED_SUBNETS entry here. nft refuses
+    # an anonymous set that lists the same element twice.
+    local dupes
+    dupes=$(grep -o '192.168.1.0/24' <<<"$gui_line" | wc -l | tr -d ' ')
+    [[ "$dupes" -eq 1 ]] && pass "duplicate subnet collapsed (nft-safe set)" || fail "LAN_SUBNET appears $dupes times in the set"
+
+    # Explicit duplicate in the array must not survive either.
+    SSH_ALLOWED_SUBNETS=("192.168.1.0/24" "10.0.0.0/24" "192.168.1.0/24")
+    setup_firewall >/dev/null 2>&1
+    gui_line=$(grep 'tcp dport 1081' "$NFTABLES_CONF")
+    dupes=$(grep -o '192.168.1.0/24' <<<"$gui_line" | wc -l | tr -d ' ')
+    [[ "$dupes" -eq 1 ]] && pass "repeated SSH_ALLOWED_SUBNETS entry deduplicated" || fail "repeated entry appears $dupes times"
+    SSH_ALLOWED_SUBNETS=("${saved_ssh[@]}")
+
+    # Disabled → no rule at all.
+    ENABLE_GUI="false"
+    setup_firewall >/dev/null 2>&1
+    grep -q "tcp dport 1081" "$NFTABLES_CONF" && fail "panel rule present with ENABLE_GUI=false" || pass "no panel rule when disabled"
+    grep -q "tcp dport 1080 accept" "$NFTABLES_CONF" && pass "proxy rule unaffected" || fail "proxy rule damaged"
+
+    ENABLE_GUI="true"
+}
+
+# ── v2.1 — CLI surface ───────────────────────────────────────────────────────
+#
+# These run deploy.sh as a subprocess, so the mocked systemctl/apt-get are NOT
+# in effect. Only paths that exit before touching the system are exercised:
+# --help and the unknown-flag guard both return before the root check.
+
+test_cli_help_and_unknown_flag() {
+    echo ""
+    echo "━━━ deploy.sh --help / unknown flag ━━━"
+
+    local out rc
+    out=$(bash "$PROJECT_DIR/deploy.sh" --help 2>&1); rc=$?
+    [[ $rc -eq 0 ]] && pass "--help exits 0 unprivileged" || fail "--help exited $rc"
+    grep -q -- "--restore" <<<"$out"       && pass "--help documents --restore"       || fail "--restore missing from --help"
+    grep -q -- "--remove-tunnel" <<<"$out" && pass "--help documents --remove-tunnel" || fail "--remove-tunnel missing from --help"
+    grep -q -- "--bootstrap-config" <<<"$out" && pass "--help documents --bootstrap-config" || fail "--bootstrap-config missing"
+    grep -q "ALLOW_LXC" <<<"$out"          && pass "--help documents env toggles"     || fail "env toggles missing from --help"
+
+    out=$(bash "$PROJECT_DIR/deploy.sh" -h 2>&1); rc=$?
+    [[ $rc -eq 0 ]] && pass "-h alias exits 0" || fail "-h exited $rc"
+
+    out=$(bash "$PROJECT_DIR/deploy.sh" --not-a-real-flag 2>&1); rc=$?
+    [[ $rc -eq 2 ]] && pass "unknown flag exits 2 (no deploy)" || fail "unknown flag exited $rc (expected 2)"
+    grep -q "Unknown option" <<<"$out" && pass "unknown flag names the offender" || fail "no error message for unknown flag"
+}
+
+test_restore_refuses_missing_archive() {
+    echo ""
+    echo "━━━ --restore <tarball> — missing archive ━━━"
+
+    # Subshell: the function calls check_root, which exits on failure.
+    ( _loxprox_restore_backup "$MOCK_ROOT/does-not-exist.tar.gz" ) >/dev/null 2>&1
+    [[ $? -eq 1 ]] && pass "refuses a missing archive (exit 1)" || fail "missing archive not refused"
+
+    ( _loxprox_restore_backup "" ) >/dev/null 2>&1
+    [[ $? -eq 1 ]] && pass "refuses an empty argument" || fail "empty argument not refused"
+
+    # The bare-filename form must resolve inside /root/loxprox-backups.
+    local out
+    out=$( ( _loxprox_restore_backup "nope.tar.gz" ) 2>&1 )
+    grep -q "/root/loxprox-backups/nope.tar.gz" <<<"$out" && pass "bare filename resolved in /root/loxprox-backups" || fail "bare filename not resolved"
+
+    # Restore must extract to /var/tmp — /tmp is mounted noexec,nodev,nosuid.
+    grep -q 'mktemp -d /var/tmp/loxprox-restore' "$PROJECT_DIR/deploy.sh" && pass "extracts to /var/tmp (not /tmp)" || fail "restore does not use /var/tmp"
+    grep -q 'nginx -t fails with the restored site' "$PROJECT_DIR/deploy.sh" && pass "nginx revert-on-failure path present" || fail "nginx revert path missing"
+}
+
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 
 cleanup() {
@@ -862,6 +1008,12 @@ test_tunnel_frpc_unit_hardening
 test_tunnel_realip_conf
 test_nginx_ws_location
 test_acme_fallback_ca
+
+# v2.1 — LoxProx Panel + CLI surface
+test_gui_setup
+test_gui_firewall_rule
+test_cli_help_and_unknown_flag
+test_restore_refuses_missing_archive
 
 echo ""
 echo "═══════════════════════════════════════════════════════════════════════════════"

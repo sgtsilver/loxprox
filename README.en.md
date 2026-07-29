@@ -55,6 +55,7 @@ LoxProx sits in front of it and supplies the whole missing security layer.
 - **Transparent** — LAN traffic goes straight to the Miniserver; only internet traffic is inspected, so local users are never slowed down.
 - **Optional HTTPS on `:1080`** — terminate TLS via `acme.sh` + Let's Encrypt (with ZeroSSL fallback), covering the no-TLS device behind it.
 - **Optional zero-open-ports remote access (v2.0)** — frp tunnel via your own relay VPS for CGNAT/DS-Lite connections; self-hosted, no subscription, with its own watchdog. See [Tunnel Setup](docs/TUNNEL-SETUP.md).
+- **Optional LAN-only web panel (v2.1)** — status tiles, log viewing, config editing, and one-click support actions (unban, restart, TLS renew) at `http://<gateway-ip>:1081`. See [GUI Panel](docs/GUI-PANEL.md).
 - **Lightweight** — runs on a 1 GB VM or a Raspberry Pi 3+.
 - **Self-healing** — a network watchdog detects and recovers stack failures automatically.
 - **Real-time alerts** — optional Discord notifications for blocks, errors, and anomalies.
@@ -109,6 +110,15 @@ App ──► https://your-domain (relay VPS:443) ──► frp tunnel ──►
 
 The gateway dials out to a self-hosted relay VPS; not a single port needs to be opened on the router. TLS terminates at the relay, the gateway's full security stack stays on the path, and the relay adds its own CrowdSec perimeter. Two-step setup: [`tunnel-relay/install-relay.sh`](tunnel-relay/README.md) on the VPS, then `ENABLE_TUNNEL="true"` on the gateway. Full runbook: [Tunnel Setup](docs/TUNNEL-SETUP.md).
 
+### Family access & the LoxProx Panel
+
+Want to hand your Miniserver connection to family members? The QR-code
+onboarding flow in [`docs/FAMILY-ONBOARDING.md`](docs/FAMILY-ONBOARDING.md)
+gets a phone connected in under a minute. Since v2.1, the same QR code,
+connection status, and a one-click unban button are also available from
+the gateway's own **LoxProx Panel** — a LAN-only web UI at
+`http://<gateway-ip>:1081`. See [`docs/GUI-PANEL.md`](docs/GUI-PANEL.md).
+
 ---
 
 ## Security Layers
@@ -126,7 +136,7 @@ The gateway dials out to a self-hosted relay VPS; not a single port needs to be 
 | 9 | **Security monitor** | 60 s cycle: CrowdSec blocks, nginx errors, auth attempts, resource alerts → Discord |
 | 10 | **Network watchdog** | Self-healing: detects network-layer failures (dhclient death-spiral, routing corruption) and recovers via service restart or reboot |
 | 11 | **Log rotation** | 14-day nginx log retention |
-| 12 | **Config backup** | Daily automated backups to `/root/loxprox-backups/` |
+| 12 | **Config backup** | Daily automated backups to `/root/loxprox-backups/` — includes `deploy.conf`, TLS cert+key, tunnel config, and the SSH drop-in; restore via `deploy.sh --restore <tarball>` |
 
 ---
 
@@ -244,6 +254,7 @@ The full incident-response playbook is in [`SECURITY.md`](SECURITY.md).
 | [TLS Setup](docs/TLS-SETUP.md) · [DE](docs/TLS-SETUP.de.md) | Enabling HTTPS on `:1080` via acme.sh |
 | [Tunnel Setup](docs/TUNNEL-SETUP.md) · [DE](docs/TUNNEL-SETUP.de.md) | v2.0: zero-open-ports remote access (CGNAT/DS-Lite) via a relay VPS |
 | [Family Onboarding](docs/FAMILY-ONBOARDING.md) · [DE](docs/FAMILY-ONBOARDING.de.md) | QR-code onboarding for family phones, split-horizon DNS notes |
+| [LoxProx Panel](docs/GUI-PANEL.md) · [DE](docs/GUI-PANEL.de.md) | v2.1: LAN-only web GUI — family QR, status, config, unban |
 | [Upgrade to v1.5](docs/UPGRADE-to-v1.5.md) · [DE](docs/UPGRADE-to-v1.5.de.md) | Migrating from v1.3.x (config bootstrap) |
 | [Security](SECURITY.md) · [DE](SECURITY.de.md) | Threat model, incident response, hardening |
 | [Phase guides](phase1-hardening.md) | [1: hardening](phase1-hardening.md) · [3: cutover](phase3-cutover.md) · [4: monitoring](phase4-monitoring.md) |

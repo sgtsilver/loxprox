@@ -26,7 +26,11 @@ mkdir -p "$BACKUP_DIR"
 backup_file() {
     local src="$1"
     local dest="$2"
-    [ -f "$src" ] && cp "$src" "$dest/" && echo "Backed up: $src"
+    if [ ! -f "$src" ]; then
+        echo "Skipped (absent): $src"
+        return 0
+    fi
+    cp "$src" "$dest/" && echo "Backed up: $src"
 }
 
 backup_file /etc/nginx/nginx.conf "$WORK_DIR"
@@ -41,6 +45,11 @@ backup_file /etc/crowdsec/acquis.d/appsec.yaml "$WORK_DIR"
 backup_file /etc/audit/rules.d/99-gateway.rules "$WORK_DIR"
 backup_file /etc/logrotate.d/loxone-nginx "$WORK_DIR"
 backup_file /etc/systemd/system/nginx.service.d/hardening.conf "$WORK_DIR"
+backup_file /etc/loxprox/deploy.conf "$WORK_DIR"
+backup_file /etc/loxprox/tls/fullchain.pem "$WORK_DIR"
+backup_file /etc/loxprox/tls/privkey.pem "$WORK_DIR"
+backup_file /etc/frp/frpc.toml "$WORK_DIR"
+backup_file /etc/ssh/sshd_config.d/99-loxprox.conf "$WORK_DIR"
 
 # Package list
 apt list --installed 2>/dev/null | grep -E "nginx|crowdsec|apparmor|auditd" > "${WORK_DIR}/installed-packages.txt"
@@ -50,6 +59,9 @@ cscli metrics 2>/dev/null > "${WORK_DIR}/crowdsec-metrics.txt" || true
 
 # Compress
 tar czf "${BACKUP_DIR}/${BACKUP_NAME}.tar.gz" -C "$WORK_PARENT" "$BACKUP_NAME"
+
+# Archive now contains TLS private key + tunnel token — lock it down.
+chmod 0600 "${BACKUP_DIR}/${BACKUP_NAME}.tar.gz"
 
 # Clean old backups
 find "$BACKUP_DIR" -name "loxone-loxprox-backup-*.tar.gz" -mtime +${RETENTION_DAYS} -delete

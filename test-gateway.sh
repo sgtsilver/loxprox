@@ -436,6 +436,109 @@ test_tunnel() {
     fi
 }
 
+# ── TLS Tests (v2.0.1, only when ENABLE_TLS=true) ───────────────────────────
+
+test_tls() {
+    # Read the runtime config to know whether TLS is supposed to be on.
+    local enable_tls="false"
+    if [[ -f /etc/loxprox/config.env ]]; then
+        enable_tls=$(awk -F'"' '/^ENABLE_TLS=/{print $2}' /etc/loxprox/config.env)
+    fi
+    [[ "${enable_tls,,}" == "true" ]] || return 0
+
+    test_header "TLS (v2.0.1)"
+
+    local cert="/etc/loxprox/tls/fullchain.pem"
+    if [[ -f "$cert" ]]; then
+        pass "TLS certificate present ($cert)"
+
+        if openssl x509 -checkend 1814400 -noout -in "$cert" >/dev/null 2>&1; then
+            pass "TLS certificate valid for > 21 days"
+        else
+            fail "TLS certificate expires within 21 days (or is invalid)"
+        fi
+    else
+        fail "TLS certificate missing ($cert)"
+    fi
+
+    local nginx_site="/etc/nginx/sites-available/loxone"
+    if [[ -f "$nginx_site" ]]; then
+        grep -q 'listen 1080 ssl' "$nginx_site" \
+            && pass "nginx site listens on 1080 ssl" \
+            || fail "nginx site missing 'listen 1080 ssl'"
+
+        grep -q 'error_page 497' "$nginx_site" \
+            && pass "nginx site has error_page 497 redirect" \
+            || fail "nginx site missing error_page 497 redirect"
+    else
+        fail "nginx site file missing ($nginx_site)"
+    fi
+
+    if [[ -f /etc/nginx/conf.d/loxprox-acme.conf ]]; then
+        pass "ACME challenge conf present"
+    else
+        fail "ACME challenge conf missing (/etc/nginx/conf.d/loxprox-acme.conf)"
+    fi
+
+    # Quote-tolerant pattern (v2.0.1 fix) — do NOT match on a full path prefix.
+    if crontab -l 2>/dev/null | grep -F "acme.sh --cron" >/dev/null 2>&1; then
+        pass "acme.sh renewal cron present"
+    else
+        fail "acme.sh renewal cron missing from root crontab"
+    fi
+}
+
+# ── GUI Tests (v2.1, only when ENABLE_GUI=true) ─────────────────────────────
+
+test_gui() {
+    # Read the runtime config to know whether the GUI is supposed to be on.
+    # Older installs won't have these keys yet — degrade to a skip.
+    local enable_gui="false" gui_port="1081"
+    if [[ -f /etc/loxprox/config.env ]]; then
+        enable_gui=$(awk -F'"' '/^ENABLE_GUI=/{print $2}' /etc/loxprox/config.env)
+        gui_port=$(awk -F'"' '/^GUI_PORT=/{print $2}' /etc/loxprox/config.env)
+    fi
+    enable_gui="${enable_gui:-false}"
+    gui_port="${gui_port:-1081}"
+    [[ "${enable_gui,,}" == "true" ]] || return 0
+
+    test_header "GUI Panel (v2.1)"
+
+    if systemctl is-active --quiet loxprox-gui.service 2>/dev/null; then
+        pass "loxprox-gui.service is running"
+    else
+        fail "loxprox-gui.service is NOT running"
+    fi
+
+    if ss -tlnp | grep -q ":${gui_port} "; then
+        pass "GUI listening on :${gui_port}"
+    else
+        fail "GUI NOT listening on :${gui_port}"
+    fi
+
+    local status
+    status=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "http://127.0.0.1:${gui_port}/" 2>/dev/null)
+    if [[ "$status" == "200" ]]; then
+        pass "GUI panel responds (HTTP $status)"
+    else
+        fail "GUI panel returned HTTP $status (expected 200)"
+    fi
+
+    local csrf_status
+    csrf_status=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 -X POST "http://127.0.0.1:${gui_port}/api/unban" 2>/dev/null)
+    if [[ "$csrf_status" == "403" ]]; then
+        pass "POST without X-LoxProx-Gui header rejected (403)"
+    else
+        fail "POST without X-LoxProx-Gui header returned HTTP $csrf_status (expected 403)"
+    fi
+
+    if command -v qrencode >/dev/null 2>&1; then
+        pass "qrencode is installed"
+    else
+        fail "qrencode is NOT installed"
+    fi
+}
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 main() {
@@ -455,6 +558,8 @@ main() {
     test_sysctl
     test_backup
     test_tunnel
+    test_tls
+    test_gui
 
     echo ""
     echo "═══════════════════════════════════════════════════════════════════════════════"
