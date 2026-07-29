@@ -45,3 +45,10 @@ RELAY_ENABLE_CROWDSEC="true"
 RELAY_RATE_LIMIT_REQ_PER_SEC="10"
 RELAY_RATE_LIMIT_BURST="100"
 RELAY_RATE_LIMIT_CONN_PER_IP="20"
+
+# [OPTIONAL] Narrow SSH to your own admin source ranges. Empty/omitted = SSH is
+# reachable from any source IP (sshd is still hardened to key-only — the installer
+# disables password auth once a key is present). If you administer this VPS from
+# static IPs, list them here to shrink the attack surface:
+#     RELAY_SSH_ALLOWED_SUBNETS=("203.0.113.5/32" "198.51.100.0/24")
+RELAY_SSH_ALLOWED_SUBNETS=()

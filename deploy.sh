@@ -599,6 +599,19 @@ preflight() {
         warn "This script targets Debian 12 (Bookworm). Detected OS may differ — continuing."
     fi
 
+    # H4: jq is a HARD dependency of the alerting pipeline — discord-alert.sh
+    # builds its webhook payload with `jq -n` and gateway-monitor.sh parses
+    # `cscli … -o json` with `jq -r`, both under `set -euo pipefail`. jq is not
+    # in Debian 12's base install, and every caller invokes the alert script as
+    # `… || true`, so a missing jq makes ALL alerts (including the network
+    # watchdog's pre-reboot CRITICAL) die silently at exit 127 while the operator
+    # believes alerting is live. Install it up front, before anything can alert.
+    if ! command -v jq &>/dev/null; then
+        info "Installing jq (required by the Discord/monitor alerting pipeline)..."
+        apt-get update -q && apt-get install -y jq >/dev/null \
+            || warn "jq install failed — Discord and monitor alerts will NOT work until 'apt-get install -y jq' succeeds."
+    fi
+
     # Substrate check — VM only, LXC unsupported.
     #
     # Several gateway defenses silently degrade or no-op in an unprivileged
@@ -2959,6 +2972,16 @@ health_check() {
             fi
         fi
     done
+
+    # H4: alerting depends on jq — surface a missing jq loudly instead of letting
+    # every alert fail silently at runtime. Counted as a failure because a gateway
+    # that cannot alert is not correctly deployed, even if every service is up.
+    if command -v jq &>/dev/null; then
+        ok "jq present (alerting pipeline dependency)"
+    else
+        error "jq MISSING — Discord + monitor alerts are silently disabled. Fix: apt-get install -y jq"
+        failures=$((failures + 1))
+    fi
 
     info "Firewall input policy:"
     nft list chain inet filter input 2>/dev/null | grep policy || warn "Could not read nftables input chain"
