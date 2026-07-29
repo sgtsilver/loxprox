@@ -14,6 +14,7 @@
 #
 # The script is idempotent — safe to re-run.
 # Rollback: ./deploy.sh --rollback
+# All flags and env toggles: ./deploy.sh --help
 # ═══════════════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
@@ -86,6 +87,12 @@ TUNNEL_TOKEN="${TUNNEL_TOKEN-}"
 TUNNEL_PROXY_NAME="${TUNNEL_PROXY_NAME-loxone}"
 TUNNEL_REMOTE_PORT="${TUNNEL_REMOTE_PORT-8443}"
 TUNNEL_PUBLIC_HOST="${TUNNEL_PUBLIC_HOST-}"
+# v2.1 — LoxProx Panel: LAN-only web GUI (QR invite, status, config editor).
+# Default on. Reachability is bounded by nftables (LAN_SUBNET +
+# SSH_ALLOWED_SUBNETS only), never by a router forward.
+ENABLE_GUI="${ENABLE_GUI-true}"
+GUI_PORT="${GUI_PORT-1081}"
+GUI_PASSWORD="${GUI_PASSWORD-}"
 
 # Operator config file path. Override via env (LOXPROX_DEPLOY_CONF=/path) for
 # testing only — production callers should use the default.
@@ -98,6 +105,10 @@ LOXPROX_DEPLOY_CONF="${LOXPROX_DEPLOY_CONF:-/etc/loxprox/deploy.conf}"
 LOG_FILE="${LOG_FILE:-/var/log/loxprox-deploy.log}"
 BACKUP_DIR="${BACKUP_DIR:-/root/loxprox-backup-$(date +%Y%m%d-%H%M%S)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Absolute path of the running deploy.sh. Recorded into config.env so the
+# LoxProx Panel can re-run it for its apply / renew jobs — the source tree
+# lives wherever the operator unpacked it, there is no fixed location.
+LOXPROX_DEPLOY_SH="${LOXPROX_DEPLOY_SH:-$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")}"
 NGINX_SITE="${NGINX_SITE:-/etc/nginx/sites-available/loxone}"
 NGINX_ENABLED="${NGINX_ENABLED:-/etc/nginx/sites-enabled/loxone}"
 CROWDSEC_NGINX_ACQUIS="${CROWDSEC_NGINX_ACQUIS:-/etc/crowdsec/acquis.d/nginx.yaml}"
@@ -138,6 +149,9 @@ FRPC_BIN="${FRPC_BIN:-/usr/local/bin/frpc}"
 FRPC_CONF="${FRPC_CONF:-$FRP_DIR/frpc.toml}"
 FRPC_UNIT="${FRPC_UNIT:-/etc/systemd/system/frpc.service}"
 NGINX_TUNNEL_CONF="${NGINX_TUNNEL_CONF:-/etc/nginx/conf.d/loxprox-tunnel-realip.conf}"
+# v2.1 — LoxProx Panel install targets.
+GUI_UNIT="${GUI_UNIT:-/etc/systemd/system/loxprox-gui.service}"
+GUI_APP="${GUI_APP:-/opt/loxprox/loxprox-gui.py}"
 SYSCTL_CONF="${SYSCTL_CONF:-/etc/sysctl.d/99-security-gateway.conf}"
 NFTABLES_CONF="${NFTABLES_CONF:-/etc/nftables.conf}"
 LOGROTATE_CONF="${LOGROTATE_CONF:-/etc/logrotate.d/loxone-nginx}"
@@ -557,6 +571,29 @@ preflight() {
         warn "  (needs a public domain + ACME). Cleartext is only safe for LAN-only deployments."
     fi
 
+    # v2.1 — LoxProx Panel. A typo in ENABLE_GUI must fail here, not silently
+    # skip the panel (same contract as ENABLE_TLS/ENABLE_TUNNEL).
+    case "${ENABLE_GUI,,}" in
+        true|yes|1)
+            if [[ ! "$GUI_PORT" =~ ^[0-9]+$ ]] || (( GUI_PORT < 1 || GUI_PORT > 65535 )); then
+                error "GUI_PORT='$GUI_PORT' is not a valid port (1-65535)."
+                exit 1
+            fi
+            case "$GUI_PORT" in
+                22|80|1080)
+                    error "GUI_PORT=$GUI_PORT is already used by this gateway (22 SSH, 80 ACME, 1080 proxy)."
+                    error "Pick a different port for the panel in $LOXPROX_DEPLOY_CONF."
+                    exit 1
+                    ;;
+            esac
+            ;;
+        false|no|0|"") ;;
+        *)
+            error "Invalid ENABLE_GUI value: '$ENABLE_GUI' (expected true/false)."
+            exit 1
+            ;;
+    esac
+
     # Debian 12 check
     if ! grep -q "bookworm\|12" /etc/os-release 2>/dev/null; then
         warn "This script targets Debian 12 (Bookworm). Detected OS may differ — continuing."
@@ -722,6 +759,27 @@ setup_firewall() {
         tls_port_rule=$'\n        # ACME HTTP-01 + HTTPS-on-1080 301 redirector (v1.5.0)\n        tcp dport 80 accept'
     fi
 
+    # v2.1: the LoxProx Panel port is reachable from the LAN and the SSH
+    # source networks only — never from the internet. nft rejects an anonymous
+    # set that contains the same element twice, and LAN_SUBNET is almost always
+    # also an SSH_ALLOWED_SUBNETS entry, so build the union deduplicated.
+    local gui_port_rule=""
+    case "${ENABLE_GUI,,}" in
+        true|yes|1)
+            local gui_sources=() _cand _known
+            for _cand in "$LAN_SUBNET" "${SSH_ALLOWED_SUBNETS[@]}"; do
+                [[ -n "$_cand" ]] || continue
+                for _known in "${gui_sources[@]}"; do
+                    [[ "$_known" == "$_cand" ]] && continue 2
+                done
+                gui_sources+=("$_cand")
+            done
+            local gui_set
+            gui_set=$(IFS=', '; echo "${gui_sources[*]}")
+            gui_port_rule=$'\n        # LoxProx Panel — LAN only (v2.1)\n'"        tcp dport ${GUI_PORT} ip saddr { ${gui_set} } accept"
+            ;;
+    esac
+
     cat > "$NFTABLES_CONF" <<EOF
 #!/usr/sbin/nft -f
 # LoxProx — base firewall
@@ -763,7 +821,7 @@ table inet filter {
 
         # Loxone proxy — open to internet (router forwards 1080 here)
         tcp dport 1080 accept
-${tls_port_rule}
+${tls_port_rule}${gui_port_rule}
         # Everything else is dropped by policy
     }
 
@@ -1930,6 +1988,108 @@ _loxprox_tunnel_remove() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# LoxProx Panel (v2.1) — LAN-only web GUI
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# gui/loxprox-gui.py is a single-file Python 3 stdlib server (no pip, no venv)
+# installed to $GUI_APP and run by $GUI_UNIT. It serves the family QR
+# invitation, the gateway status view and the config editor.
+#
+# Toggle-friendly like setup_tls / setup_tunnel:
+#   ENABLE_GUI=true  → install qrencode + the panel script, (re)write the unit,
+#                      enable and restart it so a new script version takes over.
+#   ENABLE_GUI=false → disable + remove the unit and the installed script.
+#
+# Exposure is bounded by setup_firewall's LAN-only rule, not by the panel
+# itself. Nothing here opens a router port.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_loxprox_write_gui_unit() {
+    cat > "$GUI_UNIT" <<EOF
+# LoxProx — Panel unit (v2.1)
+# Generated by deploy.sh — DO NOT EDIT MANUALLY (re-run deploy.sh).
+#
+# Runs as root deliberately: the panel drives cscli (CrowdSec's local API
+# socket is root-only), systemctl (service restarts), reads deploy.conf
+# (0640 root) and runs deploy.sh for its apply job.
+# ProtectSystem / ProtectHome are deliberately NOT set for the same reason —
+# the apply job runs deploy.sh, which writes across /etc, /opt and /usr; any
+# filesystem sandbox here would break it. The panel's attack surface is
+# constrained at the network layer instead (nftables: LAN sources only) and
+# by the Host-header allowlist inside the panel itself.
+[Unit]
+Description=LoxProx Panel (LAN-only GUI)
+After=network.target nginx.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 ${GUI_APP}
+Restart=always
+RestartSec=5
+PrivateTmp=true
+StandardOutput=append:/var/log/loxprox-gui.log
+StandardError=append:/var/log/loxprox-gui.log
+SyslogIdentifier=loxprox-gui
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 0644 "$GUI_UNIT"
+}
+
+setup_gui() {
+    case "${ENABLE_GUI,,}" in
+        true|yes|1)
+            banner "LoxProx Panel — enable (LAN-only GUI on :${GUI_PORT})"
+
+            dpkg -l | grep -q "^ii  qrencode " || apt-get install -y qrencode
+
+            local src="${SCRIPT_DIR:-.}/gui/loxprox-gui.py"
+            if [[ ! -f "$src" ]]; then
+                error "Panel source not found at $src — cannot install the GUI."
+                error "Run deploy.sh from a complete source tree (git clone), not a copied single file."
+                return 1
+            fi
+            mkdir -p "$(dirname "$GUI_APP")"
+            # Ownership is the production intent; unprivileged test runs fall
+            # back to the mode-only form (same softening as the frpc config).
+            install -m 0755 -o root -g root "$src" "$GUI_APP" 2>/dev/null \
+                || install -m 0755 "$src" "$GUI_APP"
+            info "Installed: $GUI_APP"
+
+            _loxprox_write_gui_unit
+            systemctl daemon-reload
+            systemctl enable loxprox-gui.service
+            # restart, not start: a re-deploy ships a new panel version and the
+            # running process must be replaced for it to take effect.
+            systemctl restart loxprox-gui.service
+            ok "LoxProx Panel active → http://${GATEWAY_IP}:${GUI_PORT}/"
+            ok "  Family invitation (printable QR): http://${GATEWAY_IP}:${GUI_PORT}/invite"
+            if [[ -z "$GUI_PASSWORD" ]]; then
+                info "GUI_PASSWORD is empty — the panel accepts mutations from any LAN client."
+                info "  Set GUI_PASSWORD in $LOXPROX_DEPLOY_CONF if untrusted devices share the LAN."
+            fi
+            ;;
+        false|no|0|"")
+            # Only act if there's anything to undo — keeps re-runs of a
+            # never-GUI-enabled host quiet.
+            if [[ -f "$GUI_UNIT" ]]; then
+                banner "LoxProx Panel — disable (stop unit, remove panel)"
+                systemctl disable --now loxprox-gui.service 2>/dev/null || true
+                rm -f "$GUI_UNIT"
+                systemctl daemon-reload 2>/dev/null || true
+                rm -f "$GUI_APP"
+                ok "LoxProx Panel removed (unit + $GUI_APP deleted, firewall rule dropped)."
+            fi
+            ;;
+        *)
+            error "Invalid ENABLE_GUI value: '$ENABLE_GUI' (expected true/false)."
+            return 1
+            ;;
+    esac
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # AppArmor
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -2764,6 +2924,12 @@ WATCHDOG_EXPECTED_IP="$GATEWAY_IP"
 # public-path probe (empty → service-level checks only).
 ENABLE_TUNNEL="$ENABLE_TUNNEL"
 TUNNEL_PUBLIC_HOST="${TUNNEL_PUBLIC_HOST:-}"
+# v2.1 — LoxProx Panel. test-gateway.sh gates its panel checks on these two;
+# LOXPROX_DEPLOY_SH is the absolute path of the deploy.sh that last ran here,
+# which the panel invokes for its apply / renew jobs.
+ENABLE_GUI="$ENABLE_GUI"
+GUI_PORT="$GUI_PORT"
+LOXPROX_DEPLOY_SH="$LOXPROX_DEPLOY_SH"
 EOF
 
     chmod 640 "$GATEWAY_CONFIG_FILE"
@@ -2922,10 +3088,241 @@ EOF
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# CLI — usage + restore-from-backup
+# ═══════════════════════════════════════════════════════════════════════════════
+
+usage() {
+    cat <<EOF
+LoxProx — Loxone Miniserver security gateway deployment.
+
+Usage:
+  sudo bash deploy.sh                    Full deploy (idempotent — safe to re-run).
+                                         Reads $LOXPROX_DEPLOY_CONF.
+
+  sudo bash deploy.sh --bootstrap-config Extract a deploy.conf from the live state of
+                                         an existing install (upgrade path). Writes the
+                                         file after you confirm; does not deploy.
+  sudo bash deploy.sh --finalize-ssh     Re-run SSH hardening after installing an
+                                         authorized_keys entry (soft → hard mode).
+  sudo bash deploy.sh --rollback         Restore the most recent pre-deploy snapshot
+                                         from /root/loxprox-backup-*.
+  sudo bash deploy.sh --renew-tls        Force an acme.sh certificate renewal now.
+  sudo bash deploy.sh --remove-tls       Full TLS removal: site revert, cert files,
+                                         acme.sh state and cron.
+  sudo bash deploy.sh --remove-tunnel    Full tunnel removal: frpc binary, config,
+                                         units, watchdog and the frpc user.
+  sudo bash deploy.sh --restore <tarball>
+                                         Restore config files from a gateway-backup.sh
+                                         archive. Accepts an absolute path or a bare
+                                         filename inside /root/loxprox-backups/.
+                                         Snapshots every file it touches first.
+  bash deploy.sh --help                  This text.
+
+Environment toggles:
+  ALLOW_LXC=1                  Deploy inside an LXC container anyway (reduced
+                               security posture — sysctls, auditd, AppArmor and
+                               nftables silently degrade). VM is the supported target.
+  LOXPROX_FORCE_REGEN_NGINX=1  Regenerate the nginx site from the template, discarding
+                               operator hand-edits (normally preserved).
+  LOXPROX_BOOTSTRAP_YES=1      Answer "yes" to the --bootstrap-config confirmation
+                               (non-interactive use).
+  LOXPROX_GPG_QUORUM=N         Independent keyservers that must agree on the CrowdSec
+                               signing key before it is imported (default 2).
+  LOXPROX_GPG_VERIFY_MODE=soft|hard
+                               Behaviour when the quorum is not met: soft (default)
+                               warns and falls back to TOFU, hard aborts the install.
+                               A fingerprint CONFLICT always aborts, in both modes.
+
+Log: ${LOG_FILE}
+EOF
+}
+
+usage_short() {
+    cat <<EOF
+Usage: deploy.sh [--bootstrap-config | --finalize-ssh | --rollback | --renew-tls |
+                  --remove-tls | --remove-tunnel | --restore <tarball> | --help]
+Run without arguments for a full deploy. Details: bash deploy.sh --help
+EOF
+}
+
+# Locate a file by basename inside the extracted archive. Backups are flat
+# (gateway-backup.sh copies by basename into one directory), but -print -quit
+# also copes with a nested layout from a hand-rolled archive.
+_loxprox_restore_locate() {
+    local work="$1" name="$2" hit=""
+    hit=$(find "$work" -type f -name "$name" -print -quit 2>/dev/null) || true
+    [[ -n "$hit" ]] || return 1
+    printf '%s\n' "$hit"
+}
+
+# --restore <tarball>: put the config files from a gateway-backup.sh archive
+# back in place. Deliberately does NOT restart the world — services are
+# reconciled by a normal `sudo bash deploy.sh` afterwards, which is also what
+# re-derives everything this archive does not carry.
+_loxprox_restore_backup() {
+    local arg="${1:-}"
+    banner "Restore from backup archive"
+
+    if [[ -z "$arg" ]]; then
+        error "--restore needs a backup archive."
+        usage_short
+        return 1
+    fi
+
+    # Bare filename → resolve inside the backup directory gateway-backup.sh writes.
+    local tarball="$arg"
+    [[ "$tarball" == /* ]] || tarball="/root/loxprox-backups/$tarball"
+    if [[ ! -f "$tarball" ]]; then
+        error "Backup archive not found: $tarball"
+        error "Pass an absolute path, or the filename of an archive in /root/loxprox-backups/."
+        error "Available archives:"
+        ls -1t /root/loxprox-backups/*.tar.gz 2>/dev/null | head -10 | sed 's/^/    /' || true
+        return 1
+    fi
+
+    check_root
+
+    # /var/tmp, not /tmp: setup_tmp_mount mounts /tmp noexec,nodev,nosuid and
+    # a restore must not depend on that policy staying loose.
+    local work
+    work=$(mktemp -d /var/tmp/loxprox-restore.XXXXXX) || return 1
+    # shellcheck disable=SC2064
+    trap "rm -rf '$work'; trap - RETURN" RETURN
+
+    if ! tar -xzf "$tarball" -C "$work" 2>>"$LOG_FILE"; then
+        error "Could not extract $tarball — not a gzip tar archive, or it is corrupted."
+        return 1
+    fi
+    info "Extracted $tarball to $work"
+
+    local restored=() src
+
+    # Every destination is snapshotted through the normal backup mechanism
+    # first, so --rollback (and the nginx revert below) can undo this restore.
+    if src=$(_loxprox_restore_locate "$work" "deploy.conf"); then
+        backup_file "$LOXPROX_DEPLOY_CONF"
+        mkdir -p "$(dirname "$LOXPROX_DEPLOY_CONF")"
+        chmod 0750 "$(dirname "$LOXPROX_DEPLOY_CONF")"
+        install -m 0640 "$src" "$LOXPROX_DEPLOY_CONF"
+        chown root:root "$LOXPROX_DEPLOY_CONF" 2>/dev/null || true
+        restored+=("$LOXPROX_DEPLOY_CONF")
+    fi
+
+    local pem
+    for pem in fullchain.pem privkey.pem; do
+        if src=$(_loxprox_restore_locate "$work" "$pem"); then
+            backup_file "$LOXPROX_TLS_DIR/$pem"
+            mkdir -p "$LOXPROX_TLS_DIR"
+            chmod 0750 "$LOXPROX_TLS_DIR"
+            install -m 0640 "$src" "$LOXPROX_TLS_DIR/$pem"
+            chown root:root "$LOXPROX_TLS_DIR/$pem" 2>/dev/null || true
+            restored+=("$LOXPROX_TLS_DIR/$pem")
+        fi
+    done
+
+    if src=$(_loxprox_restore_locate "$work" "frpc.toml"); then
+        backup_file "$FRPC_CONF"
+        mkdir -p "$FRP_DIR"
+        # Mode first, then ownership — the file carries the tunnel token and
+        # must never be world-readable, not even between the two calls.
+        install -m 0640 "$src" "$FRPC_CONF"
+        chown root:frpc "$FRPC_CONF" 2>/dev/null \
+            || warn "Could not chown $FRPC_CONF to root:frpc (user missing?) — fix before enabling the tunnel."
+        restored+=("$FRPC_CONF")
+    fi
+
+    if src=$(_loxprox_restore_locate "$work" "99-loxprox.conf"); then
+        local sshd_drop="/etc/ssh/sshd_config.d/99-loxprox.conf"
+        backup_file "$sshd_drop"
+        mkdir -p "$(dirname "$sshd_drop")"
+        install -m 0644 "$src" "$sshd_drop"
+        if sshd -t 2>>"$LOG_FILE"; then
+            systemctl reload ssh 2>>"$LOG_FILE" || systemctl reload sshd 2>>"$LOG_FILE" || true
+            restored+=("$sshd_drop")
+        else
+            warn "sshd -t rejects the restored $sshd_drop — sshd NOT reloaded."
+            warn "  The file is in place but inactive; inspect it, then: systemctl reload ssh"
+            restored+=("$sshd_drop  (sshd -t FAILED — not reloaded)")
+        fi
+    fi
+
+    if src=$(_loxprox_restore_locate "$work" "loxone"); then
+        backup_file "$NGINX_SITE"
+        mkdir -p "$(dirname "$NGINX_SITE")"
+        install -m 0644 "$src" "$NGINX_SITE"
+        if nginx -t >>"$LOG_FILE" 2>&1; then
+            systemctl reload nginx 2>/dev/null || true
+            restored+=("$NGINX_SITE")
+        else
+            error "nginx -t fails with the restored site — reverting to the pre-restore version."
+            if [[ -f "$BACKUP_DIR/files$NGINX_SITE" ]]; then
+                cp -a "$BACKUP_DIR/files$NGINX_SITE" "$NGINX_SITE"
+            else
+                rm -f "$NGINX_SITE"
+            fi
+            nginx -t >>"$LOG_FILE" 2>&1 && systemctl reload nginx 2>/dev/null || true
+            warn "nginx site NOT restored — the archived copy is at $src (inspect it manually)."
+        fi
+    fi
+
+    local pair name dest
+    for pair in \
+        "config.yaml:/etc/crowdsec/config.yaml" \
+        "whitelist-loxone.yaml:/etc/crowdsec/parsers/s02-enrich/whitelist-loxone.yaml" \
+        "nginx.yaml:$CROWDSEC_NGINX_ACQUIS" \
+        "ssh.yaml:$CROWDSEC_SSH_ACQUIS" \
+        "appsec.yaml:$CROWDSEC_APPSEC_ACQUIS"
+    do
+        name="${pair%%:*}"
+        dest="${pair#*:}"
+        src=$(_loxprox_restore_locate "$work" "$name") || continue
+        backup_file "$dest"
+        mkdir -p "$(dirname "$dest")"
+        install -m 0644 "$src" "$dest"
+        restored+=("$dest")
+    done
+
+    if (( ${#restored[@]} == 0 )); then
+        warn "The archive contains none of the files this restore knows about."
+        warn "  Expected names: deploy.conf, fullchain.pem, privkey.pem, frpc.toml,"
+        warn "  99-loxprox.conf, loxone, config.yaml, whitelist-loxone.yaml, *.yaml acquis."
+        return 1
+    fi
+
+    ok "Restored ${#restored[@]} file(s) from $tarball:"
+    local r
+    for r in "${restored[@]}"; do
+        ok "    $r"
+    done
+    ok "Pre-restore snapshot of every touched file: $BACKUP_DIR"
+    ok "Services still run the OLD configuration. Reconcile them now with:"
+    ok "    sudo bash deploy.sh"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════════════
 
 main() {
+    # Flag triage before anything touches the filesystem: --help must work for
+    # an unprivileged operator, and an unknown flag must NOT fall through to a
+    # full deploy (a mistyped --remove-tunnel used to deploy instead).
+    case "${1:-}" in
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        ""|--rollback|--bootstrap-config|--finalize-ssh|--renew-tls|--remove-tls|--remove-tunnel|--restore)
+            ;;
+        -*)
+            # Written straight to stderr, not through error(): the log file may
+            # not be writable yet, and the exit code must stay exactly 2.
+            printf '[ERROR] Unknown option: %s\n' "$1" >&2
+            usage_short >&2
+            exit 2
+            ;;
+    esac
+
     [[ "${1:-}" == "--rollback" ]] && { rollback; exit 0; }
 
     mkdir -p "$(dirname "$LOG_FILE")"
@@ -2967,6 +3364,15 @@ main() {
     if [[ "${1:-}" == "--remove-tunnel" ]]; then
         _loxprox_load_config || true
         _loxprox_tunnel_remove
+        exit $?
+    fi
+
+    # v2.1 — restore config files from a gateway-backup.sh archive. Config is
+    # loaded best-effort so path overrides in deploy.conf are honoured; the
+    # archive's own deploy.conf overwrites the live one when present.
+    if [[ "${1:-}" == "--restore" ]]; then
+        _loxprox_load_config || true
+        _loxprox_restore_backup "${2:-}"
         exit $?
     fi
 
@@ -3046,6 +3452,7 @@ main() {
     setup_security_monitoring
     setup_network_watchdog
     write_runtime_config
+    setup_gui
     health_check
     summary
 

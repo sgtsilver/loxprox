@@ -2,8 +2,13 @@
 
 **Status:** Published on GitHub  
 **Repo:** https://github.com/sgtsilver/loxprox  
-**Version:** 2.0.1 (released)  
-**Last updated:** 2026-07-02 (v2.0.1 — fix: deploy.sh aborted on TLS hosts when the acme.sh cron line was written in acme.sh's quoted-home form; verified by a full clean deploy on the live production VM. v2.0.0 — zero-open-ports frp tunnel (opt-in, `ENABLE_TUNNEL`), `/ws/` WebSocket template fix, Tier-2 resilience: tunnel watchdog + ACME fallback CA; token configs locked 0640 before chown; layered on top of the v1.5.2 audit)
+**Version:** 2.0.1 (released) — v2.1 in progress on `feat/v2.1-family-gui`  
+**Last updated:** 2026-07-29 (v2.1 branch — LoxProx Panel: LAN-only web GUI with family QR
+invitation, status tiles, log viewer, guarded config editor + one-click apply, unban/restart/renew
+actions; `deploy.sh --restore` + expanded daily backup; `--help` + strict flag parsing;
+test-gateway.sh TLS + Panel live checks; sweep-4 audit recorded in the local-only
+`audits/2026-07-29-sweep4-audit.md` — `audits/` is gitignored; open findings tracked there)  
+**Previous:** 2026-07-02 (v2.0.1 — fix: deploy.sh aborted on TLS hosts when the acme.sh cron line was written in acme.sh's quoted-home form; verified by a full clean deploy on the live production VM. v2.0.0 — zero-open-ports frp tunnel (opt-in, `ENABLE_TUNNEL`), `/ws/` WebSocket template fix, Tier-2 resilience: tunnel watchdog + ACME fallback CA; token configs locked 0640 before chown; layered on top of the v1.5.2 audit)
 
 ---
 
@@ -34,7 +39,7 @@ Internet ──► Router:1080 ──► Gateway:1080 ──► Loxone:80
 
 | File | Purpose |
 |------|---------|
-| `deploy.sh` | One-shot Debian 12 hardening & installation (~3000 lines, idempotent) |
+| `deploy.sh` | One-shot Debian 12 hardening & installation (~3500 lines, idempotent) |
 | `detect-loxone.sh` | Network autodetector — finds your Miniserver by MAC OUI and API fingerprint |
 | `test-gateway.sh` | 50+ automated checks — run after deploy to verify every control |
 | `set-static-ip.sh` | Pre-deploy VM network configuration |
@@ -44,6 +49,7 @@ Internet ──► Router:1080 ──► Gateway:1080 ──► Loxone:80
 | `tunnel-relay/install-relay.sh` | v2.0: one-shot relay-VPS installer (frps + nginx TLS + CrowdSec perimeter) |
 | `security-monitoring/network-watchdog.service` | systemd system service (root) |
 | `security-monitoring/network-watchdog.timer` | Runs watchdog every 60 seconds |
+| `gui/loxprox-gui.py` | v2.1: LoxProx Panel — LAN-only web GUI (family QR invitation, status, logs, config editor + apply, unban/restart/renew). Python 3.11 stdlib, `loxprox-gui.service`, port 1081, `ENABLE_GUI` toggle |
 
 ---
 
@@ -249,14 +255,15 @@ All 23 findings from the 2026-05-06 Ezio audit have been addressed:
 | LOW-001–LOW-012 | All fixed (mktemp, stricter IP regex, logrotate, circuit breaker, proxy_hide_header, test split, webhook rotation docs, AppSec tests, nftables comment, email delta, rollback glob) |
 
 ### Cumulative Stats
-- **Total findings resolved:** 66 (23 audit + 10 handover + 12 second sweep + 13 full-project-audit v1.5.2 + 8 v2.0 tunnel pre-release)
-- **Test assertions:** 213 (36 pytest + 166 deploy integration + 11 scanner) — all green as of v2.0.0
+- **Total findings resolved:** 66 (23 audit + 10 handover + 12 second sweep + 13 full-project-audit v1.5.2 + 8 v2.0 tunnel pre-release) + sweep-4 backup/CLI/docs class fixed on the v2.1 branch (remainder in the local-only `audits/2026-07-29-sweep4-audit.md`)
+- **Test assertions:** 278 (61 pytest + 206 deploy integration + 11 scanner) — all green on the v2.1 branch
 
 ## Test Infrastructure
 
 ```
 tests/
 ├── run-tests.sh              # unified test runner (runs all of tests/)
+├── test_gui.py               # 25 pytest cases for the Panel's pure logic (v2.1)
 ├── test_progressive_ban.py   # 22 pytest cases for ban script
 ├── test_repo_hygiene.py      # 14 repo-hygiene guards (OpSec, versions, hardware,
 │                             #   config model, dead-file refs, links, bilingual,
@@ -289,7 +296,7 @@ sudo ./test-gateway.sh
 ### Quick Wins
 - [ ] Ansible role for fleet deployment
 - [ ] Docker/Podman container version
-- [ ] Web dashboard for CrowdSec decisions + gateway metrics
+- [x] Web dashboard for CrowdSec decisions + gateway metrics — shipped as the LoxProx Panel (v2.1, `docs/GUI-PANEL.md`)
 - [ ] Automatic TLS certificate renewal monitoring
 - [ ] Prometheus metrics export
 

@@ -452,6 +452,57 @@ Vollständige Entfernung (Binary, Config, Units, Benutzer):
 
 ---
 
+## LoxProx Panel (GUI)
+
+Optionale (per Default aktive) LAN-only Web-UI für Status-Kacheln,
+Log-Ansicht, Config-Bearbeitung und Ein-Klick-Support-Aktionen (IP
+entbannen, Service neu starten, TLS-Renewal erzwingen, Test-Alert senden).
+Läuft auf dem Gateway selbst und ist ausschließlich aus `LAN_SUBNET` +
+`SSH_ALLOWED_SUBNETS` erreichbar — nie aus dem Internet.
+
+### Config-Keys
+
+| Key | Default | Zweck |
+|-----|---------|-------|
+| `ENABLE_GUI` | `"true"` | Master-Toggle. Auf `"false"` setzen zum Deaktivieren. |
+| `GUI_PORT` | `"1081"` | TCP-Port, auf dem das Panel lauscht. |
+| `GUI_PASSWORD` | `""` | Leer = keine Auth. Setzen, um bei jedem mutierenden Request den Header `X-LoxProx-Auth` zu verlangen — empfohlen, wenn untrusted Geräte (Gäste, IoT, Kinder-Tablets) dein LAN teilen. |
+
+Vollständige Feature-Tour, Security-Modell und Troubleshooting:
+[`docs/GUI-PANEL.de.md`](docs/GUI-PANEL.de.md).
+
+---
+
+## Backup & Restore
+
+`deploy.sh` installiert einen täglichen Backup-Timer, der nach
+`/root/loxprox-backups/*.tar.gz` archiviert (Mode `0600` — das Tarball
+enthält jetzt Schlüsselmaterial). Seit v2.1 enthält das tägliche Backup
+zusätzlich:
+
+- `/etc/loxprox/deploy.conf`
+- `/etc/loxprox/tls/fullchain.pem` + `privkey.pem` (wenn TLS aktiv ist)
+- `/etc/frp/frpc.toml` (wenn der Tunnel aktiv ist)
+- `/etc/ssh/sshd_config.d/99-loxprox.conf`
+
+zusätzlich zu Nginx-Site, CrowdSec-Config und nftables-Ruleset, die es
+schon vorher sicherte.
+
+### Aus einem Backup wiederherstellen
+
+```bash
+sudo bash deploy.sh --restore /root/loxprox-backups/<tarball>.tar.gz
+```
+
+Das legt zuerst einen Vor-Restore-Sicherheits-Snapshot an, extrahiert das
+Tarball und schreibt die bekannten Dateien mit den korrekten Modes zurück.
+**Danach `sudo bash deploy.sh` erneut ausführen**, um Services,
+Firewall-Regeln und Units gegen die wiederhergestellte Config zu
+reconcilen — `--restore` legt nur Dateien zurück, wendet sie aber nicht
+erneut an.
+
+---
+
 ## Troubleshooting
 
 ### "Ich kenne die IP meines Loxone nicht"
