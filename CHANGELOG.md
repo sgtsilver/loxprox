@@ -4,7 +4,34 @@ All notable changes to this project will be documented in this file.
 
 > **v1.3.0 was withdrawn on 2026-05-18 — do not use.** The systemd unit change in v1.3.0 (moving `StartLimit*` from `[Service]` to `[Unit]`) activated a previously-silent `StartLimitBurst=3` that, combined with the watchdog's 60-second timer and `FailureAction=reboot`, caused an unbounded reboot loop on the 4th start. **v1.3.1 supersedes v1.3.0** and contains the same fixes plus the burst-value correction. Install v1.3.1 or later.
 
-## [Unreleased]
+## [2.1.0] — 2026-07-29
+
+The v2.1 theme: a LAN-only operator/family GUI, a real backup/restore path, and
+the two highest-severity findings from the 2026-07-29 audit sweep. Everything is
+opt-in or backward-compatible; a v2.0.x install upgrades without behavior change
+except that the Panel starts on `:1081` (LAN-only) unless `ENABLE_GUI="false"`.
+
+### Security
+
+- **CRIT — the relay VPS installer left SSH wide open and unhardened.**
+  `tunnel-relay/install-relay.sh` opened `tcp dport 22` from `0.0.0.0/0` and
+  never wrote an sshd drop-in or checked for keys, while most provider images
+  ship `PermitRootLogin yes` + `PasswordAuthentication yes` — on the one box
+  that holds `TUNNEL_TOKEN`, the public TLS private key, and terminates every
+  remote Loxone session. New `setup_ssh_hardening` mirrors the gateway's:
+  key-only HARD drop-in when an `authorized_keys` is present, a no-lockout SOFT
+  fallback (password kept + login nag + `--finalize-ssh` re-entry) on a keyless
+  fresh VPS, `sshd -t` with revert. Optional `RELAY_SSH_ALLOWED_SUBNETS` narrows
+  the nftables `:22` source; the relay health check reports residual password
+  auth.
+- **HIGH — `jq` was a hard dependency of the alerting pipeline but was never
+  installed.** `discord-alert.sh` builds its webhook payload with `jq -n` and
+  `gateway-monitor.sh` parses `cscli … -o json` with `jq -r`, both under
+  `set -euo pipefail`; every caller runs the alert script as `… || true`. On a
+  stock Debian 12 box a missing jq made **all** alerts — including the network
+  watchdog's pre-reboot CRITICAL — die at exit 127, silently. `deploy.sh`
+  preflight now installs jq before anything can alert and `health_check` fails
+  loudly if it is still missing; the relay installs it in its base package set.
 
 ### Added
 
