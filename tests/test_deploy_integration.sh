@@ -72,6 +72,10 @@ mkdir -p "$MOCK_ROOT"/{etc/nginx/sites-available,etc/nginx/sites-enabled,etc/ngi
 systemctl() { true; }
 apt-get() { true; }
 dpkg() { true; }
+# v2.3: configure_nginx now ACTS on a failing `nginx -t` (restores the backup
+# and returns 1) instead of ignoring it, so an unmocked/absent nginx binary
+# would silently revert every regeneration under test.
+nginx() { true; }
 # `hostname -I` is Linux-only; macOS rejects it. Provide a deterministic mock
 # so _loxprox_extract_config_from_live_state can test cleanly on either OS.
 hostname() {
@@ -87,7 +91,7 @@ ip() {
         *) command ip "$@" 2>/dev/null || true ;;
     esac
 }
-export -f systemctl apt-get dpkg hostname ip
+export -f systemctl apt-get dpkg nginx hostname ip
 
 # Source deploy.sh functions (skip main via BASH_SOURCE guard)
 # shellcheck source=../deploy.sh
