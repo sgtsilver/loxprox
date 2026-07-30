@@ -55,7 +55,7 @@ deine Operator-Config zu rekonstruieren:
 | `LAN_SUBNET` | Erste `proto kernel scope link`-Route aus `ip route` |
 | `SSH_ALLOWED_SUBNETS` | Das Set in `tcp dport 22 ip saddr { … }` in `/etc/nftables.conf` |
 | `ENABLE_APPSEC` | Vorhandensein von `auth_request /crowdsec-appsec` in der nginx-Site |
-| `APPSEC_MODE` | Key `mode:` in `/etc/crowdsec/acquis.d/appsec.yaml` |
+| `APPSEC_MODE` | Die AppSec-Config, auf die die Acquisition (`/etc/crowdsec/acquis.d/appsec.yaml`) zeigt — erkennt den v2.3-Monitor-Marker, fällt für Dateien von vor v2.3 auf den alten Key `mode:` zurück (der wurde von CrowdSec ohnehin nie ausgewertet) |
 | `CROWDSEC_WHITELIST_IPS` | `/etc/crowdsec/parsers/s02-enrich/whitelist-loxone.yaml` |
 | `DISCORD_WEBHOOK_URL` | Zeile `DISCORD_WEBHOOK_URL=` in `/etc/loxprox/config.env` |
 

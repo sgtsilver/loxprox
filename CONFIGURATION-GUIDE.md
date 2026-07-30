@@ -214,6 +214,37 @@ sudo bash deploy.sh --finalize-ssh
 
 ---
 
+## Re-running `deploy.sh` — nginx site regeneration & exit codes
+
+Every re-run since v2.3 checks whether `/etc/nginx/sites-available/loxone`
+still matches the template it was generated from (a version stamp plus a
+fingerprint of the `deploy.conf` values it renders) and regenerates it when
+either drifted — picking up template fixes and any changed rate limit,
+timeout, or backend IP. The old file is backed up first, the TLS block is
+re-applied if the site was serving HTTPS, and a failed `nginx -t` reverts
+to the backup automatically. Two environment toggles change that behavior:
+
+| Toggle | Effect |
+|---|---|
+| `LOXPROX_KEEP_NGINX_SITE=1` | Never touch an existing site — for a hand-maintained file. Template fixes and `deploy.conf` changes (rate limits, backend IP, AppSec wiring) then do **not** reach it until you unset it. |
+| `LOXPROX_FORCE_REGEN_NGINX=1` | Regenerate the site even when its stamp is already current. |
+
+```bash
+sudo LOXPROX_FORCE_REGEN_NGINX=1 bash deploy.sh
+```
+
+`deploy.sh`'s own exit code tells automation (and you) what actually
+happened:
+
+| Code | Meaning |
+|---|---|
+| `0` | Deploy finished, all checks passed. |
+| `1` | A health check failed, or a core step aborted the run. |
+| `2` | Unknown command-line option. |
+| `3` | Deployed, but one or more **optional** steps (TLS, tunnel, CrowdSec…) failed — listed at the end of the run. The gateway proxies; those features just aren't active. Re-run once the cause is fixed. |
+
+---
+
 ## Optional Values (Adjust If Needed)
 
 ### Rate Limiting
@@ -250,7 +281,15 @@ These prevent slowloris attacks (attackers open connections and send data very s
 | Setting | Default | What It Does |
 |---------|---------|--------------|
 | `ENABLE_APPSEC` | true | Inspects every HTTP request for CVE exploit patterns |
-| `APPSEC_MODE` | enforce | Blocks matched requests (use "monitor" for first week) |
+| `APPSEC_MODE` | enforce | `enforce` blocks matched requests with HTTP 403; `monitor` alerts on a match but never blocks (use for the first week) |
+
+Switching to `monitor` writes a local AppSec config
+(`/etc/crowdsec/appsec-configs/loxprox-virtual-patching-monitor.yaml`) that
+carries the hub's virtual-patching rules with `default_remediation: allow`;
+switching back to `enforce` removes it again. Detections in monitor mode
+show up in `cscli alerts list`, **not** in
+`/var/log/nginx/appsec-detections.log` — nginx only writes to that file on
+a BLOCK verdict, which monitor mode never returns.
 
 **First-time setup recommendation:**
 ```bash
@@ -290,6 +329,50 @@ CROWDSEC_WHITELIST_IPS=(
     "198.51.100.22"       # notification gateway
 )
 ```
+
+### Households behind one IP (NAT/CGNAT)
+
+Every phone, tablet, TV and smart-home device in the house presents the
+**same public IP** to the gateway (and, behind CGNAT, so do other
+households sharing your ISP's address pool). Rate limits, CrowdSec's ban
+decisions, and progressive-ban escalation (below) all key on that one
+address — a single misbehaving device can trip a limit or a ban for the
+whole family, not just itself. If you run the tunnel, the relay's own
+limits stack on top of the gateway's for the same reason.
+
+**Primary mitigation: whitelist your household's WAN IP.**
+- Gateway: add it to `CROWDSEC_WHITELIST_IPS` above — find it with
+  `curl -s https://ifconfig.me` from inside the house.
+- Relay (if you run the tunnel): add it to `RELAY_WHITELIST_IPS` in
+  `/etc/loxprox-relay/relay.conf`. Its firewall bouncer drops banned
+  sources on *every* port, including the frp control port, so an
+  unwhitelisted ban there also cuts SSH to the relay. See
+  [`docs/TUNNEL-SETUP.md`](docs/TUNNEL-SETUP.md).
+
+A whitelisted address is exempt from CrowdSec **and** from progressive-ban
+escalation below — this is the durable fix, not just the reactive unban.
+
+### Progressive Ban Escalation
+
+`progressive-ban.py` (cron, every 15 minutes) extends a repeat offender's
+ban past CrowdSec's default 4 hours: 2nd offense → 24h, 3rd → 7 days, 4th+
+→ 30 days. An "offense" is a distinct **attack incident**, not a raw alert
+count — only local scenario/AppSec detections count (CAPI/community-list
+entries, manual bans, and the script's own prior extensions never do), and
+alerts within `PROGRESSIVE_BAN_DEDUP_MINUTES` of each other count as
+**one** incident regardless of which scenario triggered them — a burst
+that trips five different rules at once is one incident, not an instant
+30-day ban.
+
+| Key | Default | What it does |
+|---|---|---|
+| `PROGRESSIVE_BAN_WINDOW_DAYS` | `30` | Offenses older than this are forgotten. Lower it (e.g. `7`) for a more forgiving household. |
+| `PROGRESSIVE_BAN_DEDUP_MINUTES` | `60` | Alerts within this many minutes of each other, from any scenario, count as one incident. Raise it (e.g. `180`) if unrelated-detection bursts still escalate too fast. |
+| `PROGRESSIVE_BAN_WHITELIST_FILE` | `/etc/crowdsec/parsers/s02-enrich/whitelist-loxone.yaml` | Whitelisted IPs (the same file `CROWDSEC_WHITELIST_IPS` writes to) are never escalated. Override only if you maintain a separate whitelist file. |
+
+These keys are read directly from `/etc/loxprox/config.env` (or the
+environment) — `deploy.sh` does not manage them yet, so set overrides
+there by hand; unset values fall back to the defaults above.
 
 ### Discord Alerting
 

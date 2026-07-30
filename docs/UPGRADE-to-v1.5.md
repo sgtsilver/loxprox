@@ -51,7 +51,7 @@ It greps the live system's existing state to reconstruct your operator config:
 | `LAN_SUBNET` | First `proto kernel scope link` route from `ip route` |
 | `SSH_ALLOWED_SUBNETS` | The set in `tcp dport 22 ip saddr { … }` in `/etc/nftables.conf` |
 | `ENABLE_APPSEC` | Presence of `auth_request /crowdsec-appsec` in the nginx site |
-| `APPSEC_MODE` | `mode:` key in `/etc/crowdsec/acquis.d/appsec.yaml` |
+| `APPSEC_MODE` | The AppSec config the acquisition (`/etc/crowdsec/acquis.d/appsec.yaml`) points at — detects the v2.3 monitor marker, falling back to the legacy `mode:` key for pre-v2.3 files (that key was never actually honored by CrowdSec) |
 | `CROWDSEC_WHITELIST_IPS` | `/etc/crowdsec/parsers/s02-enrich/whitelist-loxone.yaml` |
 | `DISCORD_WEBHOOK_URL` | `DISCORD_WEBHOOK_URL=` line in `/etc/loxprox/config.env` |
 

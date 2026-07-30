@@ -94,7 +94,12 @@ CLIENT_HEADER_TIMEOUT="10"
 ENABLE_APPSEC="true"
 
 # AppSec operating mode
-#   "monitor" — AppSec logs suspicious requests but does NOT block them.
+#   "monitor" — AppSec evaluates every rule and raises a CrowdSec alert on a
+#               match, but never blocks (a local appsec-config carrying
+#               default_remediation: allow). Check detections with
+#               `cscli alerts list | grep appsec` — NOT
+#               /var/log/nginx/appsec-detections.log, which nginx only
+#               writes to on a BLOCK verdict and therefore stays empty here.
 #               Use this for the first week to verify no false positives.
 #   "enforce" — AppSec blocks matched requests with HTTP 403.
 #               Use this after you're confident the rules work for your setup.
@@ -108,9 +113,17 @@ APPSEC_MODE="enforce"
 # IPs and CIDR ranges that CrowdSec will NEVER block, even under attack.
 #   Add your home LAN, VPN endpoints, uptime monitoring services, etc.
 #   Format: "1.2.3.4" for single IPs, "192.168.1.0/24" for ranges.
+#   [strongly recommended for families] your household's public WAN IP.
+#   Every phone, tablet and TV in the house shares it (and with CGNAT, so do
+#   other households' devices). Without it, one misbehaving device can get
+#   the whole family banned — and the progressive-ban escalation would then
+#   extend that ban to 24h / 7d / 30d. Whitelisted addresses are exempt from
+#   CrowdSec AND from progressive-ban escalation.
+#   Find it with: curl -s https://ifconfig.me
 CROWDSEC_WHITELIST_IPS=(
     "192.168.1.0/24"      # [REQUIRED] your local LAN
     "10.0.0.0/24"         # [optional] site-to-site / VPN network
+    # "203.0.113.7"       # [recommended] household WAN IP
     # "203.0.113.45"      # [optional] uptime monitoring service
     # "198.51.100.0/24"   # [optional] cloud provider IP range
 )

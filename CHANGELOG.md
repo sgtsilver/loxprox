@@ -2,6 +2,148 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+Closes out the remaining HIGH/MED findings from the 2026-07-29 sweep-4 audit
+across `deploy.sh`, the watchdogs, `progressive-ban.py`, and the relay
+installer, plus a Panel readability pass. No new opt-in features change
+default behavior; every existing install upgrades in place.
+
+### Fixed
+
+- **`--bootstrap-config` no longer tears down TLS or the tunnel (sweep-4
+  H1).** The generated `deploy.conf` omitted every `ENABLE_TLS`/`TLS_*`/
+  `ENABLE_TUNNEL`/`TUNNEL_*` key, so the first deploy after a bootstrap
+  reverted a live HTTPS site to cleartext on a WAN-forwarded `:1080`, or tore
+  down a live tunnel. Bootstrap now emits the full key set (TLS, tunnel,
+  panel, alerting) — an existing `deploy.conf` wins per key, then live host
+  state (nginx TLS marker, acme.sh state, `frpc.toml`, panel unit,
+  `config.env`). Secrets are written to the file but redacted from the
+  terminal review output.
+- **The nginx site is regenerated on upgrade instead of frozen forever
+  (sweep-4 H2).** The generated site now carries a template-version stamp and
+  a fingerprint of the `deploy.conf` values it renders; a deploy regenerates
+  it when the stamp is missing, older, or a rate limit / timeout / backend IP
+  changed. Upgraded installs finally receive the credential-scrubbing log
+  format, the `/ws/` location, the CSP, and the AppSec detection log.
+  Regeneration backs up the old file first, re-applies the TLS block if the
+  site was serving HTTPS, and reverts to the backup if `nginx -t` fails.
+  `LOXPROX_KEEP_NGINX_SITE=1` freezes a hand-maintained site;
+  `LOXPROX_FORCE_REGEN_NGINX=1` regenerates unconditionally.
+- **A failed AppSec bootstrap no longer serves 500 to every request (sweep-4
+  H3).** The include is now written as a pass-through stub (`return 204`,
+  fail-open) instead of being left empty, the degradation is recorded and
+  printed at the end of the run, and the deploy's health check performs a
+  real HTTP request against the gateway's own listener and fails on a
+  genuine 5xx.
+- **A wrong `GATEWAY_IP` is now rejected at preflight (sweep-4 H6)** —
+  checked against `ip -o -4 addr show` instead of just its format, closing
+  off a root cause of watchdog reboot loops.
+- **acme.sh now extracts and runs from `/var/tmp`, not `/tmp` (sweep-4
+  H8)**, which the CIS hardening step mounts `noexec`.
+- **`APPSEC_MODE=monitor` actually does something now (sweep-4 H11).** It
+  was documented as a false-positive escape hatch but was never wired to
+  CrowdSec. `monitor` now writes a local AppSec config carrying the hub's
+  virtual-patching rules with `default_remediation: allow` — matches raise a
+  CrowdSec alert, never block — and falls back to `enforce` with a loud
+  warning if CrowdSec won't start with it. An invalid value now aborts the
+  deploy instead of silently enforcing. Detections in monitor mode show up
+  in `cscli alerts list`, not in `/var/log/nginx/appsec-detections.log`
+  (which nginx only writes to on a BLOCK verdict).
+- **An optional feature failing no longer aborts the whole deploy (sweep-4
+  H12/M19).** TLS, tunnel, and CrowdSec setup now run through a wrapper that
+  warns, records, and continues on failure, so trouble in one of them can no
+  longer skip SSH hardening, monitoring, the watchdogs, or `config.env`.
+  Degraded steps are listed at the end of the run and the deploy now exits
+  `3` — `ALL CHECKS PASSED` can no longer print next to a step that silently
+  failed.
+- **`ENABLE_*` toggles are compared case-insensitively (sweep-4 M5)** —
+  `True`/`Yes` no longer silently disabled the WAF.
+- **Watchdog no longer reboots the gateway when the Miniserver is down
+  (sweep-4 H5).** `check_nginx_local` only accepted 2xx/3xx/401/403, so a
+  Miniserver outage produced a 502, escalated through the heal path, and
+  rebooted the VM twice an hour. A 502/504 proves the opposite of what it was
+  read as — nginx answered, so the listener is alive and only the Miniserver
+  behind it is down. Those codes now count as nginx-healthy; a Miniserver
+  outage instead raises its own alert-only condition ("Miniserver
+  Unreachable — Gateway Healthy", with a "Miniserver Reachable Again"
+  recovery notice) that never heals, restarts, or reboots anything.
+- **Tunnel watchdog no longer restarts frpc for a backend 502 (sweep-4
+  M11).** A public-path 502/504 is now cross-checked against the local
+  nginx: if the gateway itself answers 502, the relay is only forwarding it,
+  the tunnel transport is fine, and frpc is left alone instead of being
+  restarted — which used to kill every live WebSocket and send a misleading
+  CRITICAL. A genuine transport failure (no answer, 503) still restarts frpc
+  and still alerts. A probe bug in the same path — a failed curl producing a
+  two-line status string that matched no branch — used to report a fully
+  dead relay as healthy; fixed alongside it.
+- **AppSec "top offenders" now aggregates the client IP, not the timestamp
+  (sweep-4 M7).** The alert `awk` summed field 1 of the log line instead of
+  field 2 (`$remote_addr`), making the output useless.
+- **Progressive ban counts attack incidents, not lifetime alerts (sweep-4
+  M9/M10).** `progressive-ban.py` now scores offenses inside a rolling
+  window (`PROGRESSIVE_BAN_WINDOW_DAYS`, default 30) instead of every alert
+  CrowdSec ever recorded — only local scenario/AppSec detections count
+  (CAPI/community entries, manual bans, and the script's own prior
+  extensions are excluded), and alerts within
+  `PROGRESSIVE_BAN_DEDUP_MINUTES` (default 60) of each other count once
+  **regardless of which scenario triggered them** — one multi-scenario burst
+  is one incident, not an instant 30-day ban. IPs covered by the CrowdSec
+  whitelist are never escalated. Defaults are deliberately forgiving for
+  households behind a single NAT/CGNAT address.
+- **Relay re-runs no longer downgrade a live TLS relay to plain HTTP
+  (sweep-4 H9).** `install-relay.sh` now detects an existing, still-valid
+  certificate covering `RELAY_DOMAIN` alongside a live `:443` site and skips
+  the phase-1 `:80`-only rewrite; ACME renewals keep working through the
+  phase-2 site's own challenge block.
+- **Relay backups keep the original file instead of overwriting it (sweep-4
+  M18).** Backups now preserve the full path under
+  `/root/loxprox-relay-backup-<timestamp>/files/…` with a manifest, and a
+  file backed up twice in one run gets a timestamped copy instead of
+  clobbering the first — previously the phase-2 nginx-site backup overwrote
+  the pre-install one.
+- **Relay auto-renewal check works again (sweep-4 M13).** The acme.sh cron
+  probe matched a path-prefixed pattern `--install-cronjob` never writes, so
+  it was permanently false; it now matches the same invariant substring
+  `deploy.sh` was fixed to use in v2.0.1.
+- `test-gateway.sh`'s proxy test now speaks TLS to the gateway when
+  `ENABLE_TLS=true` (fixing a spurious failure against TLS-mode production
+  gateways) and additionally asserts the plain-HTTP-on-`:1080` 301 grace
+  redirect in that mode; the backup test now cleans up the tarball it
+  creates.
+- **Panel topbar icon buttons now sit dead-center in their circles** — a
+  `font: inherit` line-height leak was pushing the language/theme icons off
+  center.
+
+### Added
+
+- **TLS certificate expiry monitoring, gateway and relay (sweep-4 H13).**
+  `gateway-monitor.sh` now reads the live certificate's expiry whenever the
+  nginx site is actually in TLS mode and alerts via the existing Discord
+  path — WARNING under 21 days, CRITICAL under 7 days or once expired — at
+  most one alert per day per level; acme.sh renewal failures were
+  previously silent (its cron mails a mailbox that doesn't exist on the
+  gateway). On the relay, new `install-relay.sh --health-check` (services +
+  cert expiry, no changes to the box — safe to cron) reports the same
+  thresholds and fails the run under 7 days.
+- **`RELAY_WHITELIST_IPS` (sweep-4 H10).** The relay's firewall bouncer
+  drops banned sources on every port, including the frp control port, so a
+  single ban of the shared household WAN IP used to sever both the tunnel
+  and operator SSH at once. Listed IPs/CIDRs are written to
+  `/etc/crowdsec/parsers/s02-enrich/whitelist-loxprox-relay.yaml`; an empty
+  list now warns loudly.
+
+### Changed
+
+- **Panel: the SYSTEM tile shows storage/memory/load as labeled,
+  color-coded micro-bars instead of a raw text string.** Every status tile
+  gained a plain-language title and a short explanatory sublabel (German +
+  English), removing jargon (AppSec, "Sperren", "Modus tls") and wiring a
+  previously dead/untranslated "AppSec" label through i18n.
+- **The Panel's apply job now reports a deploy that finished with degraded
+  optional steps (`deploy.sh` exit `3`) as a distinct warning, not a
+  failure.**
+
 ## [2.2.0] — 2026-07-30
 
 The v2.2 theme: the LoxProx Panel becomes a real dashboard. No gateway,

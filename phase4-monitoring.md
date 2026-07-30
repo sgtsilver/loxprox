@@ -128,6 +128,19 @@ sudo bash deploy.sh --renew-tls
 
 `--renew-tls` calls `acme.sh --renew … --force` and re-runs the install step (so `systemctl reload nginx` fires). Safe to invoke any time.
 
+### Certificate expiry alerts (new)
+
+`gateway-monitor.sh` (60s cycle) now backstops the cron above: whenever the
+nginx site is actually in TLS mode, it reads the live certificate's expiry
+every cycle and sends a Discord alert — **WARNING** under 21 days,
+**CRITICAL** under 7 days or once expired — capped at one alert per day per
+level so it doesn't spam. acme.sh normally renews at ~30 days out and mails
+failures to a root mailbox that doesn't exist on this box (no MTA), so any
+such alert means the automatic renewal above silently didn't happen. Check,
+in order: the `WAN:80 → gateway:80` forward, DNS still resolving to your
+WAN IP, and the cron above — then force it with `sudo bash deploy.sh
+--renew-tls`.
+
 ### Disable TLS cleanly
 
 Two options, depending on how thorough you want to be:
@@ -183,6 +196,23 @@ pct config 200 > /root/loxone-gateway-lxc-config-backup.txt
 
 ## Alerting (Optional but Recommended)
 
+### Built in: Miniserver reachability
+
+`network-watchdog.sh` distinguishes a dead gateway from a dead Miniserver
+behind a healthy gateway. If the local nginx answers `502`/`504`, that
+*proves* the listener is up — only the Miniserver behind it isn't
+responding — so it no longer triggers a heal or reboot. Instead it raises
+its own alert-only pair, deduplicated so each only fires once per
+outage/recovery:
+
+- **"Miniserver Unreachable — Gateway Healthy"** (HIGH) — fires once when
+  the backend goes down. Never heals, restarts, or reboots anything.
+- **"Miniserver Reachable Again"** (WARNING) — fires once the Miniserver
+  answers again.
+
+Both land on the same `DISCORD_WEBHOOK_URL` as everything else below —
+nothing extra to configure.
+
 ### Simple: Email on High Error Rate
 
 Install `mailutils` and configure a cron job to email if nginx error log spikes:
@@ -221,6 +251,10 @@ If you run a home monitoring stack, ship nginx logs to Loki/Grafana for dashboar
 3. Relax rate limits if the block was caused by nginx.
 
 ### Scenario: Loxone becomes unreachable externally
+
+You should already have a "Miniserver Unreachable — Gateway Healthy" Discord
+alert for this (see "Built in: Miniserver reachability" above) — the
+watchdog does not reboot the gateway for it, so it's still worth checking:
 
 1. Verify router forwarding is still pointing to gateway IP.
 2. Verify gateway LXC is running: `pct status 200`

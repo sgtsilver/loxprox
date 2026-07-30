@@ -64,7 +64,7 @@ Kerneigenschaften:
 # Repo (oder nur tunnel-relay/) auf den VPS kopieren, dann:
 sudo install -d -m 0750 /etc/loxprox-relay
 sudo cp tunnel-relay/relay.conf.example /etc/loxprox-relay/relay.conf
-sudoedit /etc/loxprox-relay/relay.conf     # RELAY_DOMAIN, RELAY_EMAIL, TUNNEL_TOKEN
+sudoedit /etc/loxprox-relay/relay.conf     # RELAY_DOMAIN, RELAY_EMAIL, TUNNEL_TOKEN, RELAY_WHITELIST_IPS
 sudo bash tunnel-relay/install-relay.sh
 ```
 
@@ -73,6 +73,10 @@ SHA256-verifiziert, gesandboxte systemd-Unit), nginx mit
 Let's-Encrypt-Zertifikat (ZeroSSL-Fallback), CrowdSec mit
 Community-Blocklisten und Unattended Upgrades. Am Ende läuft ein Health
 Check und die exakten Werte für das Gateway werden ausgegeben.
+
+`RELAY_WHITELIST_IPS` gleich mit ausfüllen — in der Datei optional, in der
+Praxis so gut wie Pflicht. Siehe "Haushalts-WAN-IP whitelisten" unter
+Hinweise zum Bedrohungsmodell unten, bevor der Tunnel live geht.
 
 ## Schritt 2 — Tunnel aktivieren (auf dem Gateway)
 
@@ -155,6 +159,18 @@ deckt der Netzwerk-Watchdog ab.
   installiert) bannt am Perimeter, wo die echte Quell-IP sichtbar ist. Die
   AppSec-WAF des Gateways inspiziert weiterhin jede getunnelte Anfrage.
   Details: [../SECURITY.de.md](../SECURITY.de.md).
+- **Haushalts-WAN-IP whitelisten (`RELAY_WHITELIST_IPS`).** Der
+  Firewall-Bouncer des Relays wirft gebannte Quellen auf *jedem* Port raus,
+  den es bedient — auch dem frp-Control-Port und der eigenen Admin-SSH,
+  nicht nur dem App-Traffic. Weil der ganze Haushalt eine öffentliche IP
+  teilt, bannt ein einziger False Positive von einem Handy Tunnel und
+  VPS-Zugang gleichzeitig. Diese IP (und die eigenen Admin-Quelladressen)
+  in `RELAY_WHITELIST_IPS` in `/etc/loxprox-relay/relay.conf` eintragen —
+  landet in `/etc/crowdsec/parsers/s02-enrich/whitelist-loxprox-relay.yaml`
+  und unterdrückt, wie das `CROWDSEC_WHITELIST_IPS` des Gateways, nur vom
+  Relay selbst erzeugte Decisions (CAPI-/Community-Blocklist-Decisions
+  greifen weiterhin). Eine leere Liste wird akzeptiert, der Installer warnt
+  dann aber bei jedem Lauf laut.
 - **Echte Client-IPs werden wiederhergestellt** — via `X-Forwarded-For`, nur
   von Loopback vertraut, mit `real_ip_recursive off`; ein vom Client
   mitgeschickter Header kann die Quelle nicht fälschen.
@@ -202,3 +218,30 @@ App-Cache leeren (Android) oder Miniserver-Eintrag löschen und neu anlegen
 
 **Familienmitglied plötzlich blockiert** — auf dem Relay prüfen:
 `sudo cscli decisions list` → `sudo cscli decisions delete --ip <deren-ip>`.
+Das löst nur den bestehenden Bann; die Haushalts-WAN-IP zu
+`RELAY_WHITELIST_IPS` hinzufügen (siehe Hinweise zum Bedrohungsmodell oben),
+damit es nicht wieder passiert.
+
+## Health Check + Zertifikats-Monitoring
+
+```bash
+sudo bash install-relay.sh --health-check
+```
+
+Prüft Dienste (frps, nginx, CrowdSec) und den Ablauf des Live-Zertifikats
+erneut, ohne irgendetwas auf der Box zu verändern — jederzeit gefahrlos
+aufrufbar, auch per Cron. Meldet die Tage bis zum Ablauf, warnt unter 21
+Tagen und schlägt fehl (Exit-Code ungleich 0) unter 7 Tagen oder nach
+Ablauf, inklusive des exakten Befehls `acme.sh --renew -d <domain>
+--force`. Das Relay hat noch keinen eigenen Alert-Transport — bis dahin ist
+ein täglicher Cron mit diesem Aufruf der Übergangsweg, um ein kaputtes
+Renewal zu erkennen, bevor daraus ein Ausfall wird:
+
+```cron
+0 7 * * * /bin/bash /pfad/zu/install-relay.sh --health-check >> /var/log/loxprox-relay-install.log 2>&1
+```
+
+Ein `install-relay.sh --rollback` gibt es nicht. Konfigurations-Backups
+jedes Laufs landen unter
+`/root/loxprox-relay-backup-<Zeitstempel>/files/…` inklusive
+`manifest.txt`; das Zurückspielen ist ein manuelles `cp`.

@@ -142,6 +142,23 @@ sudo bash deploy.sh --renew-tls
 
 ---
 
+## Ablauf-Alerting
+
+`gateway-monitor.sh` (60-Sek-Zyklus) sichert den Cron oben ab: Solange die
+nginx-Site tatsächlich im TLS-Modus läuft, liest es jeden Zyklus den
+Ablauf des Live-Zertifikats und schickt einen Discord-Alert — **WARNING**
+unter 21 Tagen, **CRITICAL** unter 7 Tagen oder nach Ablauf — gedeckelt auf
+einen Alert pro Tag und Level, damit ein hängendes Renewal nicht spammt.
+Bei `ENABLE_TLS=false` bleibt es still. Der Grund: `acme.sh`s eigene
+Renewal-Fehler sind in der Praxis lautlos — sein Cron mailt an eine
+Root-Mailbox, die es auf dem Gateway gar nicht gibt (kein MTA installiert).
+Bekommst du so einen Alert, ist das automatische Renewal oben ausgeblieben
+— der Reihe nach prüfen: die Weiterleitung `WAN:80 → Gateway:80`, ob DNS
+noch auf deine WAN-IP zeigt, und den Cron-Eintrag oben — dann mit
+`sudo bash deploy.sh --renew-tls` erzwingen.
+
+---
+
 ## Später umschalten
 
 ### Abschalten (zurück auf Plain-HTTP)
