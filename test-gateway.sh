@@ -112,11 +112,12 @@ test_network() {
 test_proxy() {
     test_header "Nginx Proxy"
 
-    # Read the runtime config to know whether TLS is supposed to be on —
-    # same idiom as test_tls()/test_gui()/test_tunnel() below.
+    # ENABLE_TLS lives in deploy.conf, NOT config.env — write_runtime_config
+    # never emits it, so a config.env read comes back empty and silently
+    # selects the non-TLS branch (the bug that skipped test_tls for a year).
     local enable_tls="false"
-    if [[ -f /etc/loxprox/config.env ]]; then
-        enable_tls=$(awk -F'"' '/^ENABLE_TLS=/{print $2}' /etc/loxprox/config.env)
+    if [[ -f /etc/loxprox/deploy.conf ]]; then
+        enable_tls=$(awk -F'"' '/^ENABLE_TLS=/{print $2}' /etc/loxprox/deploy.conf)
     fi
 
     # v2.3 (H2): the site is no longer write-once — deploy.sh stamps every
@@ -527,10 +528,12 @@ test_tunnel() {
 # ── TLS Tests (v2.0.1, only when ENABLE_TLS=true) ───────────────────────────
 
 test_tls() {
-    # Read the runtime config to know whether TLS is supposed to be on.
+    # ENABLE_TLS lives in deploy.conf, NOT config.env (write_runtime_config
+    # never emits it) — the old config.env read was always empty, so this
+    # whole section was silently skipped on every TLS-mode gateway.
     local enable_tls="false"
-    if [[ -f /etc/loxprox/config.env ]]; then
-        enable_tls=$(awk -F'"' '/^ENABLE_TLS=/{print $2}' /etc/loxprox/config.env)
+    if [[ -f /etc/loxprox/deploy.conf ]]; then
+        enable_tls=$(awk -F'"' '/^ENABLE_TLS=/{print $2}' /etc/loxprox/deploy.conf)
     fi
     [[ "${enable_tls,,}" == "true" ]] || return 0
 
