@@ -2,12 +2,12 @@
 
 **Status:** Published on GitHub  
 **Repo:** https://github.com/sgtsilver/loxprox  
-**Version:** 2.1.0 (released)  
-**Last updated:** 2026-07-29 (v2.1 branch — LoxProx Panel: LAN-only web GUI with family QR
-invitation, status tiles, log viewer, guarded config editor + one-click apply, unban/restart/renew
-actions; `deploy.sh --restore` + expanded daily backup; `--help` + strict flag parsing;
-test-gateway.sh TLS + Panel live checks; sweep-4 audit recorded in the local-only
-`audits/2026-07-29-sweep4-audit.md` — `audits/` is gitignored; open findings tracked there)  
+**Version:** 2.2.0 (released)  
+**Last updated:** 2026-07-30 (v2.2 — Panel dashboard overhaul: tabbed UI with 24h charts fed by a
+1-min history sampler, three.js status scene + anime.js motion, light/dark/auto theme, mobile tab
+bar; all assets vendored in `gui/static/` and served offline; CSP `script-src 'self'`;
+test-gateway.sh asserts the dashboard assets; sweep-4 open findings still tracked in the local-only
+gitignored `audits/2026-07-29-sweep4-audit.md`)  
 **Previous:** 2026-07-02 (v2.0.1 — fix: deploy.sh aborted on TLS hosts when the acme.sh cron line was written in acme.sh's quoted-home form; verified by a full clean deploy on the live production VM. v2.0.0 — zero-open-ports frp tunnel (opt-in, `ENABLE_TUNNEL`), `/ws/` WebSocket template fix, Tier-2 resilience: tunnel watchdog + ACME fallback CA; token configs locked 0640 before chown; layered on top of the v1.5.2 audit)
 
 ---
@@ -197,7 +197,7 @@ These settings are configured on the repo and affect how code lands in `main`:
 | Branch protection on `main` | ✅ Active | Requires PR + 1 approval + all CI checks pass |
 | Dependabot (Actions) | ✅ Active | Weekly checks; auto-opens PRs for action updates |
 | Secret scanning | ⏭️ Skipped | LAN-only project; no secrets committed |
-| Releases | ✅ Published | `v1.1.0`, `v1.2.0`, `v1.2.1`, `v1.3.1`, `v1.3.2`, `v1.3.3`, `v1.3.4`, `v1.5.0`, `v1.5.1`, `v1.5.2`, `v2.0.0`, `v2.0.1`, `v2.1.0` (latest). v1.3.0 was withdrawn — do not install. v1.4.0 and the v1.6.x same-day tags were retired and consolidated into v1.5.0 (see CHANGELOG). See [Releases](https://github.com/sgtsilver/loxprox/releases). |
+| Releases | ✅ Published | `v1.1.0`, `v1.2.0`, `v1.2.1`, `v1.3.1`, `v1.3.2`, `v1.3.3`, `v1.3.4`, `v1.5.0`, `v1.5.1`, `v1.5.2`, `v2.0.0`, `v2.0.1`, `v2.1.0`, `v2.2.0` (latest). v1.3.0 was withdrawn — do not install. v1.4.0 and the v1.6.x same-day tags were retired and consolidated into v1.5.0 (see CHANGELOG). See [Releases](https://github.com/sgtsilver/loxprox/releases). |
 
 ### Developer workflow (after branch protection)
 

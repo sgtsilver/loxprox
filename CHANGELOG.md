@@ -2,7 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [2.2.0] — 2026-07-30
+
+The v2.2 theme: the LoxProx Panel becomes a real dashboard. No gateway,
+firewall, or proxy behavior changes — everything in this release lives in the
+Panel and its install path; a v2.1.0 install upgrades in place.
 
 ### Changed
 
