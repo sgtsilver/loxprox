@@ -72,6 +72,10 @@ mkdir -p "$MOCK_ROOT"/{etc/nginx/sites-available,etc/nginx/sites-enabled,etc/ngi
 systemctl() { true; }
 apt-get() { true; }
 dpkg() { true; }
+# v2.3: configure_nginx now ACTS on a failing `nginx -t` (restores the backup
+# and returns 1) instead of ignoring it, so an unmocked/absent nginx binary
+# would silently revert every regeneration under test.
+nginx() { true; }
 # `hostname -I` is Linux-only; macOS rejects it. Provide a deterministic mock
 # so _loxprox_extract_config_from_live_state can test cleanly on either OS.
 hostname() {
@@ -87,7 +91,7 @@ ip() {
         *) command ip "$@" 2>/dev/null || true ;;
     esac
 }
-export -f systemctl apt-get dpkg hostname ip
+export -f systemctl apt-get dpkg nginx hostname ip
 
 # Source deploy.sh functions (skip main via BASH_SOURCE guard)
 # shellcheck source=../deploy.sh
@@ -475,16 +479,23 @@ WL_FIXTURE
 
 test_configure_nginx_preserves_existing_site() {
     echo ""
-    echo "━━━ configure_nginx() preserves existing site ━━━"
+    echo "━━━ configure_nginx() — versioned regeneration (v2.3/H2) ━━━"
 
     mkdir -p "$(dirname "$NGINX_SITE")"
     local sentinel='# OPERATOR-EDITED-SENTINEL-DO-NOT-REMOVE'
+    local backup_path="$BACKUP_DIR/files$NGINX_SITE"
+    rm -f "$NGINX_SITE" "$backup_path"
+
+    # ── (a) unstamped site (pre-v2.3, or hand-written) → regenerated ─────────
+    # The site is no longer write-once: a file with no template-version stamp
+    # is treated as stale and rewritten from the current template, with the
+    # pre-regen content backed up first.
     cat > "$NGINX_SITE" <<EOF
 $sentinel
 server {
     listen 1080;
     location /ws/ {
-        # custom WebSocket block — hand-edited, must survive deploy
+        # custom WebSocket block — hand-edited, pre-v2.3
         proxy_pass http://loxone_backend;
     }
 }
@@ -492,8 +503,14 @@ EOF
 
     configure_nginx >/dev/null 2>&1
 
-    grep -q "$sentinel" "$NGINX_SITE"             && pass "operator sentinel preserved"        || fail "operator sentinel was nuked"
-    grep -q "custom WebSocket block" "$NGINX_SITE" && pass "WebSocket block preserved"          || fail "WebSocket block was nuked"
+    grep -q "$sentinel" "$NGINX_SITE" && fail "unstamped (pre-v2.3) site was NOT regenerated" \
+                                       || pass "unstamped (pre-v2.3) site is regenerated"
+    [[ -f "$backup_path" ]] && grep -q "$sentinel" "$backup_path" \
+        && pass "pre-regen file backed up under BACKUP_DIR/files<path>, sentinel intact there" \
+        || fail "backup of the pre-regen site missing, or does not carry the sentinel"
+    grep -q "${_LOXPROX_SITE_VERSION_MARKER} ${_LOXPROX_SITE_TEMPLATE_VERSION}" "$NGINX_SITE" \
+        && pass "regenerated site carries the current template version marker" \
+        || fail "regenerated site missing the template version marker"
     # v1.5.0 final shape: NO conf.d split — map + log_format stay inline in
     # the site config (nginx -t rejects the split because `auth_request_set`
     # registers $appsec_action at parse time, and the variable must be
@@ -501,12 +518,6 @@ EOF
     # must be cleaned up if it lingered from an earlier dev iteration.
     [[ ! -f "$NGINX_APPSEC_AUDIT_CONF" ]] && pass "conf.d/loxprox-appsec.conf is NOT written" \
                                           || fail "conf.d/loxprox-appsec.conf should not exist"
-
-    # Force regen: should now overwrite (sentinel disappears, fresh template
-    # carries map + log_format + access_log inline)
-    LOXPROX_FORCE_REGEN_NGINX=1 configure_nginx >/dev/null 2>&1
-    grep -q "$sentinel" "$NGINX_SITE" && fail "sentinel survived FORCE_REGEN (should have been overwritten)" \
-                                      || pass "FORCE_REGEN regenerates from template"
     grep -q 'log_format appsec_evt' "$NGINX_SITE"     && pass "log_format appsec_evt in regenerated site"    || fail "log_format missing from regenerated site"
     grep -q 'map \$appsec_action' "$NGINX_SITE"       && pass "map \$appsec_action in regenerated site"     || fail "map missing from regenerated site"
     grep -q 'if=\$appsec_blocked' "$NGINX_SITE"       && pass "conditional access_log in regenerated site" || fail "conditional access_log missing"
@@ -521,7 +532,37 @@ EOF
     grep -qE 'proxy_set_header Upgrade +\$http_upgrade' "$NGINX_SITE" && pass "F7: Upgrade header forwarded"          || fail "F7: Upgrade header missing"
     grep -qE 'proxy_set_header Connection +\$connection_upgrade' "$NGINX_SITE" && pass "F7: Connection is WS-aware"   || fail "F7: Connection header not WS-aware"
 
-    rm -f "$NGINX_SITE"
+    # ── (b) LOXPROX_KEEP_NGINX_SITE=1 → hand-maintained site is frozen ───────
+    cat > "$NGINX_SITE" <<EOF
+$sentinel
+server {
+    listen 1080;
+}
+EOF
+    LOXPROX_KEEP_NGINX_SITE=1 configure_nginx >/dev/null 2>&1
+    grep -q "$sentinel" "$NGINX_SITE" && pass "LOXPROX_KEEP_NGINX_SITE=1 freezes the site (sentinel survives)" \
+                                       || fail "LOXPROX_KEEP_NGINX_SITE=1 did not freeze the site"
+
+    # ── (c) unchanged re-run does not rewrite; a changed deploy.conf value does ─
+    rm -f "$NGINX_SITE" "$backup_path"
+    configure_nginx >/dev/null 2>&1   # fresh, current-version, current-fingerprint site
+    local before_hash after_hash
+    before_hash=$(sha256sum "$NGINX_SITE" | awk '{print $1}')
+    configure_nginx >/dev/null 2>&1
+    after_hash=$(sha256sum "$NGINX_SITE" | awk '{print $1}')
+    [[ "$before_hash" == "$after_hash" ]] && pass "unchanged re-run does not rewrite the site (version+fingerprint match)" \
+                                            || fail "unchanged re-run rewrote the site"
+
+    local saved_rate="$RATE_LIMIT_REQ_PER_SEC"
+    RATE_LIMIT_REQ_PER_SEC="42"
+    configure_nginx >/dev/null 2>&1
+    after_hash=$(sha256sum "$NGINX_SITE" | awk '{print $1}')
+    [[ "$before_hash" != "$after_hash" ]] && pass "changed RATE_LIMIT_REQ_PER_SEC regenerates the site (fingerprint mismatch)" \
+                                            || fail "changed RATE_LIMIT_REQ_PER_SEC did not regenerate the site"
+    grep -q 'rate=42r/s' "$NGINX_SITE" && pass "regenerated site carries the new rate limit" || fail "new rate limit not applied"
+    RATE_LIMIT_REQ_PER_SEC="$saved_rate"
+
+    rm -f "$NGINX_SITE" "$backup_path"
 }
 
 # ── v1.5.0 — optional TLS via acme.sh ────────────────────────────────────────

@@ -75,12 +75,17 @@ Nichts umzuschalten, nichts zu erklären.
 3. **App hängt bei „Verbindung wird hergestellt":** bekannte
    Gen-1-App-Macke — App-Cache leeren (Android) oder Miniserver löschen und
    neu anlegen (iOS), dann den QR-Code neu scannen.
-4. **Der ganze Haushalt teilt sich eine öffentliche IP?** Was Rate Limits
-   und Bans angeht, ist jeder hinter demselben Heimrouter diese eine IP. Ein
-   einzelnes störendes Gerät (eine hängende Refresh-Schleife, eine
-   fehlerhafte Automatisierung) kann das Rate-Limit oder einen Ban für die
-   ganze Familie auslösen, nicht nur für sich selbst. Der Fix ist derselbe
-   Unban-Flow wie oben — keine Config-Änderung.
+4. **Der ganze Haushalt teilt sich eine öffentliche IP?** Was Rate Limits,
+   Bans und die Progressive-Ban-Eskalation angeht, ist jeder hinter
+   demselben Heimrouter diese eine IP. Ein einzelnes störendes Gerät (eine
+   hängende Refresh-Schleife, eine fehlerhafte Automatisierung) kann das
+   Rate-Limit oder einen Ban für die ganze Familie auslösen, nicht nur für
+   sich selbst. Der Unban-Flow oben hilft akut; der dauerhafte Fix ist, die
+   Haushalts-WAN-IP zu whitelisten, damit es gar nicht erst wieder passiert
+   — `CROWDSEC_WHITELIST_IPS` am Gateway und, beim Tunnel-Betrieb,
+   `RELAY_WHITELIST_IPS` am Relay. Siehe „Haushalte hinter einer IP
+   (NAT/CGNAT)" in
+   [`CONFIGURATION-GUIDE.de.md`](../CONFIGURATION-GUIDE.de.md).
 
 ## Neu in v2.1 — Self-Service über das LoxProx Panel
 

@@ -70,11 +70,15 @@ to switch, nothing to explain.
 3. **App stuck on "establishing connection":** known Gen 1 app quirk —
    clear the app cache (Android) or delete + re-add the Miniserver (iOS),
    then rescan the QR code.
-4. **Whole household sharing one public IP?** As far as rate limits and
-   bans are concerned, everyone behind the same home router **is** that one
-   IP. One misbehaving device (a stuck refresh loop, a buggy automation) can
-   trip the rate limiter or a ban for the whole family, not just itself. The
-   fix is the same unban flow as above — not a config change.
+4. **Whole household sharing one public IP?** As far as rate limits, bans,
+   and progressive-ban escalation are concerned, everyone behind the same
+   home router **is** that one IP. One misbehaving device (a stuck refresh
+   loop, a buggy automation) can trip the rate limiter or a ban for the
+   whole family, not just itself. The unban flow above clears it for now;
+   the durable fix is whitelisting the household's WAN IP so it stops
+   happening — `CROWDSEC_WHITELIST_IPS` on the gateway and, if you run the
+   tunnel, `RELAY_WHITELIST_IPS` on the relay. See "Households behind one
+   IP (NAT/CGNAT)" in [`CONFIGURATION-GUIDE.md`](../CONFIGURATION-GUIDE.md).
 
 ## New in v2.1 — self-service via the LoxProx Panel
 

@@ -214,6 +214,38 @@ sudo bash deploy.sh --finalize-ssh
 
 ---
 
+## `deploy.sh` erneut laufen lassen — nginx-Site-Regenerierung & Exit-Codes
+
+Jeder Lauf prüft seit v2.3, ob `/etc/nginx/sites-available/loxone` noch zum
+Template passt, aus dem sie erzeugt wurde (ein Versions-Stempel plus ein
+Fingerprint der gerenderten `deploy.conf`-Werte), und regeneriert sie, wenn
+eines von beidem abweicht — inklusive Template-Fixes und jedem geänderten
+Rate Limit, Timeout oder Backend-IP. Die alte Datei wird zuerst gesichert,
+der TLS-Block wieder angewendet, falls die Site HTTPS bediente, und ein
+fehlgeschlagenes `nginx -t` stellt automatisch das Backup wieder her. Zwei
+Umgebungs-Schalter ändern dieses Verhalten:
+
+| Schalter | Effekt |
+|---|---|
+| `LOXPROX_KEEP_NGINX_SITE=1` | Eine bestehende Site nie anfassen — für eine handgepflegte Datei. Template-Fixes und `deploy.conf`-Änderungen (Rate Limits, Backend-IP, AppSec-Wiring) erreichen sie dann **nicht**, solange der Schalter gesetzt ist. |
+| `LOXPROX_FORCE_REGEN_NGINX=1` | Die Site regenerieren, selbst wenn ihr Stempel schon aktuell ist. |
+
+```bash
+sudo LOXPROX_FORCE_REGEN_NGINX=1 bash deploy.sh
+```
+
+Der Exit-Code von `deploy.sh` sagt Automation (und dir) genau, was passiert
+ist:
+
+| Code | Bedeutung |
+|---|---|
+| `0` | Deploy fertig, alle Checks bestanden. |
+| `1` | Ein Health-Check ist fehlgeschlagen, oder ein Kern-Schritt hat den Lauf abgebrochen. |
+| `2` | Unbekannte Kommandozeilen-Option. |
+| `3` | Deployed, aber ein oder mehrere **optionale** Schritte (TLS, Tunnel, CrowdSec …) sind fehlgeschlagen — am Ende des Laufs aufgelistet. Das Gateway proxied; diese Features sind nur nicht aktiv. Nach Behebung der Ursache erneut laufen lassen. |
+
+---
+
 ## Optionale Werte (bei Bedarf anpassen)
 
 ### Rate Limiting
@@ -250,7 +282,15 @@ Diese verhindern Slowloris-Angriffe (Angreifer öffnen Connections und senden di
 | Einstellung | Default | Was sie tut |
 |-------------|---------|-------------|
 | `ENABLE_APPSEC` | true | Prüft jeden HTTP-Request auf CVE-Exploit-Muster |
-| `APPSEC_MODE` | enforce | Blockiert getroffene Requests (in der ersten Woche "monitor" verwenden) |
+| `APPSEC_MODE` | enforce | `enforce` blockiert getroffene Requests mit HTTP 403; `monitor` alarmiert bei einem Treffer, blockiert aber nie (in der ersten Woche verwenden) |
+
+Der Wechsel auf `monitor` schreibt eine lokale AppSec-Config
+(`/etc/crowdsec/appsec-configs/loxprox-virtual-patching-monitor.yaml`) mit
+den Virtual-Patching-Regeln aus dem Hub und `default_remediation: allow`;
+der Wechsel zurück auf `enforce` entfernt sie wieder. Treffer im
+Monitor-Modus erscheinen in `cscli alerts list`, **nicht** in
+`/var/log/nginx/appsec-detections.log` — dort schreibt nginx nur bei einem
+BLOCK-Urteil hinein, das der Monitor-Modus nie zurückgibt.
 
 **Empfehlung fürs Erst-Setup:**
 ```bash
@@ -290,6 +330,53 @@ CROWDSEC_WHITELIST_IPS=(
     "198.51.100.22"       # Notification-Gateway
 )
 ```
+
+### Haushalte hinter einer IP (NAT/CGNAT)
+
+Jedes Handy, Tablet, TV und Smart-Home-Gerät im Haus zeigt dem Gateway
+**dieselbe öffentliche IP** (und hinter CGNAT gilt das auch für andere
+Haushalte im selben Adress-Pool des ISPs). Rate Limits, CrowdSecs
+Ban-Entscheidungen und die Progressive-Ban-Eskalation (unten) hängen alle an
+dieser einen Adresse — ein einzelnes störendes Gerät kann ein Limit oder
+einen Ban für die ganze Familie auslösen, nicht nur für sich selbst. Wenn du
+den Tunnel nutzt, kommen die Limits des Relays aus demselben Grund oben
+drauf.
+
+**Primäre Gegenmaßnahme: die WAN-IP des Haushalts whitelisten.**
+- Gateway: in `CROWDSEC_WHITELIST_IPS` oben eintragen — finden mit
+  `curl -s https://ifconfig.me` von zu Hause aus.
+- Relay (beim Tunnel-Setup): in `RELAY_WHITELIST_IPS` in
+  `/etc/loxprox-relay/relay.conf` eintragen. Dessen Firewall-Bouncer wirft
+  gebannte Quellen auf *jedem* Port raus, auch dem frp-Control-Port — ein
+  nicht gewhitelisteter Ban dort kappt also auch SSH auf das Relay. Siehe
+  [`docs/TUNNEL-SETUP.de.md`](docs/TUNNEL-SETUP.de.md).
+
+Eine gewhitelistete Adresse ist von CrowdSec **und** von der
+Progressive-Ban-Eskalation unten ausgenommen — das ist der dauerhafte Fix,
+nicht nur das reaktive Entbannen.
+
+### Progressive-Ban-Eskalation
+
+`progressive-ban.py` (Cron, alle 15 Minuten) verlängert die Sperre eines
+Wiederholungstäters über CrowdSecs Standard von 4 Stunden hinaus: 2. Verstoß
+→ 24 h, 3. → 7 Tage, 4.+ → 30 Tage. Ein "Verstoß" ist ein eigenständiger
+**Angriffs-Vorfall**, keine reine Alert-Zählung — nur lokale
+Scenario-/AppSec-Detections zählen (CAPI-/Community-List-Einträge, manuelle
+Bans und die eigenen früheren Verlängerungen des Scripts zählen nie), und
+Alerts innerhalb von `PROGRESSIVE_BAN_DEDUP_MINUTES` zueinander zählen als
+**ein** Vorfall — unabhängig davon, welches Scenario sie ausgelöst hat. Ein
+Burst, der fünf verschiedene Regeln auf einmal triggert, ist ein Vorfall,
+kein sofortiger 30-Tage-Bann.
+
+| Key | Default | Was er tut |
+|---|---|---|
+| `PROGRESSIVE_BAN_WINDOW_DAYS` | `30` | Verstöße, die älter sind, werden vergessen. Niedriger setzen (z. B. `7`) für einen nachsichtigeren Haushalt. |
+| `PROGRESSIVE_BAN_DEDUP_MINUTES` | `60` | Alerts innerhalb dieser Minutenzahl zueinander zählen als ein Vorfall, egal aus welchem Scenario. Höher setzen (z. B. `180`), wenn Bursts unabhängiger Detections noch zu schnell eskalieren. |
+| `PROGRESSIVE_BAN_WHITELIST_FILE` | `/etc/crowdsec/parsers/s02-enrich/whitelist-loxone.yaml` | Gewhitelistete IPs (dieselbe Datei, in die `CROWDSEC_WHITELIST_IPS` schreibt) werden nie eskaliert. Nur überschreiben, wenn du eine separate Whitelist-Datei pflegst. |
+
+Diese Keys werden direkt aus `/etc/loxprox/config.env` gelesen (oder der
+Umgebung) — `deploy.sh` verwaltet sie noch nicht, Overrides also von Hand
+dort eintragen; nicht gesetzte Werte fallen auf die Defaults oben zurück.
 
 ### Discord Alerting
 

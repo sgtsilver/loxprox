@@ -62,7 +62,7 @@ Das Gateway exponiert `:22` ausschließlich gegenüber `SSH_ALLOWED_SUBNETS` via
 
 Mit `ENABLE_TUNNEL=true` (siehe [`docs/TUNNEL-SETUP.de.md`](docs/TUNNEL-SETUP.de.md)) kommt externer Traffic über einen betreibereigenen Relay-VPS herein und erreicht das nginx des Gateways **über Loopback** (den frpc-Prozess). Drei Konsequenzen sind fürs Bedrohungsmodell relevant:
 
-1. **Gateway-seitige nftables-Bans können getunnelte Angreifer nicht aussperren** — deren Pakete kreuzen nie das WAN-Interface des Gateways. Die Perimeter-Durchsetzung lebt deshalb auf dem **Relay** (eigenes CrowdSec + Firewall-Bouncer, von `install-relay.sh` standardmäßig installiert), wo die echte Quell-IP sichtbar ist. AppSec-WAF, Rate Limits und CrowdSec-*Erkennung* des Gateways greifen weiterhin für jede getunnelte Anfrage — echte Client-IPs werden via `X-Forwarded-For` wiederhergestellt, nur von Loopback vertraut, mit `real_ip_recursive off` (ein vom Client mitgeschickter Header kann die Quelle nicht fälschen).
+1. **Gateway-seitige nftables-Bans können getunnelte Angreifer nicht aussperren** — deren Pakete kreuzen nie das WAN-Interface des Gateways. Die Perimeter-Durchsetzung lebt deshalb auf dem **Relay** (eigenes CrowdSec + Firewall-Bouncer, von `install-relay.sh` standardmäßig installiert), wo die echte Quell-IP sichtbar ist. AppSec-WAF, Rate Limits und CrowdSec-*Erkennung* des Gateways greifen weiterhin für jede getunnelte Anfrage — echte Client-IPs werden via `X-Forwarded-For` wiederhergestellt, nur von Loopback vertraut, mit `real_ip_recursive off` (ein vom Client mitgeschickter Header kann die Quelle nicht fälschen). Der Firewall-Bouncer des Relays wirft gebannte Quellen auf *jedem* Port raus, den es bedient — auch dem frp-Control-Port. Ein Bann der gemeinsamen Haushalts-WAN-IP kappt damit Tunnel und Operator-SSH gleichzeitig. `RELAY_WHITELIST_IPS` ist das Relay-seitige Gegenstück zu `CROWDSEC_WHITELIST_IPS` am Gateway (siehe `CONFIGURATION-GUIDE.de.md` → "Haushalte hinter einer IP"); wie sein Gateway-Pendant unterdrückt es nur **lokal erzeugte** Decisions — CAPI-/Community-Blocklist-Decisions greifen bei einer gewhitelisteten IP weiterhin.
 2. **Das Relay ist Angriffsfläche in eigener Hand.** Es folgt derselben Philosophie wie das Gateway: nftables Input-Drop, versionsgepinnte SHA256-verifizierte Binaries, gesandboxte systemd-Units, Unattended Upgrades, CrowdSec mit Community-Blocklisten. Ein kompromittiertes Relay kann externen Traffic beobachten und manipulieren (es terminiert TLS), besitzt aber keine Miniserver-Zugangsdaten und erreicht im LAN nichts außer dem einen getunnelten Port.
 3. **Das Tunnel-Token ist ein Credential.** Wer es besitzt, kann einen fremden frpc mit dem Relay verbinden; `proxyBindAddr = 127.0.0.1` plus `allowPorts` begrenzen den Schaden auf das Kapern des einen Loopback-Ports (Denial of Service / Traffic-Interception am Relay). Auf beiden Seiten 0640 gespeichert; jährlich und bei jedem Verdacht rotieren.
 
@@ -134,7 +134,7 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 
 ### Layer 4: Application Security (AppSec WAF)
 
-- Modus: **enforce** (geblockte Requests werden mit 403 abgewiesen)
+- Modus: `APPSEC_MODE` — **enforce** (Default, geblockte Requests werden mit 403 abgewiesen) oder **monitor** (alarmiert via `cscli alerts list`, blockiert nie; zum Prüfen auf False Positives vor dem Wechsel zu enforce)
 - Collection: `crowdsecurity/appsec-virtual-patching` (200+ CVE-spezifische Regeln)
 - Lauscht auf `127.0.0.1:7422`
 - Prüft jeden Request, bevor er Loxone erreicht
@@ -142,6 +142,7 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 - **Pflicht-Header**: `X-Crowdsec-Appsec-Ip`, `X-Crowdsec-Appsec-Uri`, `X-Crowdsec-Appsec-Verb`
 - Der nginx-`auth_request`-Subrequest setzt diese Header automatisch via `/etc/nginx/crowdsec-appsec.conf`
 - **Risiko-Hinweis**: Der AppSec-API-Key liegt in `/etc/nginx/crowdsec-appsec.conf` (Mode 640, root:www-data). Falls ein Angreifer lokales File-Read erreicht (z. B. via LFI in Loxone oder einen kompromittierten nginx-Worker), kann er den Key extrahieren und die WAF umgehen. Das ist ein bekanntes, akzeptiertes Risiko dieser Architektur. Mitigation: Loxone und nginx vollständig patchen; alternativ systemd `LoadCredential=` für reine Memory-Secret-Injection (benötigt njs/Lua in nginx).
+- **Verhalten bei Bootstrap-Fehler**: Lässt sich die AppSec-Komponente beim Deploy nicht hochfahren (z. B. lehnt CrowdSec die Config ab), installiert `deploy.sh` einen Pass-Through-Stub anstelle der WAF-Integration, statt nginx bei jedem Request mit 500 antworten zu lassen — der Traffic fließt weiter, nur ohne WAF-Inspektion, und der Lauf beendet sich mit Exit-Code `3`, um die Degradation zu kennzeichnen. CrowdSecs IP-Level-Erkennung (Layer 3) und der Firewall-Bouncer sind davon nicht betroffen — nur die Inhaltsprüfung der Requests ist aus, bis ein erneuter Lauf die Ursache behebt.
 - AppSec-Metriken: `cscli metrics | grep -A3 Appsec`
 
 ### Layer 5: System Hardening
@@ -156,7 +157,7 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 
 - **Discord-Webhook**: Echtzeit-Alerts für Blocks, Anomalien, Service-Failures
 - **Security Monitor** (60-Sek-Zyklus): CrowdSec-Decisions, nginx-Fehler, Auth-Versuche, AppSec-Detections, System-Ressourcen
-- **Network Watchdog** (60-Sek-Zyklus): erkennt Netzwerk-Layer-Ausfälle (dhclient-Death-Spiral, Kernel-Routing-Korruption, Interface-Desync), die Prozess-Level-Checks nicht sehen. Selbstheilung per Service-Restart; Reboot als letzte Maßnahme mit Pre-/Post-Reboot-Discord-Reporting und Anti-Loop-Schutz.
+- **Network Watchdog** (60-Sek-Zyklus): erkennt Netzwerk-Layer-Ausfälle (dhclient-Death-Spiral, Kernel-Routing-Korruption, Interface-Desync), die Prozess-Level-Checks nicht sehen. Selbstheilung per Service-Restart; Reboot als letzte Maßnahme mit Pre-/Post-Reboot-Discord-Reporting und Anti-Loop-Schutz. Ein `502`/`504` vom lokalen nginx beweist, dass **der Listener lebt** (nur der Miniserver dahinter antwortet nicht) — das zählt daher als gesund und löst nie Heal oder Reboot aus. Ein Miniserver-Ausfall löst stattdessen einen eigenen, nur alarmierenden "Miniserver nicht erreichbar"-Hinweis aus, mit Recovery-Meldung, sobald er wieder antwortet.
 - **Log-Rotation**: 14 Tage Aufbewahrung für nginx-Logs
 - **Config-Backup**: tägliches automatisches Backup nach `/root/loxprox-backups/`
 - **Test-Suite**: `sudo ./test-gateway.sh` validiert alle Komponenten nach dem Deploy

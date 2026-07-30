@@ -62,7 +62,7 @@ The gateway exposes `:22` only to `SSH_ALLOWED_SUBNETS` via nftables. The intern
 
 With `ENABLE_TUNNEL=true` (see [`docs/TUNNEL-SETUP.md`](docs/TUNNEL-SETUP.md)) external traffic enters via an operator-owned relay VPS and reaches the gateway's nginx **from loopback** (the frpc process). Three consequences matter for the threat model:
 
-1. **Gateway-side nftables bans cannot drop tunneled attackers** — their packets never cross the gateway's WAN interface. Perimeter enforcement therefore lives on the **relay** (its own CrowdSec + firewall bouncer, installed by default by `install-relay.sh`), where the true source IP is visible. The gateway's AppSec WAF, rate limits and CrowdSec *detection* still apply to every tunneled request — real client IPs are restored via `X-Forwarded-For`, trusted from loopback only with `real_ip_recursive off` (a client-supplied header cannot spoof its source).
+1. **Gateway-side nftables bans cannot drop tunneled attackers** — their packets never cross the gateway's WAN interface. Perimeter enforcement therefore lives on the **relay** (its own CrowdSec + firewall bouncer, installed by default by `install-relay.sh`), where the true source IP is visible. The gateway's AppSec WAF, rate limits and CrowdSec *detection* still apply to every tunneled request — real client IPs are restored via `X-Forwarded-For`, trusted from loopback only with `real_ip_recursive off` (a client-supplied header cannot spoof its source). The relay's firewall bouncer drops banned sources on *every* port it fronts, including the frp control port — a ban of the household's shared WAN IP severs the tunnel and operator SSH at the same time. `RELAY_WHITELIST_IPS` is the relay-side counterpart to the gateway's `CROWDSEC_WHITELIST_IPS` (see `CONFIGURATION-GUIDE.md` → "Households behind one IP"); like its gateway counterpart it only suppresses **locally generated** decisions — CAPI/community-blocklist decisions still apply to a whitelisted IP.
 2. **The relay is attack surface you own.** It runs the same philosophy as the gateway: nftables input-drop, version-pinned SHA256-verified binaries, sandboxed systemd units, unattended upgrades, CrowdSec with community blocklists. A compromised relay can observe and manipulate external traffic (it terminates TLS) but holds no Miniserver credentials and cannot reach the LAN beyond the single tunneled port.
 3. **The tunnel token is a credential.** Anyone holding it can connect a rogue frpc to your relay; `proxyBindAddr = 127.0.0.1` plus `allowPorts` limit the blast radius to hijacking the one loopback port (denial of service / traffic interception at the relay). Stored 0640 on both sides; rotate yearly and on any suspicion.
 
@@ -134,7 +134,7 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 
 ### Layer 4: Application Security (AppSec WAF)
 
-- Mode: **enforce** (blocks matched requests with 403)
+- Mode: `APPSEC_MODE` — **enforce** (default, blocks matched requests with 403) or **monitor** (alerts via `cscli alerts list`, never blocks; for verifying no false positives before switching to enforce)
 - Collection: `crowdsecurity/appsec-virtual-patching` (200+ CVE-specific rules)
 - Listens on `127.0.0.1:7422`
 - Evaluates every request before it reaches Loxone
@@ -142,6 +142,7 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 - **Required headers**: `X-Crowdsec-Appsec-Ip`, `X-Crowdsec-Appsec-Uri`, `X-Crowdsec-Appsec-Verb`
 - The nginx `auth_request` subrequest passes these headers automatically via `/etc/nginx/crowdsec-appsec.conf`
 - **Risk note**: The AppSec API key is stored in `/etc/nginx/crowdsec-appsec.conf` (mode 640, root:www-data). If an attacker achieves local file read (e.g., via LFI in Loxone or a compromised nginx worker), they could extract this key and bypass the WAF. This is a known, accepted risk for this architecture. Mitigation: keep Loxone and nginx fully patched; consider systemd `LoadCredential=` for memory-only secret injection (requires njs/Lua in nginx).
+- **Bootstrap-failure behavior**: if the AppSec component can't be brought up at deploy time (e.g. CrowdSec rejects the config), `deploy.sh` installs a pass-through stub in place of the WAF integration instead of leaving nginx answering 500 to every request — traffic keeps flowing, just without WAF inspection, and the run exits `3` to flag the degradation. CrowdSec's IP-level detection (Layer 3) and the firewall bouncer are unaffected; only request-content inspection is down until a re-run fixes the underlying cause.
 - AppSec metrics: `cscli metrics | grep -A3 Appsec`
 
 ### Layer 5: System Hardening
@@ -156,7 +157,7 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 
 - **Discord webhook**: real-time alerts for blocks, anomalies, service failures
 - **Security monitor** (60s cycle): CrowdSec decisions, nginx errors, auth attempts, AppSec detections, system resources
-- **Network watchdog** (60s cycle): Detects network-layer failures (dhclient death-spiral, kernel routing corruption, interface desync) that process-level checks miss. Self-heals by restarting services; reboots as last resort with pre/post-reboot Discord reporting and anti-loop protection.
+- **Network watchdog** (60s cycle): Detects network-layer failures (dhclient death-spiral, kernel routing corruption, interface desync) that process-level checks miss. Self-heals by restarting services; reboots as last resort with pre/post-reboot Discord reporting and anti-loop protection. A `502`/`504` from the local nginx proves the **listener is alive** (only the Miniserver behind it isn't answering), so it counts as healthy and never triggers a heal or reboot — a Miniserver outage instead raises its own alert-only "Miniserver Unreachable" notice, with a recovery notice once it answers again.
 - **Log rotation**: 14-day retention for nginx logs
 - **Config backup**: daily automated backup to `/root/loxprox-backups/`
 - **Test suite**: `sudo ./test-gateway.sh` validates all components post-deploy

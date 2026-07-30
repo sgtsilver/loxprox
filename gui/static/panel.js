@@ -16,8 +16,8 @@ const I18N = {
         hero_ok: "Alles im grünen Bereich",
         hero_warn: "Beobachtung aktiv",
         hero_bad: "Eingriff erforderlich",
-        hs_req: "Anfragen/Min", hs_bans: "Aktive Sperren",
-        hs_appsec: "AppSec heute", hs_cert: "Zertifikat (Tage)",
+        hs_req: "Anfragen/Min", hs_bans: "Blockierte Zugriffe",
+        hs_appsec: "Abgewehrte Angriffe", hs_cert: "Zertifikat (Tage)",
         ch_req: "Anfragen pro Minute", ch_load: "Systemlast",
         ch_res: "Ressourcen", ch_bans: "Aktive Sperren (24h)",
         ch_appsec: "AppSec-Treffer (24h)", ch_24h: "vor 24h", ch_now: "jetzt",
@@ -41,12 +41,25 @@ const I18N = {
         grp_gui: "Panel", grp_other: "Weitere",
         svc: "Dienste", cert: "TLS-Zertifikat", days: "Tage übrig",
         ms: "Miniserver", reach: "erreichbar", unreach: "NICHT erreichbar",
-        bans: "Sperren aktiv", appsec: "AppSec heute", backup: "Letztes Backup",
-        hours_ago: "h alt", sys: "System", mode: "Modus", no_cert: "kein Zertifikat",
+        bans: "Blockierte Zugriffe", appsec: "Abgewehrte Angriffe (heute)", backup: "Letztes Backup",
+        hours_ago: "h alt", sys: "System", mode: "Verbindungsart", no_cert: "kein Zertifikat",
+        svc_sub: "Die Schutzsoftware im Hintergrund",
+        cert_sub: "Erneuert sich automatisch",
+        ms_sub: "Die Loxone-Zentrale im Haus",
+        bans_sub: "Ausgesperrte Absender-Adressen",
+        appsec_sub: "Schädliche Anfragen, von der Firewall gestoppt",
+        backup_sub: "Sicherung der Gateway-Konfiguration",
+        sys_sub: "Zustand des Gateway-Rechners",
+        mode_sub: "Wie deine Verbindung von außen geschützt ist",
+        mode_tls: "Verschlüsselt (TLS)", mode_tunnel: "Tunnel", mode_plain: "Direkt (HTTP)",
+        appsec_ips: "Adressen",
+        sys_disk: "Speicherplatz", sys_mem: "Arbeitsspeicher", sys_load: "Auslastung",
+        load_low: "niedrig", load_mid: "normal", load_high: "hoch",
         confirm_restart: "Dienst wirklich neu starten: ",
         confirm_unban: "IP entsperren: ", confirm_apply: "deploy.sh jetzt ausführen?",
         need_pw: "Passwort (X-LoxProx-Auth)",
         done: "Fertig", failed: "Fehlgeschlagen",
+        degraded: "Fertig, mit Einschränkungen — Protokoll unten prüfen",
         theme_auto: "Design: automatisch", theme_light: "Design: hell",
         theme_dark: "Design: dunkel", updated: "aktualisiert",
     },
@@ -58,8 +71,8 @@ const I18N = {
         hero_ok: "All systems secure",
         hero_warn: "Watching closely",
         hero_bad: "Attention required",
-        hs_req: "Requests/min", hs_bans: "Active bans",
-        hs_appsec: "AppSec today", hs_cert: "Certificate (days)",
+        hs_req: "Requests/min", hs_bans: "Blocked visitors",
+        hs_appsec: "Attacks blocked", hs_cert: "Certificate (days)",
         ch_req: "Requests per minute", ch_load: "System load",
         ch_res: "Resources", ch_bans: "Active bans (24h)",
         ch_appsec: "AppSec hits (24h)", ch_24h: "24h ago", ch_now: "now",
@@ -83,12 +96,25 @@ const I18N = {
         grp_gui: "Panel", grp_other: "Other",
         svc: "Services", cert: "TLS certificate", days: "days left",
         ms: "Miniserver", reach: "reachable", unreach: "NOT reachable",
-        bans: "active bans", appsec: "AppSec today", backup: "Last backup",
-        hours_ago: "h old", sys: "System", mode: "Mode", no_cert: "no certificate",
+        bans: "Blocked visitors", appsec: "Attacks blocked (today)", backup: "Last backup",
+        hours_ago: "h old", sys: "System", mode: "Connection type", no_cert: "no certificate",
+        svc_sub: "The protection software running in the background",
+        cert_sub: "Renews automatically",
+        ms_sub: "The Loxone hub in your home",
+        bans_sub: "Addresses currently locked out",
+        appsec_sub: "Malicious requests stopped by the firewall",
+        backup_sub: "Backup of the gateway configuration",
+        sys_sub: "Health of the gateway computer",
+        mode_sub: "How your remote connection is secured",
+        mode_tls: "Encrypted (TLS)", mode_tunnel: "Tunnel", mode_plain: "Direct (HTTP)",
+        appsec_ips: "addresses",
+        sys_disk: "Storage", sys_mem: "Memory", sys_load: "Load",
+        load_low: "low", load_mid: "normal", load_high: "high",
         confirm_restart: "Really restart service: ",
         confirm_unban: "Unban IP: ", confirm_apply: "Run deploy.sh now?",
         need_pw: "Password (X-LoxProx-Auth)",
         done: "Done", failed: "Failed",
+        degraded: "Done, with degraded steps — check the log below",
         theme_auto: "Theme: automatic", theme_light: "Theme: light",
         theme_dark: "Theme: dark", updated: "updated",
     },
@@ -365,11 +391,65 @@ function setGauge(circleId, textId, pct) {
     else animate(c, { strokeDashoffset: off, duration: 900, ease: "outCubic" });
 }
 
+// ─── system micro-bars (storage / memory / load) ────────────────────────
+
+const sysBarState = { disk: null, mem: null, load: null };
+
+function setBar(id, pct, key) {
+    const el = $(id);
+    if (!el) return;
+    const target = Math.max(0, Math.min(100, pct));
+    const prev = sysBarState[key];
+    sysBarState[key] = target;
+    if (REDUCED || prev == null || prev === target) {
+        el.style.width = target + "%";
+        return;
+    }
+    el.style.width = prev + "%";
+    animate(el, { width: target + "%", duration: 700, ease: "outCubic" });
+}
+
+function loadPct(load) {
+    return load == null ? 0 : Math.max(0, Math.min(100, Math.round((load / 4) * 100)));
+}
+
+function loadWord(load) {
+    if (load == null) return { txt: "–", cls: "" };
+    if (load > 2) return { txt: t("load_high"), cls: "is-warn" };
+    if (load >= 1) return { txt: t("load_mid"), cls: "" };
+    return { txt: t("load_low"), cls: "" };
+}
+
+function pctCls(pct, warnAt) {
+    return pct != null && pct > warnAt ? "is-warn" : "";
+}
+
+function sysBarRow(label, valueHtml, fillCls, fillId) {
+    return `<div class="sysbar"><div class="sysbar-head"><span class="sysbar-label">${label}</span>` +
+        `<span class="sysbar-val">${valueHtml}</span></div>` +
+        `<div class="sysbar-track"><div class="sysbar-fill ${fillCls}" id="${fillId}"></div></div></div>`;
+}
+
+function sysBarsHtml(sy) {
+    const disk = sy.disk_pct ?? null;
+    const mem = sy.mem_pct ?? null;
+    const load = sy.load ?? null;
+    const lw = loadWord(load);
+    return `<div class="sysbar-list">` +
+        sysBarRow(t("sys_disk"), disk == null ? "–" : disk + "%", pctCls(disk, 85), "sysDiskFill") +
+        sysBarRow(t("sys_mem"), mem == null ? "–" : mem + "%", pctCls(mem, 90), "sysMemFill") +
+        sysBarRow(t("sys_load"),
+            `${lw.txt} <span class="mono sysbar-raw">${load == null ? "–" : load}</span>`,
+            lw.cls, "sysLoadFill") +
+        `</div>`;
+}
+
 // ─── status refresh ──────────────────────────────────────────────────────
 
-function tile(label, value, cls) {
-    return `<div class="card tile ${cls || ""}"><div class="label">${label}</div>` +
-        `<div class="value"><span class="dot"></span><span>${value}</span></div></div>`;
+function tile(label, sub, value, cls, extraCls) {
+    return `<div class="card tile ${cls || ""} ${extraCls || ""}"><div class="label">${label}</div>` +
+        (sub ? `<div class="tile-sub">${sub}</div>` : "") +
+        `<div class="value"><span class="dot"></span>${value}</div></div>`;
 }
 
 const SEV = { "": 0, ok: 0, warn: 1, bad: 2 };
@@ -386,29 +466,33 @@ async function refresh() {
     $("liveDot").classList.remove("is-stale");
     const s = res.status, tiles = [];
     let worst = 0;
-    const push = (label, value, cls) => {
+    const push = (label, sub, value, cls, extraCls) => {
         worst = Math.max(worst, SEV[cls] || 0);
-        tiles.push(tile(label, value, cls));
+        tiles.push(tile(label, sub, value, cls, extraCls));
     };
 
     const badSvc = Object.entries(s.services).filter(([, v]) => v !== "active");
-    push(t("svc"), badSvc.length ? esc(badSvc.map(([k, v]) => k + ": " + v).join(", ")) : "OK",
+    push(t("svc"), t("svc_sub"), badSvc.length ? esc(badSvc.map(([k, v]) => k + ": " + v).join(", ")) : "OK",
         badSvc.length ? "bad" : "ok");
-    if (s.cert_days === null) push(t("cert"), t("no_cert"), s.mode === "tls" ? "warn" : "");
-    else push(t("cert"), s.cert_days + " " + t("days"),
+    if (s.cert_days === null) push(t("cert"), t("cert_sub"), t("no_cert"), s.mode === "tls" ? "warn" : "");
+    else push(t("cert"), t("cert_sub"), s.cert_days + " " + t("days"),
         s.cert_days < 7 ? "bad" : (s.cert_days < 21 ? "warn" : "ok"));
-    if (s.miniserver !== null) push(t("ms"), s.miniserver ? t("reach") : t("unreach"),
+    if (s.miniserver !== null) push(t("ms"), t("ms_sub"), s.miniserver ? t("reach") : t("unreach"),
         s.miniserver ? "ok" : "bad");
-    push(t("bans"), s.decisions.count, s.decisions.count > 0 ? "warn" : "ok");
-    push("AppSec", s.appsec.hits + " (" + s.appsec.ips + " IPs)", s.appsec.hits ? "warn" : "ok");
-    push(t("backup"), s.backup ? s.backup.age_hours + " " + t("hours_ago") : "—",
+    push(t("bans"), t("bans_sub"), s.decisions.count, s.decisions.count > 0 ? "warn" : "ok");
+    push(t("appsec"), t("appsec_sub"),
+        s.appsec.hits + " (" + s.appsec.ips + " " + t("appsec_ips") + ")", s.appsec.hits ? "warn" : "ok");
+    push(t("backup"), t("backup_sub"), s.backup ? s.backup.age_hours + " " + t("hours_ago") : "—",
         s.backup && s.backup.age_hours < 26 ? "ok" : "bad");
     const sy = s.system;
-    push(t("sys"), `disk ${sy.disk_pct ?? "?"}% · mem ${sy.mem_pct ?? "?"}% · load ${sy.load ?? "?"}`,
-        (sy.disk_pct > 85 || sy.mem_pct > 90) ? "warn" : "ok");
-    push(t("mode"), s.mode, "");
+    push(t("sys"), t("sys_sub"), sysBarsHtml(sy),
+        (sy.disk_pct > 85 || sy.mem_pct > 90) ? "warn" : "ok", "sys-tile");
+    push(t("mode"), t("mode_sub"), t("mode_" + s.mode) || s.mode, "");
 
     $("tiles").innerHTML = tiles.join("");
+    setBar("sysDiskFill", sy.disk_pct ?? 0, "disk");
+    setBar("sysMemFill", sy.mem_pct ?? 0, "mem");
+    setBar("sysLoadFill", loadPct(sy.load ?? null), "load");
     if (!tilesBuilt && !REDUCED) {
         tilesBuilt = true;
         animate([...$("tiles").children], {
@@ -421,7 +505,7 @@ async function refresh() {
     const sev = ["ok", "warn", "bad"][worst];
     $("heroTitle").textContent = t("hero_" + sev);
     $("heroTitle").className = "hero-title" + (worst === 1 ? " is-warn" : worst === 2 ? " is-bad" : "");
-    $("heroSub").textContent = `${t("mode")}: ${s.mode} · ${t("updated")} ${s.time.slice(11)}`;
+    $("heroSub").textContent = `${t("mode")}: ${t("mode_" + s.mode) || s.mode} · ${t("updated")} ${s.time.slice(11)}`;
     setCounter("hsBans", s.decisions.count);
     setCounter("hsAppsec", s.appsec.hits);
     setCounter("hsCert", s.cert_days ?? NaN);
@@ -605,7 +689,11 @@ function pollJob(id) {
         $("jobLog").scrollTop = $("jobLog").scrollHeight;
         if (!res.job.running) {
             clearInterval(jobTimer); jobTimer = null;
-            toast(res.job.rc === 0 ? t("done") : t("failed") + " (rc=" + res.job.rc + ")");
+            // deploy.sh rc=3: deployed, but one or more OPTIONAL steps degraded
+            // (already listed in the log tail above) — a warning, not a failure.
+            if (res.job.rc === 0) toast(t("done"));
+            else if (res.job.rc === 3) toast(t("degraded"));
+            else toast(t("failed") + " (rc=" + res.job.rc + ")");
             refresh();
         }
     }, 2000);

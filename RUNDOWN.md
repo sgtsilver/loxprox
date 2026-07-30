@@ -39,7 +39,7 @@ Internet ──► Router:1080 ──► Gateway:1080 ──► Loxone:80
 
 | File | Purpose |
 |------|---------|
-| `deploy.sh` | One-shot Debian 12 hardening & installation (~3500 lines, idempotent) |
+| `deploy.sh` | One-shot Debian 12 hardening & installation (~4100 lines, idempotent) |
 | `detect-loxone.sh` | Network autodetector — finds your Miniserver by MAC OUI and API fingerprint |
 | `test-gateway.sh` | 50+ automated checks — run after deploy to verify every control |
 | `set-static-ip.sh` | Pre-deploy VM network configuration |

@@ -585,8 +585,20 @@ class JobRunner:
             if self._meta is None:
                 return None
             rc = self._proc.poll()
+            # deploy.sh exit codes: 0 all good, 1 failed, 2 bad option,
+            # 3 deployed but one or more OPTIONAL steps degraded (health_check
+            # still lists them in the job log). "status" is additive — existing
+            # consumers of "running"/"rc" are unaffected.
+            if rc is None:
+                status = "running"
+            elif rc == 0:
+                status = "ok"
+            elif rc == 3:
+                status = "degraded"
+            else:
+                status = "failed"
             return {"id": self._meta["id"], "name": self._meta["name"],
-                    "running": rc is None, "rc": rc,
+                    "running": rc is None, "rc": rc, "status": status,
                     "elapsed": int(time.time() - self._meta["started"])}
 
     def log_tail(self, job_id):

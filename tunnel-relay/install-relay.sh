@@ -20,7 +20,12 @@
 #   3. sudo $EDITOR /etc/loxprox-relay/relay.conf   # fill in [REQUIRED] values
 #   4. sudo bash install-relay.sh
 #
-# The script is idempotent — safe to re-run after config changes.
+# Other entry points:
+#   sudo bash install-relay.sh --finalize-ssh    # key-only SSH once a key exists
+#   sudo bash install-relay.sh --health-check    # services + TLS cert expiry
+#
+# The script is idempotent — safe to re-run after config changes. A re-run on a
+# relay that already serves TLS keeps the live :443 site (no :80 downgrade).
 # Companion: the GATEWAY side is enabled via ENABLE_TUNNEL=true in
 # /etc/loxprox/deploy.conf + `sudo bash deploy.sh`. Full runbook:
 # docs/TUNNEL-SETUP.md in the repo.
@@ -50,6 +55,13 @@ RELAY_RATE_LIMIT_CONN_PER_IP="${RELAY_RATE_LIMIT_CONN_PER_IP-20}"
 # so a config that omits it does not trip `set -u`; a pre-set value is preserved.
 [[ ${RELAY_SSH_ALLOWED_SUBNETS+x} ]] || RELAY_SSH_ALLOWED_SUBNETS=()
 
+# CrowdSec whitelist (array of IPs and/or CIDRs) — H10. The firewall bouncer
+# drops on ALL ports, including the frp control port, so a single ban of the
+# household WAN IP severs the tunnel AND operator SSH at once. List the
+# household WAN address and any operator addresses here. Same `set -u` and
+# pre-set-value reasoning as above.
+[[ ${RELAY_WHITELIST_IPS+x} ]] || RELAY_WHITELIST_IPS=()
+
 RELAY_CONF="${RELAY_CONF:-/etc/loxprox-relay/relay.conf}"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -75,6 +87,10 @@ ACMESH_SHA256="${ACMESH_SHA256:-efd12b265252f8875269960b6b31830731ccce2b3e6ff8e7
 ACME_HOME="${ACME_HOME:-/root/.acme.sh}"
 ACME_WEBROOT="${ACME_WEBROOT:-/var/www/acme}"
 RELAY_TLS_DIR="${RELAY_TLS_DIR:-/etc/loxprox-relay/tls}"
+# Cert-expiry thresholds for the health check (H13). acme.sh renews inside its
+# own 30-day window; anything still under these values means renewal is broken.
+RELAY_CERT_WARN_DAYS="${RELAY_CERT_WARN_DAYS:-21}"
+RELAY_CERT_CRIT_DAYS="${RELAY_CERT_CRIT_DAYS:-7}"
 
 NGINX_SITE="${NGINX_SITE:-/etc/nginx/sites-available/loxone-relay}"
 NGINX_ENABLED="${NGINX_ENABLED:-/etc/nginx/sites-enabled/loxone-relay}"
@@ -85,6 +101,7 @@ RELAY_STATE_DIR="${RELAY_STATE_DIR:-/var/lib/loxprox-relay}"
 RELAY_SSH_MOTD="${RELAY_SSH_MOTD:-/etc/update-motd.d/99-loxprox-relay-ssh-warn}"
 CROWDSEC_NGINX_ACQUIS="${CROWDSEC_NGINX_ACQUIS:-/etc/crowdsec/acquis.d/nginx.yaml}"
 CROWDSEC_SSH_ACQUIS="${CROWDSEC_SSH_ACQUIS:-/etc/crowdsec/acquis.d/ssh.yaml}"
+CROWDSEC_WHITELIST="${CROWDSEC_WHITELIST:-/etc/crowdsec/parsers/s02-enrich/whitelist-loxprox-relay.yaml}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
@@ -105,10 +122,23 @@ check_root()    { [[ $EUID -eq 0 ]] || { error "Run as root."; exit 1; }; }
 service_active(){ systemctl is-active --quiet "$1" 2>/dev/null; }
 
 backup_file() {
+    # M18: the full path is preserved under $BACKUP_DIR/files/... (same layout as
+    # deploy.sh) plus a manifest, and a file backed up twice in one run gets a
+    # timestamped copy instead of overwriting the first one. The flat basename
+    # store lost the original nginx site: the phase-2 backup landed on top of the
+    # phase-1 backup, so the pre-install content was gone.
     local f="$1"
     [[ -f "$f" ]] || return 0
-    mkdir -p "$BACKUP_DIR"
-    cp -a "$f" "$BACKUP_DIR/$(basename "$f")"
+    local dest="$BACKUP_DIR/files$f"
+    mkdir -p "$(dirname "$dest")"
+    if [[ -e "$dest" ]]; then
+        local stamp n=1
+        stamp=$(date +%Y%m%d-%H%M%S)
+        while [[ -e "${dest}.${stamp}.${n}" ]]; do n=$((n + 1)); done
+        dest="${dest}.${stamp}.${n}"
+    fi
+    cp -a "$f" "$dest"
+    printf '%s\t%s\n' "${dest#"$BACKUP_DIR"/}" "$f" >> "$BACKUP_DIR/manifest.txt"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -476,12 +506,56 @@ install_acme_sh() {
     ok "acme.sh ${ACMESH_VER} installed at $ACME_HOME"
 }
 
+ensure_acme_webroot() {
+    mkdir -p "$ACME_WEBROOT/.well-known/acme-challenge"
+    chmod 0755 "$ACME_WEBROOT" "$ACME_WEBROOT/.well-known" "$ACME_WEBROOT/.well-known/acme-challenge"
+}
+
+# Days until the installed cert expires, on stdout. Returns 1 when there is no
+# readable cert (caller decides whether that is fatal). Negative = expired.
+cert_days_left() {
+    local cert="$RELAY_TLS_DIR/fullchain.pem" end epoch
+    [[ -f "$cert" ]] || return 1
+    end=$(openssl x509 -enddate -noout -in "$cert" 2>/dev/null) || return 1
+    epoch=$(date -d "${end#notAfter=}" +%s 2>/dev/null) || return 1
+    echo $(( (epoch - $(date +%s)) / 86400 ))
+}
+
+cert_covers_domain() {
+    openssl x509 -noout -checkhost "$RELAY_DOMAIN" \
+        -in "$RELAY_TLS_DIR/fullchain.pem" >/dev/null 2>&1
+}
+
+tls_site_live() {
+    [[ -L "$NGINX_ENABLED" && -f "$NGINX_SITE" ]] || return 1
+    grep -qE '^[[:space:]]*listen[[:space:]]+443[[:space:]]+ssl' "$NGINX_SITE"
+}
+
+ensure_acme_cron() {
+    # M13: match the invariant "acme.sh --cron" substring, NOT "$ACME_HOME/acme.sh"
+    # — acme.sh --install-cronjob writes the home path quoted ("/root/.acme.sh"/acme.sh
+    # --cron ...), so the path-prefixed pattern never matched its own cron line and
+    # this check was permanently false. Same fix as deploy.sh v2.0.1.
+    # `|| true` is mandatory: a no-match grep exits 1 and would abort under pipefail.
+    local cron_line
+    cron_line=$(crontab -l 2>/dev/null | grep -F "acme.sh --cron" | head -1) || true
+    if [[ -z "$cron_line" ]]; then
+        warn "acme.sh cron line missing from root crontab — restoring."
+        "$ACME_HOME/acme.sh" --install-cronjob >> "$LOG_FILE" 2>&1 || \
+            warn "acme.sh --install-cronjob failed — renewals will NOT happen automatically."
+        cron_line=$(crontab -l 2>/dev/null | grep -F "acme.sh --cron" | head -1) || true
+    fi
+    if [[ -n "$cron_line" ]]; then
+        ok "Auto-renewal cron active: $cron_line"
+    else
+        error "Could not establish acme.sh cron — auto-renewal will NOT happen."
+        error "Run manually: $ACME_HOME/acme.sh --install-cronjob"
+    fi
+}
+
 write_http_site() {
     # Phase 1: :80 only — ACME challenge + 301. Written BEFORE cert issuance
     # so nginx -t passes without cert files.
-    mkdir -p "$ACME_WEBROOT/.well-known/acme-challenge"
-    chmod 0755 "$ACME_WEBROOT" "$ACME_WEBROOT/.well-known" "$ACME_WEBROOT/.well-known/acme-challenge"
-
     backup_file "$NGINX_SITE"
     cat > "$NGINX_SITE" <<EOF
 # LoxProx relay — public entry point (phase 1: ACME only)
@@ -529,7 +603,26 @@ acme_issue_with_server() {
 issue_certificate() {
     banner "TLS certificate for $RELAY_DOMAIN"
     install_acme_sh
-    write_http_site
+    ensure_acme_webroot
+
+    # H9: a re-run must never downgrade a working relay. The phase-1 :80-only
+    # site exists solely so `nginx -t` passes before any cert file exists;
+    # rewriting it over a live :443 site drops the relay to cleartext for the
+    # rest of the run — permanently if the run aborts. Once the phase-2 site is
+    # live its own :80 block serves the same ACME webroot, so both renewal and
+    # re-issue work without the downgrade.
+    local days_left
+    days_left=$(cert_days_left) || days_left=""
+    if tls_site_live && [[ -n "$days_left" ]] && (( days_left > 0 )) && cert_covers_domain; then
+        if (( days_left > 30 )); then
+            info "Cert for $RELAY_DOMAIN valid for ${days_left} more day(s), :443 site live — nothing to issue."
+            ensure_acme_cron
+            return 0
+        fi
+        info "Cert for $RELAY_DOMAIN expires in ${days_left} day(s) — renewing; live :443 site stays up."
+    else
+        write_http_site
+    fi
 
     info "Requesting cert from $RELAY_ACME_SERVER via HTTP-01..."
     local rc=0
@@ -567,11 +660,7 @@ issue_certificate() {
         >> "$LOG_FILE" 2>&1
     chmod 0640 "$RELAY_TLS_DIR/fullchain.pem" "$RELAY_TLS_DIR/privkey.pem"
 
-    # Auto-renew cron (acme.sh installs it with --install; verify it's there).
-    if ! crontab -l 2>/dev/null | grep -qF "$ACME_HOME/acme.sh --cron"; then
-        "$ACME_HOME/acme.sh" --install-cronjob >> "$LOG_FILE" 2>&1 || \
-            warn "Could not install acme.sh cron — renewals will NOT happen automatically."
-    fi
+    ensure_acme_cron
     ok "Cert installed at $RELAY_TLS_DIR; auto-renewal via acme.sh cron."
 }
 
@@ -695,6 +784,10 @@ server {
 }
 EOF
 
+    # Also removed by write_http_site, which a re-run with a live cert skips —
+    # a distribution default_server restored by an nginx package upgrade would
+    # otherwise collide with this site's own default_server on :80.
+    rm -f /etc/nginx/sites-enabled/default
     ln -sf "$NGINX_SITE" "$NGINX_ENABLED"
     nginx -t >> "$LOG_FILE" 2>&1 || { error "nginx -t failed on phase-2 site."; exit 1; }
     systemctl reload nginx
@@ -896,6 +989,60 @@ setup_ssh_hardening() {
     fi
 }
 
+write_crowdsec_whitelist() {
+    # H10: the firewall bouncer drops on ALL ports — including the frp control
+    # port — so one ban of the shared household WAN IP severs the tunnel AND
+    # operator SSH in a single stroke, with no way back in. Whitelisted sources
+    # never produce a local decision. Same parser path and YAML shape as the
+    # gateway's whitelist-loxone.yaml.
+    install -d -m 0755 "$(dirname "$CROWDSEC_WHITELIST")"
+    backup_file "$CROWDSEC_WHITELIST"
+
+    if (( ${#RELAY_WHITELIST_IPS[@]} == 0 )); then
+        rm -f "$CROWDSEC_WHITELIST"
+        warn "RELAY_WHITELIST_IPS is empty — nothing is exempt from CrowdSec bans on this relay."
+        warn "  A ban of your household WAN IP would cut the tunnel AND your SSH access."
+        warn "  Set RELAY_WHITELIST_IPS in $RELAY_CONF and re-run."
+        return 0
+    fi
+
+    # A whitelist entry broader than a /24 exempts every host in that range,
+    # trusted or not (same F10 caveat as the gateway).
+    local w pfx plain=() cidr=()
+    for w in "${RELAY_WHITELIST_IPS[@]}"; do
+        if [[ "$w" == */* ]]; then
+            cidr+=("$w")
+            if [[ "$w" =~ /([0-9]+)$ ]]; then
+                pfx="${BASH_REMATCH[1]}"
+                if (( pfx < 24 )); then
+                    warn "Whitelist entry '$w' is broader than /24 — CrowdSec is disabled for ALL hosts in that range."
+                fi
+            fi
+        else
+            plain+=("$w")
+        fi
+    done
+
+    {
+        echo "name: whitelist-loxprox-relay"
+        echo "description: \"Trusted sources — never banned by the relay\""
+        echo "whitelist:"
+        echo "  reason: \"Trusted network (household WAN + operator)\""
+        # Emit a list key only when it has members: a bare `ip:`/`cidr:` with no
+        # items parses as null and CrowdSec rejects the whole parser.
+        if (( ${#plain[@]} > 0 )); then
+            echo "  ip:"
+            for w in "${plain[@]}"; do echo "    - \"$w\""; done
+        fi
+        if (( ${#cidr[@]} > 0 )); then
+            echo "  cidr:"
+            for w in "${cidr[@]}"; do echo "    - \"$w\""; done
+        fi
+    } > "$CROWDSEC_WHITELIST"
+    chmod 0644 "$CROWDSEC_WHITELIST"
+    ok "CrowdSec whitelist written: ${RELAY_WHITELIST_IPS[*]}"
+}
+
 setup_crowdsec() {
     [[ "${RELAY_ENABLE_CROWDSEC,,}" == "true" ]] || {
         info "RELAY_ENABLE_CROWDSEC=false — skipping CrowdSec (NOT recommended)."
@@ -947,6 +1094,8 @@ filenames:
 labels:
   type: syslog
 EOF
+
+    write_crowdsec_whitelist
 
     cscli hub update || true
     cscli collections install crowdsecurity/nginx               --error || true
@@ -1028,6 +1177,27 @@ health_check() {
         warn "SSH password authentication is ENABLED — install a key and run: sudo bash install-relay.sh --finalize-ssh"
     fi
 
+    # H13: acme.sh renewal failures are silent on a stock VPS (no MTA), so an
+    # expiring cert is invisible until the Loxone app stops connecting.
+    local days_left
+    days_left=$(cert_days_left) || days_left=""
+    if [[ -z "$days_left" ]]; then
+        warn "Could not read cert expiry from $RELAY_TLS_DIR/fullchain.pem"
+    elif (( days_left <= 0 )); then
+        error "TLS cert for $RELAY_DOMAIN has EXPIRED — the Loxone app cannot connect."
+        error "  Renew now: $ACME_HOME/acme.sh --renew -d $RELAY_DOMAIN --force"
+        failures=$((failures + 1))
+    elif (( days_left < RELAY_CERT_CRIT_DAYS )); then
+        error "TLS cert expires in ${days_left} day(s) — CRITICAL, auto-renewal is not working."
+        error "  Renew now: $ACME_HOME/acme.sh --renew -d $RELAY_DOMAIN --force"
+        failures=$((failures + 1))
+    elif (( days_left < RELAY_CERT_WARN_DAYS )); then
+        warn "TLS cert expires in ${days_left} day(s) — acme.sh renews inside 30 days, so the"
+        warn "  renewal has already missed its window. Check 'crontab -l' and $LOG_FILE."
+    else
+        ok "TLS cert valid for ${days_left} more day(s)."
+    fi
+
     info "Listening sockets (expect :22 :80 :443 :${FRP_BIND_PORT}; :${TUNNEL_REMOTE_PORT} appears once the gateway connects):"
     ss -tlnp | grep -E ":(22|80|443|${FRP_BIND_PORT}|${TUNNEL_REMOTE_PORT}) " || true
 
@@ -1047,7 +1217,10 @@ Public entry point: https://${RELAY_DOMAIN}
 frp control port:   ${FRP_BIND_PORT} (tcp + quic/udp)
 Tunnel proxy port:  127.0.0.1:${TUNNEL_REMOTE_PORT} (loopback only, via nginx)
 CrowdSec:           ${RELAY_ENABLE_CROWDSEC}
+Ban-exempt:         ${RELAY_WHITELIST_IPS[*]:-<none — a ban of your WAN IP cuts tunnel + SSH>}
 Rate limit:         ${RELAY_RATE_LIMIT_REQ_PER_SEC} req/s (burst ${RELAY_RATE_LIMIT_BURST}), ${RELAY_RATE_LIMIT_CONN_PER_IP} conn/IP
+
+Health check + cert expiry, anytime: sudo bash install-relay.sh --health-check
 
 Next steps (gateway side):
   1. In /etc/loxprox/deploy.conf on the GATEWAY set:
@@ -1078,6 +1251,16 @@ main() {
         banner "LoxProx Relay — --finalize-ssh"
         check_root
         setup_ssh_hardening
+        exit $?
+    fi
+
+    # Re-entry point: services + cert expiry, no changes to the box. Cheap
+    # enough to run from cron — the only cert-expiry signal the relay has.
+    if [[ "${1:-}" == "--health-check" ]]; then
+        banner "LoxProx Relay — --health-check"
+        check_root
+        load_config
+        health_check
         exit $?
     fi
 

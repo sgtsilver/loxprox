@@ -9,7 +9,7 @@ Anschlüsse, bei denen Portweiterleitung unmöglich ist.
 
 | Datei | Zweck |
 |---|---|
-| `install-relay.sh` | One-Shot-Installer für Debian-12-VPS: nftables, frps (gepinnt + SHA256-verifiziert), nginx-TLS-Einstiegspunkt (Let's Encrypt mit ZeroSSL-Fallback), CrowdSec-Perimeter-Durchsetzung, Unattended Upgrades. Idempotent. |
+| `install-relay.sh` | One-Shot-Installer für Debian-12-VPS: nftables, frps (gepinnt + SHA256-verifiziert), nginx-TLS-Einstiegspunkt (Let's Encrypt mit ZeroSSL-Fallback), CrowdSec-Perimeter-Durchsetzung (mit einer Ban-Ausnahmeliste `RELAY_WHITELIST_IPS`), Unattended Upgrades. Idempotent — ein erneuter Lauf auf einem Relay, das bereits TLS bedient, lässt die laufende `:443`-Site unangetastet statt sie herunterzustufen. |
 | `relay.conf.example` | Konfigurationsvorlage. Nach `/etc/loxprox-relay/relay.conf` kopieren und die `[REQUIRED]`-Werte ausfüllen. |
 
 ## Schnellstart
@@ -25,6 +25,17 @@ bash install-relay.sh
 Danach die Gateway-Seite aktivieren: `ENABLE_TUNNEL="true"` (plus die
 passenden `TUNNEL_*`-Werte) in `/etc/loxprox/deploy.conf` setzen und
 `deploy.sh` erneut ausführen.
+
+## Weitere Einstiegspunkte
+
+```bash
+bash install-relay.sh --finalize-ssh    # Key-only SSH, sobald ein Key installiert ist
+bash install-relay.sh --health-check    # Dienste + TLS-Zertifikatsablauf, ohne Änderungen
+```
+
+Ein `--rollback` gibt es auf dem Relay nicht. Backups jedes Laufs landen unter
+`/root/loxprox-relay-backup-<Zeitstempel>/files/…` inklusive `manifest.txt` —
+das Zurückspielen ist ein manuelles `cp`.
 
 **Vollständiges Runbook, Bedrohungsmodell und Troubleshooting:**
 [docs/TUNNEL-SETUP.de.md](../docs/TUNNEL-SETUP.de.md)

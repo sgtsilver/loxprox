@@ -114,6 +114,15 @@ NGINX_ENABLED="${NGINX_ENABLED:-/etc/nginx/sites-enabled/loxone}"
 CROWDSEC_NGINX_ACQUIS="${CROWDSEC_NGINX_ACQUIS:-/etc/crowdsec/acquis.d/nginx.yaml}"
 CROWDSEC_SSH_ACQUIS="${CROWDSEC_SSH_ACQUIS:-/etc/crowdsec/acquis.d/ssh.yaml}"
 CROWDSEC_APPSEC_ACQUIS="${CROWDSEC_APPSEC_ACQUIS:-/etc/crowdsec/acquis.d/appsec.yaml}"
+# v2.3 — APPSEC_MODE=monitor is delivered by a LOCAL AppSec config carrying the
+# same rule set as the hub's crowdsecurity/virtual-patching (base-config +
+# vpatch-*) with `default_remediation: allow`, which is CrowdSec's documented
+# log-only switch: rules still evaluate and alert, the component answers the
+# nginx auth_request with "allow", nothing is blocked. Written on monitor,
+# removed on enforce.
+CROWDSEC_APPSEC_CONFIG_DIR="${CROWDSEC_APPSEC_CONFIG_DIR:-/etc/crowdsec/appsec-configs}"
+CROWDSEC_APPSEC_MONITOR_CONF="${CROWDSEC_APPSEC_MONITOR_CONF:-$CROWDSEC_APPSEC_CONFIG_DIR/loxprox-virtual-patching-monitor.yaml}"
+CROWDSEC_APPSEC_MONITOR_NAME="${CROWDSEC_APPSEC_MONITOR_NAME:-loxprox/virtual-patching-monitor}"
 NGINX_APPSEC_INCLUDE="${NGINX_APPSEC_INCLUDE:-/etc/nginx/crowdsec-appsec.conf}"
 # A future cleanup target. A v1.5.0-dev iteration moved http-scope AppSec
 # map + log_format here; that split was reverted (nginx rejects it — see
@@ -177,12 +186,45 @@ banner() {
 check_root()    { [[ $EUID -eq 0 ]] || { error "Run as root."; exit 1; }; }
 service_active(){ systemctl is-active --quiet "$1" 2>/dev/null; }
 
+# ─── Degraded-mode step wrapper (v2.3) ───────────────────────────────────────
+#
+# Core proxy configuration (preflight, sysctls, firewall, nginx, CrowdSec
+# install, runtime config) stays fatal — a gateway that cannot proxy is not a
+# gateway. Every OPTIONAL feature runs through run_optional_step instead: the
+# failure is recorded, warned about loudly, and the run continues, so SSH
+# hardening, monitoring, watchdogs and config.env are still applied. A failing
+# TLS issuance aborting the run before setup_ssh_hardening was the structural
+# cause of the v2.0.1 bug — `set -e` on a bare module call in main().
+#
+# health_check() prints every recorded step and exits 3 (distinct from the 1 it
+# uses for failed health checks), so "ALL CHECKS PASSED" can never coexist with
+# a silently skipped feature — for an operator or for automation.
+_LOXPROX_DEGRADED_STEPS=()
+
+run_optional_step() {
+    local label="$1"; shift
+    local rc=0
+    "$@" || rc=$?
+    if (( rc != 0 )); then
+        _LOXPROX_DEGRADED_STEPS+=("$label (rc=$rc)")
+        warn "STEP FAILED: $label (rc=$rc) — continuing in DEGRADED mode."
+        warn "  This feature is NOT active; the rest of the deployment still runs."
+        warn "  Fix the cause, then re-run: sudo bash deploy.sh"
+    fi
+    return 0
+}
+
 backup_file() {
     # H6: preserve each file's FULL path under $BACKUP_DIR/files/... plus a manifest,
     # so rollback() restores to the original location. The old flat-basename store
     # lost the path → restore sent the nginx site to /etc/loxone, etc.
     [[ -f "$1" ]] || return 0
     local dest="$BACKUP_DIR/files$1"
+    # One snapshot per path per run. The first copy is the PRE-deploy state,
+    # which is what --rollback has to restore; modules that rewrite the same
+    # file again later in the run (TLS site mutation, site regeneration) must
+    # not overwrite it with an intermediate version.
+    [[ -e "$dest" ]] && return 0
     mkdir -p "$(dirname "$dest")"
     cp -a "$1" "$dest"
     printf '%s\n' "$1" >> "$BACKUP_DIR/manifest.txt"
@@ -202,6 +244,15 @@ validate_ip() {
     fi
     error "Invalid IP: $ip"
     return 1
+}
+
+_loxprox_normalize_bool() {
+    # Echoes "true" or "false" for the accepted spellings, nothing otherwise.
+    # Callers treat the empty result as "operator typo" and abort.
+    case "${1,,}" in
+        true|yes|1)     printf 'true'  ;;
+        false|no|0|"")  printf 'false' ;;
+    esac
 }
 
 validate_network() {
@@ -239,6 +290,43 @@ _loxprox_load_config() {
     return 0
 }
 
+# Echoes the value $1 would have after sourcing the operator's deploy.conf, or
+# nothing when the file or the key is absent. Runs in a subshell: the bootstrap
+# path must READ an existing config without adopting it into the running shell.
+_loxprox_conf_value() {
+    local var="$1"
+    [[ -f "$LOXPROX_DEPLOY_CONF" ]] || return 0
+    (
+        set +u
+        unset "$var"
+        # shellcheck disable=SC1090
+        source "$LOXPROX_DEPLOY_CONF" >/dev/null 2>&1 || true
+        printf '%s' "${!var}"
+    )
+}
+
+# Echoes a top-level `key = value` from frpc.toml (quotes stripped), or nothing.
+# The tunnel's live parameters exist nowhere else once deploy.conf is gone.
+_loxprox_frpc_value() {
+    local key="$1"
+    [[ -f "$FRPC_CONF" ]] || return 0
+    awk -v k="$key" '
+        {
+            line = $0
+            # Skip full-line comments only: a token value may itself contain a hash.
+            if (line ~ /^[[:space:]]*#/) next
+            eq = index(line, "=")
+            if (eq == 0) next
+            name = substr(line, 1, eq - 1)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+            if (name != k) next
+            v = substr(line, eq + 1)
+            gsub(/^[[:space:]]*"?|"?[[:space:]]*$/, "", v)
+            print v
+            exit
+        }' "$FRPC_CONF"
+}
+
 # Returns 0 if signals of a previous LoxProx install are present on the box.
 # Used by main() to distinguish "fresh VM, operator forgot to edit config"
 # from "existing install upgrading to v1.5.0 for the first time."
@@ -259,9 +347,19 @@ _loxprox_detect_live_install() {
 #   LAN_SUBNET             — first kernel-proto link-scope route
 #   SSH_ALLOWED_SUBNETS    — /etc/nftables.conf "tcp dport 22 ip saddr {...}"
 #   ENABLE_APPSEC          — presence of `auth_request /crowdsec-appsec` in nginx site
-#   APPSEC_MODE            — /etc/crowdsec/acquis.d/appsec.yaml `mode:` key
+#   APPSEC_MODE            — /etc/crowdsec/acquis.d/appsec.yaml (monitor config ref)
 #   CROWDSEC_WHITELIST_IPS — /etc/crowdsec/parsers/s02-enrich/whitelist-loxone.yaml
 #   DISCORD_WEBHOOK_URL    — /etc/loxprox/config.env (runtime config, separate file)
+#   ENABLE_TLS / TLS_*     — TLS marker in the nginx site, acme.sh state
+#   ENABLE_TUNNEL/TUNNEL_* — frpc unit + /etc/frp/frpc.toml
+#   ENABLE_GUI / GUI_PORT  — panel unit + /etc/loxprox/config.env
+#
+# v2.3 (H1): the TLS, tunnel and panel keys used to be omitted entirely, so the
+# first `deploy.sh` after a bootstrap reverted the TLS site (cleartext on a
+# WAN-forwarded :1080) or tore down a live tunnel. EVERY key deploy.sh reads is
+# emitted now. Precedence per key: an existing deploy.conf wins (operator
+# intent), then the live host state, then the repo default — which makes
+# bootstrap-then-deploy a no-op with respect to TLS and tunnel state.
 #
 # Rate limits, timeouts, and AUTOREBOOT_TIME are NOT extracted — they're written
 # as repo defaults and the operator can edit deploy.conf afterwards if they
@@ -311,10 +409,13 @@ _loxprox_extract_config_from_live_state() {
     gateway_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
     lan_subnet=$(ip route 2>/dev/null | awk '/proto kernel/ && /scope link/{print $1; exit}')
 
-    if [[ "$enable_appsec" == "true" && -f /etc/crowdsec/acquis.d/appsec.yaml ]]; then
+    if [[ "$enable_appsec" == "true" && -f "$CROWDSEC_APPSEC_ACQUIS" ]]; then
+        # v2.3 expresses monitor mode by pointing the acquisition at the local
+        # log-only AppSec config; pre-v2.3 files may still carry a `mode:` key
+        # (which CrowdSec never honoured — see H11 in the sweep-4 audit).
         local mode_line
-        mode_line=$(grep -E '^\s*mode:\s*' /etc/crowdsec/acquis.d/appsec.yaml | head -1)
-        if [[ "$mode_line" =~ monitor ]]; then
+        mode_line=$(grep -E '^\s*mode:\s*' "$CROWDSEC_APPSEC_ACQUIS" | head -1)
+        if [[ "$mode_line" =~ monitor ]] || grep -qF "$CROWDSEC_APPSEC_MONITOR_NAME" "$CROWDSEC_APPSEC_ACQUIS"; then
             appsec_mode="monitor"
         fi
     fi
@@ -333,6 +434,101 @@ _loxprox_extract_config_from_live_state() {
             gsub(/^[[:space:]]*-[[:space:]]*"?|"?[[:space:]]*$/, "");
             print
         }' /etc/crowdsec/parsers/s02-enrich/whitelist-loxone.yaml)
+    fi
+
+    # ── H1: TLS / tunnel / panel state ───────────────────────────────────────
+    # An existing deploy.conf always wins; otherwise read what the host runs.
+    local enable_tls tls_domain tls_email tls_acme_server tls_acme_fallback tls_acme_extra
+    enable_tls=$(_loxprox_conf_value ENABLE_TLS)
+    if [[ -z "$enable_tls" ]]; then
+        if _loxprox_site_in_tls_mode || [[ -f "$NGINX_ACME_CONF" ]]; then
+            enable_tls="true"
+        else
+            enable_tls="false"
+        fi
+    fi
+    tls_domain=$(_loxprox_conf_value TLS_DOMAIN)
+    if [[ -z "$tls_domain" && -d "$ACME_HOME" ]]; then
+        # acme.sh keeps one directory per issued domain ("<fqdn>" or
+        # "<fqdn>_ecc") — the only on-disk record of what was issued.
+        local acme_dir acme_base
+        for acme_dir in "$ACME_HOME"/*/; do
+            acme_base=$(basename "$acme_dir")
+            acme_base="${acme_base%_ecc}"
+            [[ "$acme_base" == *.* ]] || continue
+            tls_domain="$acme_base"
+            break
+        done
+    fi
+    tls_email=$(_loxprox_conf_value TLS_EMAIL)
+    if [[ -z "$tls_email" && -f "$ACME_HOME/account.conf" ]]; then
+        tls_email=$(awk -F"'" '/^ACCOUNT_EMAIL=/{print $2; exit}' "$ACME_HOME/account.conf")
+    fi
+    # The CA short names are not recoverable from acme.sh state in a form worth
+    # guessing at; the repo defaults are what every LoxProx install used.
+    tls_acme_server=$(_loxprox_conf_value TLS_ACME_SERVER);     : "${tls_acme_server:=letsencrypt}"
+    tls_acme_fallback=$(_loxprox_conf_value TLS_ACME_FALLBACK_SERVER); : "${tls_acme_fallback:=zerossl}"
+    tls_acme_extra=$(_loxprox_conf_value TLS_ACME_EXTRA)
+
+    local enable_tunnel tunnel_addr tunnel_port tunnel_proto tunnel_token
+    local tunnel_proxy_name tunnel_remote_port tunnel_public_host
+    enable_tunnel=$(_loxprox_conf_value ENABLE_TUNNEL)
+    if [[ -z "$enable_tunnel" ]]; then
+        if [[ -f "$NGINX_TUNNEL_CONF" ]] || systemctl is-enabled --quiet frpc 2>/dev/null; then
+            enable_tunnel="true"
+        else
+            enable_tunnel="false"
+        fi
+    fi
+    tunnel_addr=$(_loxprox_conf_value TUNNEL_SERVER_ADDR);   : "${tunnel_addr:=$(_loxprox_frpc_value serverAddr)}"
+    tunnel_port=$(_loxprox_conf_value TUNNEL_SERVER_PORT);   : "${tunnel_port:=$(_loxprox_frpc_value serverPort)}"
+    : "${tunnel_port:=7000}"
+    tunnel_proto=$(_loxprox_conf_value TUNNEL_PROTOCOL);     : "${tunnel_proto:=$(_loxprox_frpc_value transport.protocol)}"
+    : "${tunnel_proto:=quic}"
+    tunnel_token=$(_loxprox_conf_value TUNNEL_TOKEN);        : "${tunnel_token:=$(_loxprox_frpc_value auth.token)}"
+    tunnel_proxy_name=$(_loxprox_conf_value TUNNEL_PROXY_NAME); : "${tunnel_proxy_name:=$(_loxprox_frpc_value name)}"
+    : "${tunnel_proxy_name:=loxone}"
+    tunnel_remote_port=$(_loxprox_conf_value TUNNEL_REMOTE_PORT); : "${tunnel_remote_port:=$(_loxprox_frpc_value remotePort)}"
+    : "${tunnel_remote_port:=8443}"
+    tunnel_public_host=$(_loxprox_conf_value TUNNEL_PUBLIC_HOST)
+    if [[ -z "$tunnel_public_host" && -f /etc/loxprox/config.env ]]; then
+        tunnel_public_host=$(awk -F'=' '/^TUNNEL_PUBLIC_HOST=/{
+            v=$2; gsub(/^[ "\047]+|[ "\047]+$/, "", v); print v; exit
+        }' /etc/loxprox/config.env)
+    fi
+
+    local enable_gui gui_port gui_password
+    enable_gui=$(_loxprox_conf_value ENABLE_GUI)
+    if [[ -z "$enable_gui" ]]; then
+        if [[ -f "$GUI_UNIT" ]]; then enable_gui="true"; else enable_gui="false"; fi
+    fi
+    gui_port=$(_loxprox_conf_value GUI_PORT)
+    if [[ -z "$gui_port" && -f /etc/loxprox/config.env ]]; then
+        gui_port=$(awk -F'=' '/^GUI_PORT=/{
+            v=$2; gsub(/^[ "\047]+|[ "\047]+$/, "", v); print v; exit
+        }' /etc/loxprox/config.env)
+    fi
+    : "${gui_port:=1081}"
+    gui_password=$(_loxprox_conf_value GUI_PASSWORD)
+
+    # Alerting values live in config.env once deploy.sh has run at least once.
+    local alert_email
+    alert_email=$(_loxprox_conf_value ALERT_EMAIL)
+    if [[ -z "$alert_email" && -f /etc/loxprox/config.env ]]; then
+        alert_email=$(awk -F'=' '/^ALERT_EMAIL=/{
+            v=$2; gsub(/^[ "\047]+|[ "\047]+$/, "", v); print v; exit
+        }' /etc/loxprox/config.env)
+    fi
+
+    if [[ "$enable_tls" == "true" && -z "$tls_domain" ]]; then
+        warn "This host serves HTTPS but TLS_DOMAIN could not be recovered."
+        warn "  Fill TLS_DOMAIN in $LOXPROX_DEPLOY_CONF BEFORE the next deploy —"
+        warn "  otherwise the TLS step fails (the site keeps its current TLS config)."
+    fi
+    if [[ "$enable_tunnel" == "true" && -z "$tunnel_token" ]]; then
+        warn "This host runs the frp tunnel but TUNNEL_TOKEN could not be recovered."
+        warn "  Copy the token from the relay's /etc/loxprox-relay/relay.conf into"
+        warn "  $LOXPROX_DEPLOY_CONF before the next deploy."
     fi
 
     local missing=()
@@ -390,8 +586,34 @@ _loxprox_extract_config_from_live_state() {
         echo ")"
         echo
         echo "DISCORD_WEBHOOK_URL=\"$webhook\""
-        echo "ALERT_EMAIL=\"\""
+        echo "ALERT_EMAIL=\"$alert_email\""
         echo "AUTOREBOOT_TIME=\"03:00\""
+        echo
+        echo "# TLS — carried over from this host's live state (or from the deploy.conf"
+        echo "# that was already here). Never omitted: a missing ENABLE_TLS key would"
+        echo "# make the next deploy revert HTTPS and serve cleartext on :1080."
+        echo "ENABLE_TLS=\"$enable_tls\""
+        echo "TLS_DOMAIN=\"$tls_domain\""
+        echo "TLS_EMAIL=\"$tls_email\""
+        echo "TLS_ACME_SERVER=\"$tls_acme_server\""
+        echo "TLS_ACME_FALLBACK_SERVER=\"$tls_acme_fallback\""
+        echo "TLS_ACME_EXTRA=\"$tls_acme_extra\""
+        echo
+        echo "# Tunnel — same rule: omitting these keys would stop a live frp tunnel"
+        echo "# on the next deploy. TUNNEL_TOKEN is read back from /etc/frp/frpc.toml."
+        echo "ENABLE_TUNNEL=\"$enable_tunnel\""
+        echo "TUNNEL_SERVER_ADDR=\"$tunnel_addr\""
+        echo "TUNNEL_SERVER_PORT=\"$tunnel_port\""
+        echo "TUNNEL_PROTOCOL=\"$tunnel_proto\""
+        echo "TUNNEL_TOKEN=\"$tunnel_token\""
+        echo "TUNNEL_PROXY_NAME=\"$tunnel_proxy_name\""
+        echo "TUNNEL_REMOTE_PORT=\"$tunnel_remote_port\""
+        echo "TUNNEL_PUBLIC_HOST=\"$tunnel_public_host\""
+        echo
+        echo "# LoxProx Panel (LAN-only GUI)."
+        echo "ENABLE_GUI=\"$enable_gui\""
+        echo "GUI_PORT=\"$gui_port\""
+        echo "GUI_PASSWORD=\"$gui_password\""
     } > "$out"
     return 0
 }
@@ -424,7 +646,9 @@ _loxprox_bootstrap_config_interactive() {
 
     info "Extracted candidate deploy.conf — review below:"
     echo
-    sed 's/^/    /' "$candidate"
+    # The candidate now carries TUNNEL_TOKEN / GUI_PASSWORD / the webhook (v2.3,
+    # H1). They are written to the file, never echoed to the terminal.
+    sed -E 's/^/    /; s/^( *)(TUNNEL_TOKEN|GUI_PASSWORD|DISCORD_WEBHOOK_URL)="(.+)"$/\1\2="<carried over — redacted>"/' "$candidate"
     echo
 
     local confirm="y"
@@ -550,6 +774,51 @@ preflight() {
     validate_ip "$LOXONE_IP" || exit 1
     validate_ip "$GATEWAY_IP" || exit 1
     validate_network "$LAN_SUBNET" || exit 1
+
+    # M5: every ENABLE_* toggle is normalized once, here, so the ~10 later
+    # comparisons stay plain string tests. Before this, ENABLE_APPSEC was the
+    # only one compared case-sensitively — "True" or "yes" silently disabled
+    # the WAF while the summary still printed the operator's own spelling.
+    local _flag _norm
+    for _flag in ENABLE_APPSEC ENABLE_TLS ENABLE_TUNNEL ENABLE_GUI; do
+        _norm=$(_loxprox_normalize_bool "${!_flag}")
+        if [[ -z "$_norm" ]]; then
+            error "Invalid $_flag value: '${!_flag}' (expected true/false)."
+            exit 1
+        fi
+        printf -v "$_flag" '%s' "$_norm"
+    done
+
+    # H11: an unrecognised APPSEC_MODE used to fall through to enforce-shaped
+    # behaviour with no message at all. Both spellings are wired for real now
+    # (monitor → local log-only AppSec config), so a typo must fail loudly.
+    case "${APPSEC_MODE,,}" in
+        monitor) APPSEC_MODE="monitor" ;;
+        enforce) APPSEC_MODE="enforce" ;;
+        *)
+            error "Invalid APPSEC_MODE value: '$APPSEC_MODE' (expected monitor/enforce)."
+            exit 1
+            ;;
+    esac
+
+    # H6: a GATEWAY_IP that is not actually configured on this host makes the
+    # network watchdog believe the address was lost and reboot the VM on every
+    # cycle — the reboot loop the sweep-4 audit traced to format-only
+    # validation. Check the value against the interfaces before deploying.
+    if command -v ip &>/dev/null; then
+        local _host_addrs
+        _host_addrs=$(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+        if ! grep -qx -- "$GATEWAY_IP" <<<"$_host_addrs"; then
+            error "GATEWAY_IP=$GATEWAY_IP is not assigned to any interface on this host."
+            error "Addresses actually configured: $(tr '\n' ' ' <<<"$_host_addrs")"
+            error "The network watchdog would read this as a lost address and reboot the VM"
+            error "every cycle. Fix GATEWAY_IP in $LOXPROX_DEPLOY_CONF, or assign the address:"
+            error "    sudo bash ${SCRIPT_DIR:-.}/set-static-ip.sh"
+            exit 1
+        fi
+    else
+        warn "'ip' not available — cannot verify GATEWAY_IP against this host's interfaces."
+    fi
 
     if [[ ${#SSH_ALLOWED_SUBNETS[@]} -eq 0 ]]; then
         error "SSH_ALLOWED_SUBNETS is empty — refusing to deploy (would expose SSH)."
@@ -897,6 +1166,81 @@ install_nginx() {
 # Nginx — configure
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# v2.3 — nginx site template version (H2). configure_nginx stamps this number
+# into the generated site and regenerates the file whenever the stamp is
+# missing or lower. BUMP IT in the same commit as any change to the template
+# below — otherwise upgraded installs silently keep the old file, which is
+# exactly the bug this versioning replaces.
+_LOXPROX_SITE_TEMPLATE_VERSION=3
+_LOXPROX_SITE_VERSION_MARKER="# LOXPROX-SITE-TEMPLATE-VERSION:"
+_LOXPROX_SITE_PARAMS_MARKER="# LOXPROX-SITE-PARAMS:"
+
+_loxprox_site_marker_value() {
+    # Echoes the text following a "# MARKER:" line in the live site, or nothing
+    # when the file is absent or unstamped (pre-v2.3 / hand-written).
+    local marker="$1"
+    [[ -f "$NGINX_SITE" ]] || return 0
+    awk -v marker="$marker" '
+        index($0, marker) == 1 {
+            v = substr($0, length(marker) + 1)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+            print v
+            exit
+        }' "$NGINX_SITE"
+}
+
+_loxprox_site_template_version() {
+    # Empty unless the stamp exists and is a plain number.
+    local stamp
+    stamp=$(_loxprox_site_marker_value "$_LOXPROX_SITE_VERSION_MARKER")
+    [[ "$stamp" =~ ^[0-9]+$ ]] || stamp=""
+    printf '%s' "$stamp"
+}
+
+_loxprox_site_params_fingerprint() {
+    # Short digest of every deploy.conf value the site template renders. It is
+    # stamped into the generated file so the next run notices a changed rate
+    # limit, timeout or backend IP and regenerates the site — those edits used
+    # to be accepted in deploy.conf and then silently ignored (H2).
+    local digest=""
+    digest=$(printf '%s\n' \
+        "$LOXONE_IP" "$LOXONE_PORT" \
+        "$RATE_LIMIT_REQ_PER_SEC" "$RATE_LIMIT_BURST" "$RATE_LIMIT_CONN_PER_IP" \
+        "$PROXY_CONNECT_TIMEOUT" "$PROXY_SEND_TIMEOUT" "$PROXY_READ_TIMEOUT" \
+        "$CLIENT_BODY_TIMEOUT" "$CLIENT_HEADER_TIMEOUT" \
+        "$ENABLE_APPSEC" "$NGINX_APPSEC_INCLUDE" \
+        | sha256sum 2>/dev/null | cut -c1-16) || digest=""
+    printf '%s' "$digest"
+}
+
+_loxprox_write_appsec_passthrough_include() {
+    # H3: the site calls `auth_request /crowdsec-appsec`. With an empty (or
+    # missing) include there is no matching location and nginx answers 500 to
+    # EVERY request — the whole gateway is down while the deploy prints its
+    # success banner. This stub answers the subrequest with 204 so traffic
+    # keeps flowing while the WAF inspects nothing. Deliberately fail-OPEN,
+    # unlike the live integration (which fail-closes on an AppSec outage by
+    # design): a bootstrap that never completed is an install-time defect, and
+    # a household locked out of its own heating is the worse failure mode. The
+    # degradation is recorded and printed at the end of the run.
+    local reason="$1"
+    mkdir -p "$(dirname "$NGINX_APPSEC_INCLUDE")"
+    cat > "$NGINX_APPSEC_INCLUDE" <<EOF
+# CrowdSec AppSec WAF — PASS-THROUGH STUB (no inspection!)
+# Generated by deploy.sh on $(date -Iseconds)
+# DO NOT EDIT MANUALLY — re-run deploy.sh to regenerate
+#
+# Reason: ${reason}
+#
+# Re-run 'sudo bash deploy.sh' once CrowdSec is healthy to restore the WAF.
+location = /crowdsec-appsec {
+    internal;
+    return 204;
+}
+EOF
+    chmod 640 "$NGINX_APPSEC_INCLUDE"
+}
+
 configure_nginx() {
     banner "Configuring Nginx"
     rm -f /etc/nginx/sites-enabled/default
@@ -920,14 +1264,56 @@ configure_nginx() {
     rm -f "$NGINX_APPSEC_AUDIT_CONF"
 
     # ── Site config ──────────────────────────────────────────────────────────
-    # Write the site file ONLY if it does not already exist. Operator
-    # hand-edits (WebSocket locations, custom proxy_set_header lines, etc.)
-    # are preserved across every future `deploy.sh` run. Set
-    # LOXPROX_FORCE_REGEN_NGINX=1 to override and regenerate from template.
-    if [[ -f "$NGINX_SITE" ]] && [[ "${LOXPROX_FORCE_REGEN_NGINX:-0}" != "1" ]]; then
-        info "Site config $NGINX_SITE exists — preserving operator edits."
-        info "  Force regeneration with: LOXPROX_FORCE_REGEN_NGINX=1 sudo bash deploy.sh"
+    # v2.3 (H2): the site file used to be write-once, so upgraded installs never
+    # received template fixes — the v1.5.1 credential-scrubbing log format kept
+    # writing Loxone auth material into the access log, /ws/, the CSP and the
+    # AppSec detection log never appeared, and every rate-limit / backend-IP
+    # edit in deploy.conf was a silent no-op. The file now carries a template
+    # version stamp plus a fingerprint of the deploy.conf values it renders, and
+    # is regenerated whenever the stamp is missing (pre-v2.3 or hand-written),
+    # older than the template below, or the fingerprint no longer matches.
+    #
+    # Regeneration always backs the current file up first, re-applies the TLS
+    # marker block when the site was in TLS mode, and reverts to the backup if
+    # `nginx -t` rejects the result — same contract as the TLS site mutation.
+    # LOXPROX_KEEP_NGINX_SITE=1 freezes a hand-maintained site (and says what
+    # that costs); LOXPROX_FORCE_REGEN_NGINX=1 regenerates unconditionally.
+    local site_regen=0 site_was_tls=0 site_version="" site_params=""
+    site_params=$(_loxprox_site_params_fingerprint)
+    if [[ ! -f "$NGINX_SITE" ]]; then
+        site_regen=1
+    elif [[ "${LOXPROX_FORCE_REGEN_NGINX:-0}" == "1" ]]; then
+        info "LOXPROX_FORCE_REGEN_NGINX=1 — regenerating $NGINX_SITE from the template."
+        site_regen=1
+    elif [[ "${LOXPROX_KEEP_NGINX_SITE:-0}" == "1" ]]; then
+        warn "LOXPROX_KEEP_NGINX_SITE=1 — $NGINX_SITE is left exactly as it is."
+        warn "  Template fixes and deploy.conf changes (rate limits, backend IP,"
+        warn "  AppSec wiring) do NOT reach this file while the flag is set."
     else
+        site_version=$(_loxprox_site_template_version)
+        if [[ -z "$site_version" ]]; then
+            warn "$NGINX_SITE predates template versioning (or was hand-written)."
+            warn "  Regenerating it so this install gets the current template."
+            warn "  Any hand-edits are preserved in the backup below — re-apply them there."
+            site_regen=1
+        elif (( site_version < _LOXPROX_SITE_TEMPLATE_VERSION )); then
+            info "Site template v$site_version → v$_LOXPROX_SITE_TEMPLATE_VERSION — regenerating $NGINX_SITE."
+            site_regen=1
+        elif (( site_version > _LOXPROX_SITE_TEMPLATE_VERSION )); then
+            warn "$NGINX_SITE carries template v$site_version, newer than this deploy.sh (v$_LOXPROX_SITE_TEMPLATE_VERSION)."
+            warn "  Leaving it alone — a downgrade would drop whatever that version added."
+        elif [[ "$(_loxprox_site_marker_value "$_LOXPROX_SITE_PARAMS_MARKER")" != "$site_params" ]]; then
+            info "deploy.conf values differ from the ones $NGINX_SITE was rendered with — regenerating."
+            site_regen=1
+        else
+            info "Site template v$site_version is current and matches deploy.conf — $NGINX_SITE left untouched."
+        fi
+    fi
+
+    if (( site_regen )); then
+        # The TLS mutation lives in the same file. Re-apply it after the rewrite
+        # so a regeneration never drops a live HTTPS listener back to cleartext.
+        if _loxprox_site_in_tls_mode; then site_was_tls=1; fi
         backup_file "$NGINX_SITE"
 
         local appsec_include="" appsec_auth="" appsec_http_extras="" appsec_access_log=""
@@ -961,6 +1347,13 @@ log_format appsec_evt '\''$time_iso8601 $remote_addr "$request" '\''
         cat > "$NGINX_SITE" <<EOF
 # Loxone Miniserver Gen 1 — Security Gateway
 # Generated by deploy.sh on $(date -Iseconds)
+${_LOXPROX_SITE_VERSION_MARKER} ${_LOXPROX_SITE_TEMPLATE_VERSION}
+${_LOXPROX_SITE_PARAMS_MARKER} ${site_params}
+# Owned by deploy.sh. Hand-edits are REPLACED when the template version above
+# is older than the one deploy.sh ships, or when a deploy.conf value that this
+# file renders changes (the previous file is backed up first).
+# Persistent customization: keep the edits in your own copy and set
+# LOXPROX_KEEP_NGINX_SITE=1, or upstream them into deploy.sh.
 
 limit_req_zone  \$binary_remote_addr zone=loxone_req:10m  rate=${RATE_LIMIT_REQ_PER_SEC}r/s;
 limit_conn_zone \$binary_remote_addr zone=loxone_conn:10m;
@@ -1080,13 +1473,36 @@ ${appsec_auth}
 EOF
     fi
 
-    # Create placeholder AppSec include so nginx -t passes before CrowdSec is ready
-    if [[ "$ENABLE_APPSEC" == "true" ]]; then
-        touch "$NGINX_APPSEC_INCLUDE"
+    # Placeholder AppSec include so nginx -t passes before CrowdSec is ready.
+    # It must define the auth_request target, not be empty: an empty include
+    # plus `auth_request /crowdsec-appsec` makes nginx answer 500 to EVERY
+    # request (H3). configure_appsec_nginx replaces it with the real WAF
+    # subrequest once the bouncer key exists.
+    if [[ "$ENABLE_APPSEC" == "true" && ! -s "$NGINX_APPSEC_INCLUDE" ]]; then
+        _loxprox_write_appsec_passthrough_include "not configured yet — CrowdSec bouncer has not registered"
+    fi
+
+    if (( site_regen )) && (( site_was_tls )); then
+        info "Site was serving HTTPS — re-applying the TLS block to the regenerated site."
+        _loxprox_site_enable_tls || warn "Could not re-apply the TLS block; setup_tls will retry later in this run."
     fi
 
     ln -sf "$NGINX_SITE" "$NGINX_ENABLED"
-    nginx -t 2>&1 | tee -a "$LOG_FILE"
+    if ! nginx -t 2>&1 | tee -a "$LOG_FILE"; then
+        if (( site_regen )) && [[ -f "$BACKUP_DIR/files$NGINX_SITE" ]]; then
+            error "nginx -t rejects the regenerated site — restoring the previous $NGINX_SITE."
+            cp -a "$BACKUP_DIR/files$NGINX_SITE" "$NGINX_SITE"
+            if nginx -t >> "$LOG_FILE" 2>&1; then
+                systemctl reload nginx 2>/dev/null || true
+                error "Previous site restored and reloaded. Deploy aborted — see $LOG_FILE."
+            else
+                error "The previous site does not pass nginx -t either. Inspect: nginx -t"
+            fi
+        else
+            error "nginx -t failed for $NGINX_SITE. Inspect the output above and $LOG_FILE."
+        fi
+        return 1
+    fi
     systemctl reload nginx 2>/dev/null || systemctl restart nginx
     systemctl enable nginx
     ok "Nginx running on :1080."
@@ -1117,10 +1533,10 @@ configure_appsec_nginx() {
     done
 
     if [[ -z "$bouncer_key" ]]; then
-        warn "Could not read bouncer API key from $bouncer_local"
-        warn "AppSec integration will not work until the key is available."
-        warn "Re-run deploy.sh after CrowdSec bouncer has registered."
-        return 0
+        error "No bouncer API key in $bouncer_local after ${retries} attempts (~60s)."
+        error "The AppSec WAF cannot be wired up without it."
+        _loxprox_appsec_degrade "bouncer API key never appeared in $bouncer_local"
+        return 1
     fi
 
     info "Configuring AppSec nginx integration with bouncer key..."
@@ -1147,9 +1563,36 @@ EOF
 
     chmod 640 "$NGINX_APPSEC_INCLUDE"
 
-    nginx -t 2>&1 | tee -a "$LOG_FILE"
-    systemctl reload nginx
-    ok "AppSec nginx integration active — requests inspected by CrowdSec WAF."
+    if ! nginx -t 2>&1 | tee -a "$LOG_FILE"; then
+        error "nginx -t rejects the AppSec include — the WAF wiring is broken."
+        _loxprox_appsec_degrade "nginx -t rejected the generated $NGINX_APPSEC_INCLUDE"
+        return 1
+    fi
+    # M19: an unguarded reload aborted the whole deploy under set -e.
+    if ! systemctl reload nginx; then
+        error "nginx reload failed after writing the AppSec include."
+        return 1
+    fi
+    ok "AppSec nginx integration active — requests inspected by CrowdSec WAF (mode: $APPSEC_MODE)."
+}
+
+# H3: turn a failed AppSec bootstrap into a working, WAF-less gateway instead
+# of a global 500. Writes the pass-through stub, validates, reloads, and says
+# very clearly what is now unprotected. The caller returns non-zero so the
+# step is recorded and printed in the degraded summary at the end of the run.
+_loxprox_appsec_degrade() {
+    local reason="$1"
+    warn "AppSec bootstrap FAILED — degrading to an AppSec-disabled nginx config."
+    _loxprox_write_appsec_passthrough_include "$reason"
+    if nginx -t >> "$LOG_FILE" 2>&1 && systemctl reload nginx 2>>"$LOG_FILE"; then
+        warn "nginx now serves traffic WITHOUT WAF inspection (fail-open stub)."
+    else
+        error "nginx -t/reload failed even with the pass-through stub — nginx may be"
+        error "answering 500 for every request. Inspect now: nginx -t"
+    fi
+    warn "  Reason: $reason"
+    warn "  CrowdSec IP-level detection and the firewall bouncer are unaffected."
+    warn "  Restore the WAF with: sudo bash deploy.sh   (once CrowdSec is healthy)"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1221,7 +1664,10 @@ _loxprox_install_acme_sh() {
     apt-get install -y socat curl >/dev/null
 
     local tmp tarball extract_dir
-    tmp=$(mktemp -d -t loxprox-acmesh.XXXXXX) || return 1
+    # H8: /var/tmp, not /tmp — setup_tmp_mount mounts /tmp noexec, and the
+    # install step below EXECUTES ./acme.sh straight out of this directory.
+    # On a re-deploy of a hardened host the /tmp variant fails with EACCES.
+    tmp=$(mktemp -d /var/tmp/loxprox-acmesh.XXXXXX) || return 1
     # shellcheck disable=SC2064
     trap "rm -rf '$tmp'; trap - RETURN" RETURN
 
@@ -1368,12 +1814,15 @@ _loxprox_acme_install_cert() {
     # --install-cert writes (or re-writes) the cert files at deterministic
     # paths AND records the reload command. acme.sh's cron auto-renewer uses
     # the same paths + reloadcmd on every successful renewal.
+    # M19: explicit failure propagation — the caller must not carry on and
+    # mutate the site into TLS mode when no cert files were written.
     "$ACME_HOME/acme.sh" --install-cert \
         -d "$TLS_DOMAIN" \
         --fullchain-file "$LOXPROX_TLS_DIR/fullchain.pem" \
         --key-file       "$LOXPROX_TLS_DIR/privkey.pem" \
         --reloadcmd      "systemctl reload nginx" \
-        >> "$LOG_FILE" 2>&1
+        >> "$LOG_FILE" 2>&1 \
+        || { error "acme.sh --install-cert failed for $TLS_DOMAIN. See $LOG_FILE."; return 1; }
     chmod 0640 "$LOXPROX_TLS_DIR/fullchain.pem" "$LOXPROX_TLS_DIR/privkey.pem"
     chown root:root "$LOXPROX_TLS_DIR/fullchain.pem" "$LOXPROX_TLS_DIR/privkey.pem"
 }
@@ -1553,18 +2002,20 @@ setup_tls() {
                 rm -f "$NGINX_ACME_CONF"
                 return 1
             fi
-            systemctl reload nginx
+            # M19: every systemctl call in this module is guarded — an
+            # unguarded one aborted the whole deploy under set -e.
+            systemctl reload nginx || { error "nginx reload failed before ACME issuance."; return 1; }
             _loxprox_acme_issue || return 1
-            _loxprox_acme_install_cert
+            _loxprox_acme_install_cert || { error "acme.sh --install-cert failed; cert files not in place."; return 1; }
             _loxprox_ensure_acme_cron
             _loxprox_site_enable_tls || return 1
             if ! nginx -t >> "$LOG_FILE" 2>&1; then
                 error "nginx -t failed after TLS site mutation; reverting."
                 _loxprox_site_disable_tls
-                nginx -t && systemctl reload nginx
+                nginx -t >> "$LOG_FILE" 2>&1 && systemctl reload nginx
                 return 1
             fi
-            systemctl reload nginx
+            systemctl reload nginx || { error "nginx reload failed after the TLS site mutation."; return 1; }
             ok "HTTPS active on :1080 for $TLS_DOMAIN. Renewal cron handled by acme.sh."
             ok "  Test from outside the LAN: curl -vI https://$TLS_DOMAIN:1080/"
             ;;
@@ -1579,7 +2030,7 @@ setup_tls() {
                     "$ACME_HOME/acme.sh" --remove -d "$TLS_DOMAIN" >> "$LOG_FILE" 2>&1 || true
                 fi
                 if nginx -t >> "$LOG_FILE" 2>&1; then
-                    systemctl reload nginx
+                    systemctl reload nginx || { error "nginx reload failed after TLS disable."; return 1; }
                     ok "TLS disabled. Cert files kept at $LOXPROX_TLS_DIR (use --remove-tls to nuke)."
                 else
                     error "nginx -t failed after disable — inspect $NGINX_SITE manually."
@@ -1941,10 +2392,15 @@ setup_tunnel() {
                 rm -f "$NGINX_TUNNEL_CONF"
                 return 1
             fi
-            systemctl reload nginx
+            # M19: guarded so a unit failure degrades this step instead of
+            # aborting the run before SSH hardening and monitoring.
+            systemctl reload nginx || { error "nginx reload failed after writing $NGINX_TUNNEL_CONF."; return 1; }
             systemctl daemon-reload
-            systemctl enable frpc
-            systemctl restart frpc
+            systemctl enable frpc || warn "systemctl enable frpc failed — the tunnel will not come back after a reboot."
+            if ! systemctl restart frpc; then
+                error "frpc failed to start. Diagnose with: journalctl -u frpc -n 50"
+                return 1
+            fi
             _loxprox_install_tunnel_watchdog
             ok "Tunnel active → ${TUNNEL_SERVER_ADDR}:${TUNNEL_SERVER_PORT} (${TUNNEL_PROTOCOL})."
             if [[ -n "$TUNNEL_PUBLIC_HOST" ]]; then
@@ -1963,7 +2419,7 @@ setup_tunnel() {
                 systemctl disable --now frpc 2>/dev/null || true
                 rm -f "$NGINX_TUNNEL_CONF"
                 if nginx -t >> "$LOG_FILE" 2>&1; then
-                    systemctl reload nginx
+                    systemctl reload nginx || { error "nginx reload failed after tunnel disable."; return 1; }
                 else
                     error "nginx -t failed after tunnel disable — inspect the nginx config manually."
                     return 1
@@ -2196,6 +2652,61 @@ install_crowdsec() {
 # CrowdSec — configure
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# H11 (v2.3): APPSEC_MODE used to be documented as the false-positive escape
+# hatch while nothing in the script emitted a mode at all — "monitor" blocked
+# exactly like "enforce". CrowdSec has no mode key on the AppSec acquisition;
+# the log-only switch is `default_remediation: allow` inside the AppSec CONFIG
+# (https://docs.crowdsec.net/docs/appsec/configuration/). So:
+#
+#   enforce  → the hub config crowdsecurity/virtual-patching, whose
+#              default_remediation is `ban` — matched requests get a 403.
+#   monitor  → a local config carrying the SAME rule set (crowdsecurity/
+#              base-config + crowdsecurity/vpatch-*, verbatim from the hub
+#              item) with default_remediation/default_pass_action: allow.
+#              Rules still evaluate and still raise CrowdSec alerts; the
+#              component answers the nginx auth_request with "allow", so
+#              nothing is blocked.
+#
+# The local config is referenced by PATH, not by hub name — no hub-item
+# resolution is involved, and toggling back to enforce deletes the file.
+_loxprox_write_appsec_acquis() {
+    local appsec_ref="appsec_config: crowdsecurity/virtual-patching"
+    if [[ "$APPSEC_MODE" == "monitor" ]]; then
+        mkdir -p "$CROWDSEC_APPSEC_CONFIG_DIR"
+        cat > "$CROWDSEC_APPSEC_MONITOR_CONF" <<EOF
+# LoxProx — AppSec log-only configuration (APPSEC_MODE=monitor)
+# Generated by deploy.sh on $(date -Iseconds)
+# DO NOT EDIT MANUALLY — set APPSEC_MODE in $LOXPROX_DEPLOY_CONF and re-run.
+#
+# Identical rule set to the hub's crowdsecurity/virtual-patching; the only
+# difference is the remediation. Detections show up in 'cscli alerts list',
+# never as a 403 for the family.
+name: ${CROWDSEC_APPSEC_MONITOR_NAME}
+default_remediation: allow
+default_pass_action: allow
+inband_rules:
+  - crowdsecurity/base-config
+  - crowdsecurity/vpatch-*
+EOF
+        chmod 0644 "$CROWDSEC_APPSEC_MONITOR_CONF"
+        appsec_ref="appsec_config_path: $CROWDSEC_APPSEC_MONITOR_CONF"
+    else
+        rm -f "$CROWDSEC_APPSEC_MONITOR_CONF"
+    fi
+
+    backup_file "$CROWDSEC_APPSEC_ACQUIS"
+    cat > "$CROWDSEC_APPSEC_ACQUIS" <<EOF
+# CrowdSec AppSec WAF
+# Generated by deploy.sh on $(date -Iseconds) — APPSEC_MODE=${APPSEC_MODE}
+source: appsec
+listen_addr: 127.0.0.1:7422
+${appsec_ref}
+name: appsec-loxone
+labels:
+  type: appsec
+EOF
+}
+
 configure_crowdsec() {
     banner "Configuring CrowdSec"
 
@@ -2224,16 +2735,7 @@ EOF
 
     # AppSec acquisition
     if [[ "$ENABLE_APPSEC" == "true" ]]; then
-        backup_file "$CROWDSEC_APPSEC_ACQUIS"
-        cat > "$CROWDSEC_APPSEC_ACQUIS" <<EOF
-# CrowdSec AppSec WAF
-source: appsec
-listen_addr: 127.0.0.1:7422
-appsec_config: crowdsecurity/virtual-patching
-name: appsec-loxone
-labels:
-  type: appsec
-EOF
+        _loxprox_write_appsec_acquis
     fi
 
     info "Updating CrowdSec hub catalog..."
@@ -2312,13 +2814,38 @@ EOF
         done
     } > "$wl"
 
-    systemctl restart crowdsec
-    systemctl enable crowdsec
+    # M19: an unguarded `systemctl restart crowdsec` aborted the deploy before
+    # SSH hardening, monitoring and config.env were written. It is also the one
+    # place where a bad AppSec config surfaces: if CrowdSec refuses to start in
+    # monitor mode, fall back to the hub's enforcing config rather than leaving
+    # the host with no CrowdSec at all — and say so.
+    if ! systemctl restart crowdsec; then
+        if [[ "$ENABLE_APPSEC" == "true" && "$APPSEC_MODE" == "monitor" ]]; then
+            warn "CrowdSec did not start with the monitor-mode AppSec config."
+            warn "  Falling back to enforce (blocking) so the WAF stays up."
+            APPSEC_MODE="enforce"
+            _loxprox_write_appsec_acquis
+            if ! systemctl restart crowdsec; then
+                error "CrowdSec still does not start. Diagnose: journalctl -u crowdsec -n 50"
+                return 1
+            fi
+            warn "AppSec is ENFORCING — APPSEC_MODE=monitor could not be delivered here."
+            warn "  Check 'journalctl -u crowdsec' for the AppSec config error."
+        else
+            error "CrowdSec failed to start. Diagnose: journalctl -u crowdsec -n 50"
+            return 1
+        fi
+    fi
+    systemctl enable crowdsec || warn "systemctl enable crowdsec failed — it will not start at boot."
     systemctl daemon-reload
-    systemctl enable crowdsec-firewall-bouncer
-    systemctl restart crowdsec-firewall-bouncer
+    systemctl enable crowdsec-firewall-bouncer || warn "systemctl enable crowdsec-firewall-bouncer failed — no bans after a reboot."
+    if ! systemctl restart crowdsec-firewall-bouncer; then
+        error "crowdsec-firewall-bouncer failed to start — decisions are NOT enforced in nftables."
+        error "Diagnose: journalctl -u crowdsec-firewall-bouncer -n 50"
+        return 1
+    fi
 
-    ok "CrowdSec configured and running."
+    ok "CrowdSec configured and running (AppSec mode: $APPSEC_MODE)."
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3013,20 +3540,83 @@ health_check() {
     if [[ "$ENABLE_APPSEC" == "true" ]]; then
         info "AppSec listener:"
         ss -tlnp | grep ':7422 ' && ok "AppSec listening on 127.0.0.1:7422 (mode: ${APPSEC_MODE})" || warn "AppSec not listening on :7422 yet (CrowdSec may still be starting)"
+        if [[ -s "$NGINX_APPSEC_INCLUDE" ]] && grep -q 'PASS-THROUGH STUB' "$NGINX_APPSEC_INCLUDE"; then
+            error "AppSec include is the PASS-THROUGH STUB — no request is inspected by the WAF."
+            error "  Re-run 'sudo bash deploy.sh' once CrowdSec is healthy."
+            failures=$((failures + 1))
+        fi
         if [[ "$APPSEC_MODE" == "monitor" ]]; then
-            info "AppSec in MONITOR mode — requests pass through, detections logged to /var/log/nginx/appsec-detections.log"
+            info "AppSec in MONITOR mode — matched requests are alerted on, never blocked."
             info "Check: cscli alerts list | grep appsec"
-            info "To enforce: set APPSEC_MODE=enforce in deploy.sh and re-run"
+            info "  (/var/log/nginx/appsec-detections.log stays empty in monitor mode —"
+            info "   nginx logs there on a BLOCK verdict, which monitor mode never returns.)"
+            info "To enforce: set APPSEC_MODE=enforce in $LOXPROX_DEPLOY_CONF and re-run"
         fi
     fi
 
+    # H3: the checks above are all "is the unit up" — a gateway answering 500 to
+    # every request (empty AppSec include + auth_request) passes every one of
+    # them. Ask the listener for a real response instead.
+    _loxprox_probe_listener || failures=$((failures + 1))
+
     echo ""
+    if (( ${#_LOXPROX_DEGRADED_STEPS[@]} > 0 )); then
+        # H12: never print ALL CHECKS PASSED next to a step that failed. Exit 3
+        # is the degraded-deploy code, distinct from 1 (failed health checks),
+        # so automation can tell "broken" from "deployed, minus a feature".
+        echo -e "${RED}══════════════  DEPLOYED WITH ${#_LOXPROX_DEGRADED_STEPS[@]} DEGRADED STEP(S)  ══════════════${NC}"
+        local step
+        for step in "${_LOXPROX_DEGRADED_STEPS[@]}"; do
+            error "  • $step"
+        done
+        error "Those features are NOT active; everything else was deployed."
+        (( failures > 0 )) && error "$failures health check(s) also failed."
+        error "Fix the causes above, then re-run: sudo bash deploy.sh"
+        exit 3
+    fi
     if [[ $failures -eq 0 ]]; then
         echo -e "${GREEN}════════════════════════════  ALL CHECKS PASSED  ════════════════════════════${NC}"
     else
         echo -e "${RED}════════════════════════  $failures CHECK(S) FAILED  ════════════════════════${NC}"
         exit 1
     fi
+}
+
+# H3: one real HTTP request against the gateway's own listener. Returns 1 when
+# the gateway itself is broken (5xx from nginx), 0 otherwise — including for a
+# 502/504, which means the Miniserver backend is unreachable, not that this
+# deployment failed (preflight treats an unreachable Loxone the same way).
+_loxprox_probe_listener() {
+    if ! command -v curl &>/dev/null; then
+        warn "curl not installed — skipping the live listener probe."
+        return 0
+    fi
+    local scheme="http" code=""
+    [[ "${ENABLE_TLS,,}" == "true" ]] && scheme="https"
+    info "Probing the gateway listener: ${scheme}://127.0.0.1:1080/"
+    # -k: with TLS on, the cert is valid for TLS_DOMAIN, not for 127.0.0.1.
+    code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "${scheme}://127.0.0.1:1080/" 2>>"$LOG_FILE") || code="000"
+    case "$code" in
+        000)
+            error "No HTTP response from ${scheme}://127.0.0.1:1080/ — the gateway is NOT serving."
+            error "  Check: systemctl status nginx; nginx -t; ss -tlnp | grep 1080"
+            return 1
+            ;;
+        502|504)
+            warn "Gateway answered $code — nginx is up, the Loxone backend ($LOXONE_IP:$LOXONE_PORT) is not."
+            warn "  Not counted as a deployment failure; verify the Miniserver."
+            ;;
+        5*)
+            error "Gateway answered $code — nginx is serving errors for EVERY request."
+            error "  A 500 here is typically the AppSec auth_request with no matching"
+            error "  location (see the AppSec section above) or a broken site config."
+            return 1
+            ;;
+        *)
+            ok "Gateway listener answered HTTP $code."
+            ;;
+    esac
+    return 0
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3163,8 +3753,12 @@ Environment toggles:
   ALLOW_LXC=1                  Deploy inside an LXC container anyway (reduced
                                security posture — sysctls, auditd, AppArmor and
                                nftables silently degrade). VM is the supported target.
-  LOXPROX_FORCE_REGEN_NGINX=1  Regenerate the nginx site from the template, discarding
-                               operator hand-edits (normally preserved).
+  LOXPROX_FORCE_REGEN_NGINX=1  Regenerate the nginx site from the template even when
+                               its template-version stamp is already current.
+  LOXPROX_KEEP_NGINX_SITE=1    Never touch an existing nginx site. Template fixes and
+                               deploy.conf changes (rate limits, backend IP, AppSec
+                               wiring) then do NOT reach it — for hand-maintained
+                               sites only.
   LOXPROX_BOOTSTRAP_YES=1      Answer "yes" to the --bootstrap-config confirmation
                                (non-interactive use).
   LOXPROX_GPG_QUORUM=N         Independent keyservers that must agree on the CrowdSec
@@ -3173,6 +3767,13 @@ Environment toggles:
                                Behaviour when the quorum is not met: soft (default)
                                warns and falls back to TOFU, hard aborts the install.
                                A fingerprint CONFLICT always aborts, in both modes.
+
+Exit codes:
+  0   Deploy finished, all checks passed.
+  1   A health check failed (or a core step aborted the run).
+  2   Unknown command-line option.
+  3   Deployed, but one or more OPTIONAL steps failed — they are listed at the
+      end of the run. The gateway proxies; those features are not active.
 
 Log: ${LOG_FILE}
 EOF
@@ -3463,8 +4064,15 @@ main() {
     fi
 
     preflight
+    # H12: core steps (preflight, sysctls, firewall, nginx, CrowdSec install,
+    # runtime config) stay bare — their failure is fatal because the gateway
+    # cannot do its job without them. Everything optional goes through
+    # run_optional_step, which warns, records the step and keeps going, so a
+    # failing TLS issuance can never again skip SSH hardening, monitoring,
+    # watchdogs and config.env. Degraded steps are printed by health_check,
+    # which then exits 3.
     apply_sysctls
-    setup_tmp_mount
+    run_optional_step "/tmp hardening"          setup_tmp_mount
     setup_firewall
 
     # Install and run GeoIP blocklist updater
@@ -3478,22 +4086,22 @@ main() {
 
     install_nginx
     configure_nginx
-    setup_nginx_hardening
+    run_optional_step "nginx systemd hardening" setup_nginx_hardening
     install_crowdsec
-    configure_crowdsec
-    configure_appsec_nginx
-    setup_apparmor
-    setup_tls
-    setup_tunnel
-    setup_ssh_hardening
-    setup_unattended_upgrades
-    setup_auditd
-    setup_logrotate
-    setup_alerting
-    setup_security_monitoring
-    setup_network_watchdog
+    run_optional_step "CrowdSec configuration"  configure_crowdsec
+    run_optional_step "AppSec WAF integration"  configure_appsec_nginx
+    run_optional_step "AppArmor"                setup_apparmor
+    run_optional_step "TLS (acme.sh)"           setup_tls
+    run_optional_step "frp tunnel"              setup_tunnel
+    run_optional_step "SSH hardening"           setup_ssh_hardening
+    run_optional_step "unattended-upgrades"     setup_unattended_upgrades
+    run_optional_step "auditd"                  setup_auditd
+    run_optional_step "logrotate"               setup_logrotate
+    run_optional_step "alerting"                setup_alerting
+    run_optional_step "security monitoring"     setup_security_monitoring
+    run_optional_step "network watchdog"        setup_network_watchdog
     write_runtime_config
-    setup_gui
+    run_optional_step "LoxProx Panel"           setup_gui
     health_check
     summary
 

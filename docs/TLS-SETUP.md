@@ -134,6 +134,22 @@ sudo bash deploy.sh --renew-tls
 
 ---
 
+## Certificate expiry alerting
+
+`gateway-monitor.sh` (60s cycle) backstops the cron above: whenever the
+nginx site is actually in TLS mode, it reads the live certificate's expiry
+every cycle and sends a Discord alert — **WARNING** under 21 days,
+**CRITICAL** under 7 days or once expired — capped at one alert per day
+per level so a stuck renewal doesn't spam you. Nothing is emitted while
+`ENABLE_TLS=false`. This exists because `acme.sh`'s own renewal failures
+are silent in practice: its cron mails a root mailbox that doesn't exist
+on the gateway (no MTA installed). If you get one of these alerts, the
+automatic renewal above didn't happen — check, in order, the `WAN:80 →
+gateway:80` forward, that DNS still resolves to your WAN IP, and the cron
+entry above, then force it with `sudo bash deploy.sh --renew-tls`.
+
+---
+
 ## Toggling later
 
 ### Switch off (back to plain HTTP)

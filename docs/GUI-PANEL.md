@@ -68,6 +68,13 @@ background and shows the job log. `GATEWAY_IP`, `LAN_SUBNET`, and
 `SSH_ALLOWED_SUBNETS` are deliberately **not** editable here — a mistake in
 any of those three is an SSH lockout risk and stays an SSH-only change.
 
+The apply job surfaces `deploy.sh`'s own exit code as a job status:
+`0` → **ok**, `3` → **degraded** (the deploy went through but one or more
+*optional* steps — TLS, tunnel, CrowdSec — didn't; the gateway still
+proxies, those features just aren't active), anything else → **failed**.
+A degraded run shows as its own warning state instead of a failure — the
+job log lists exactly which step(s) need a second look.
+
 **Support actions** (Security tab). One button each for: unban an IP
 (`cscli decisions delete`), restart a service (nginx / CrowdSec / bouncer /
 frpc), force a TLS renewal (`deploy.sh --renew-tls`), and send a test alert

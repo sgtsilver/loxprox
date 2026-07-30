@@ -128,6 +128,20 @@ sudo bash deploy.sh --renew-tls
 
 `--renew-tls` ruft `acme.sh --renew … --force` auf und führt den Install-Schritt erneut aus (damit `systemctl reload nginx` greift). Jederzeit gefahrlos aufrufbar.
 
+### Ablauf-Alerts (neu)
+
+`gateway-monitor.sh` (60-Sek-Zyklus) sichert den Cron oben jetzt ab: Solange
+die nginx-Site tatsächlich im TLS-Modus läuft, liest es jeden Zyklus den
+Ablauf des Live-Zertifikats und schickt einen Discord-Alert — **WARNING**
+unter 21 Tagen, **CRITICAL** unter 7 Tagen oder nach Ablauf — gedeckelt auf
+einen Alert pro Tag und Level, damit es nicht spammt. acme.sh erneuert
+normalerweise bei ~30 Tagen und mailt Fehler an eine Root-Mailbox, die es
+auf dieser Box gar nicht gibt (kein MTA) — ein solcher Alert bedeutet also,
+dass das automatische Renewal oben lautlos ausgeblieben ist. Der Reihe nach
+prüfen: die `WAN:80 → gateway:80`-Weiterleitung, ob DNS noch auf deine
+WAN-IP zeigt, und den Cron oben — dann mit `sudo bash deploy.sh
+--renew-tls` erzwingen.
+
 ### TLS sauber abschalten
 
 Zwei Optionen, je nach Gründlichkeit:
