@@ -41,6 +41,16 @@ RELAY_ACME_FALLBACK_SERVER="zerossl"
 # never sees the attacker's source IP — see SECURITY.md).
 RELAY_ENABLE_CROWDSEC="true"
 
+# [STRONGLY RECOMMENDED] Sources CrowdSec must never ban (IPs and/or CIDRs).
+# The relay's firewall bouncer drops banned sources on EVERY port — including
+# the frp control port and SSH. Because the whole household shares one WAN IP,
+# a single false positive from one phone bans the tunnel and locks you out of
+# this VPS at the same time. Put your household WAN IP (curl -4 ifconfig.co on
+# any device at home) and your admin addresses here:
+#     RELAY_WHITELIST_IPS=("203.0.113.42" "198.51.100.7")
+# Note: entries broader than a /24 exempt every host in that range.
+RELAY_WHITELIST_IPS=()
+
 # Perimeter rate limits (per client IP).
 RELAY_RATE_LIMIT_REQ_PER_SEC="10"
 RELAY_RATE_LIMIT_BURST="100"
