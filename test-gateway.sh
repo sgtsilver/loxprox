@@ -112,13 +112,54 @@ test_network() {
 test_proxy() {
     test_header "Nginx Proxy"
 
-    # Test localhost proxy
+    # Read the runtime config to know whether TLS is supposed to be on —
+    # same idiom as test_tls()/test_gui()/test_tunnel() below.
+    local enable_tls="false"
+    if [[ -f /etc/loxprox/config.env ]]; then
+        enable_tls=$(awk -F'"' '/^ENABLE_TLS=/{print $2}' /etc/loxprox/config.env)
+    fi
+
+    # v2.3 (H2): the site is no longer write-once — deploy.sh stamps every
+    # generated site with its template version and regenerates on upgrade.
+    # A missing stamp means deploy.sh no longer owns this file (hand-written,
+    # pre-v2.3, or LOXPROX_KEEP_NGINX_SITE=1 froze it before it was stamped).
+    if [[ -f /etc/nginx/sites-available/loxone ]]; then
+        grep -q '# LOXPROX-SITE-TEMPLATE-VERSION:' /etc/nginx/sites-available/loxone \
+            && pass "nginx site carries the deploy.sh template version stamp" \
+            || fail "nginx site missing the template version stamp"
+    else
+        fail "nginx site file missing (/etc/nginx/sites-available/loxone)"
+    fi
+
+    # Test localhost proxy. In TLS mode the :1080 listener is `listen 1080
+    # ssl` (setup_tls in deploy.sh) — a plain-HTTP request never reaches the
+    # proxied response, it lands on the error_page 497 grace redirect
+    # instead, so the API check has to speak TLS to get a real answer.
     local status
-    status=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://127.0.0.1:1080/jdev/cfg/api 2>/dev/null)
+    if [[ "${enable_tls,,}" == "true" ]]; then
+        status=$(curl -sk -o /dev/null -w "%{http_code}" --connect-timeout 5 https://127.0.0.1:1080/jdev/cfg/api 2>/dev/null)
+    else
+        status=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://127.0.0.1:1080/jdev/cfg/api 2>/dev/null)
+    fi
     if [[ "$status" == "200" || "$status" == "401" ]]; then
         pass "Proxy responds to Loxone API (HTTP $status)"
     else
         fail "Proxy returned HTTP $status (expected 200 or 401)"
+    fi
+
+    if [[ "${enable_tls,,}" == "true" ]]; then
+        # Pin the v1.5.0 http->https grace redirect (deploy.sh
+        # _loxprox_site_enable_tls): plain HTTP to the TLS-mode :1080
+        # listener must come back as a clean 301, not the raw 400 that used
+        # to trip CrowdSec's http-probing scenario against Loxone apps still
+        # configured for http://gateway:1080.
+        local http_status
+        http_status=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://127.0.0.1:1080/jdev/cfg/api 2>/dev/null)
+        if [[ "$http_status" == "301" ]]; then
+            pass "Plain HTTP on :1080 redirects to HTTPS (301 grace redirect)"
+        else
+            fail "Plain HTTP on :1080 returned HTTP $http_status (expected 301 redirect)"
+        fi
     fi
 
     # Test security headers
@@ -232,6 +273,44 @@ test_appsec() {
         fi
     else
         fail "nginx AppSec include file missing"
+    fi
+
+    # v2.3 (H3): with ENABLE_APPSEC=true, an nginx AppSec include that is still
+    # the fail-open PASS-THROUGH STUB (bouncer key never registered, or
+    # nginx -t rejected the real include) means every request sails through
+    # uninspected while the checks above still look green. ENABLE_APPSEC
+    # itself is not in config.env (only in deploy.conf), so read it from there
+    # like deploy.sh's own health_check does.
+    local enable_appsec="true"
+    if [[ -f /etc/loxprox/deploy.conf ]]; then
+        enable_appsec=$(awk -F'"' '/^ENABLE_APPSEC=/{print $2}' /etc/loxprox/deploy.conf)
+    fi
+    enable_appsec="${enable_appsec:-true}"
+    if [[ "${enable_appsec,,}" == "true" ]]; then
+        if [[ -s /etc/nginx/crowdsec-appsec.conf ]] && grep -q "PASS-THROUGH STUB" /etc/nginx/crowdsec-appsec.conf; then
+            fail "AppSec include is the PASS-THROUGH STUB — the WAF is NOT inspecting traffic (deploy degraded, re-run deploy.sh)"
+        else
+            pass "AppSec include is not the pass-through stub"
+        fi
+    fi
+
+    # v2.3 (H11): APPSEC_MODE is written to config.env by write_runtime_config.
+    # In monitor mode the acquisition must point at the local log-only config,
+    # not the hub's enforce-shaped virtual-patching.
+    local appsec_mode=""
+    if [[ -f /etc/loxprox/config.env ]]; then
+        appsec_mode=$(awk -F'"' '/^APPSEC_MODE=/{print $2}' /etc/loxprox/config.env)
+    fi
+    if [[ "${appsec_mode,,}" == "monitor" ]]; then
+        local monitor_conf="/etc/crowdsec/appsec-configs/loxprox-virtual-patching-monitor.yaml"
+        local appsec_acquis="/etc/crowdsec/acquis.d/appsec.yaml"
+        [[ -f "$monitor_conf" ]] && pass "AppSec monitor-mode config present ($monitor_conf)" \
+                                  || fail "AppSec monitor-mode config missing ($monitor_conf)"
+        if [[ -f "$appsec_acquis" ]] && grep -qF "$monitor_conf" "$appsec_acquis"; then
+            pass "AppSec acquisition references the monitor-mode config"
+        else
+            fail "AppSec acquisition does not reference $monitor_conf (still enforce-shaped?)"
+        fi
     fi
 
     # Verify end-to-end: proxy request should trigger AppSec
@@ -358,13 +437,22 @@ test_backup() {
         return
     fi
 
-    # Run a backup
+    # Run a real backup. gateway-backup.sh hardcodes /root/loxprox-backups
+    # with no destination override, so this creates one real tarball on the
+    # host — only a live run proves cp/tar/chmod all succeed end to end.
+    # The archive is removed again below so the test leaves no side effect.
     local backup_output
     backup_output=$(/opt/loxprox/gateway-backup.sh 2>&1)
     if echo "$backup_output" | grep -q "Backup created"; then
         pass "Backup creation succeeded"
     else
         fail "Backup creation failed"
+    fi
+
+    local backup_path
+    backup_path=$(echo "$backup_output" | awk '/^Backup created:/{print $3}')
+    if [[ -n "$backup_path" && -f "$backup_path" ]]; then
+        rm -f "$backup_path"
     fi
 }
 

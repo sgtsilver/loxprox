@@ -7,8 +7,10 @@ Or: python -m pytest tests/test_progressive_ban.py -v
 """
 
 import importlib.util
+import ipaddress
 import json
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 import pytest
@@ -27,6 +29,17 @@ class FakeCompletedProcess:
         self.stdout = stdout
         self.stderr = stderr
         self.returncode = returncode
+
+
+def _alert(scenario="crowdsecurity/http-probing", when=None, origin="crowdsec"):
+    """A realistic `cscli alerts list` entry: attack-origin decision + timestamp."""
+    if when is None:
+        when = datetime.now(timezone.utc)
+    return {
+        "scenario": scenario,
+        "created_at": when.isoformat(),
+        "decisions": [{"origin": origin}],
+    }
 
 
 class TestRunCscli:
@@ -80,9 +93,13 @@ class TestCountOffenses:
     returns active decisions — the old counter never reached 2 and never escalated."""
 
     def test_counts_alerts(self):
+        # These entries carry neither a decisions array nor a timestamp, so
+        # is_attack_alert's scenario-fallback finds nothing and parse_timestamp
+        # returns None for every one of them — all three are dropped and the
+        # count floors at 1, same as an empty/error response.
         alerts = [{"a": 1}, {"a": 2}, {"a": 3}]
         with patch.object(pb, "run_cscli", return_value=alerts):
-            assert pb.count_offenses("1.2.3.4") == 3
+            assert pb.count_offenses("1.2.3.4") == 1
 
     def test_empty_alerts_floors_at_one(self):
         with patch.object(pb, "run_cscli", return_value=[]):
@@ -97,7 +114,95 @@ class TestCountOffenses:
         with patch.object(pb, "run_cscli", return_value=[]) as mock_run:
             pb.count_offenses("9.9.9.9")
             args, _ = mock_run.call_args
-            assert args[0] == ["alerts", "list", "--ip", "9.9.9.9"]
+            assert args[0] == ["alerts", "list", "--ip", "9.9.9.9", "--limit", "0"]
+
+    def test_widely_spaced_alerts_count_separately(self, monkeypatch):
+        monkeypatch.setattr(pb, "WINDOW_DAYS", 30)
+        monkeypatch.setattr(pb, "DEDUP_MINUTES", 60)
+        now = datetime.now(timezone.utc)
+        alerts = [
+            _alert(when=now - timedelta(hours=6)),
+            _alert(when=now - timedelta(hours=3)),
+            _alert(when=now),
+        ]
+        with patch.object(pb, "run_cscli", return_value=alerts):
+            assert pb.count_offenses("1.2.3.4") == 3
+
+    def test_tightly_spaced_alerts_count_as_one(self, monkeypatch):
+        monkeypatch.setattr(pb, "WINDOW_DAYS", 30)
+        monkeypatch.setattr(pb, "DEDUP_MINUTES", 60)
+        now = datetime.now(timezone.utc)
+        alerts = [
+            _alert(when=now - timedelta(minutes=2)),
+            _alert(when=now - timedelta(minutes=1)),
+            _alert(when=now),
+        ]
+        with patch.object(pb, "run_cscli", return_value=alerts):
+            assert pb.count_offenses("1.2.3.4") == 1
+
+    def test_out_of_window_alert_is_dropped(self, monkeypatch):
+        monkeypatch.setattr(pb, "WINDOW_DAYS", 30)
+        monkeypatch.setattr(pb, "DEDUP_MINUTES", 60)
+        now = datetime.now(timezone.utc)
+        alerts = [
+            _alert(when=now - timedelta(days=60)),  # outside the 30d window
+            _alert(when=now - timedelta(hours=6)),
+            _alert(when=now),
+        ]
+        with patch.object(pb, "run_cscli", return_value=alerts):
+            assert pb.count_offenses("1.2.3.4") == 2
+
+    def test_continuous_drip_chains_into_one_incident(self, monkeypatch):
+        """Each gap is under DEDUP_MINUTES, but the chain spans hours: clustering
+        compares against the PREVIOUS alert (which advances every alert), not the
+        previous COUNTED one, so this is one long incident, not several."""
+        monkeypatch.setattr(pb, "WINDOW_DAYS", 30)
+        monkeypatch.setattr(pb, "DEDUP_MINUTES", 60)
+        now = datetime.now(timezone.utc)
+        alerts = [_alert(when=now - timedelta(minutes=50 * i)) for i in range(5)]
+        with patch.object(pb, "run_cscli", return_value=alerts):
+            assert pb.count_offenses("1.2.3.4") == 1
+
+    def test_multi_scenario_burst_counts_once(self, monkeypatch):
+        monkeypatch.setattr(pb, "WINDOW_DAYS", 30)
+        monkeypatch.setattr(pb, "DEDUP_MINUTES", 60)
+        now = datetime.now(timezone.utc)
+        alerts = [
+            _alert(scenario="crowdsecurity/http-probing", when=now),
+            _alert(scenario="crowdsecurity/http-bad-user-agent", when=now),
+            _alert(scenario="crowdsecurity/http-generic-bf", when=now),
+        ]
+        with patch.object(pb, "run_cscli", return_value=alerts):
+            assert pb.count_offenses("1.2.3.4") == 1
+
+
+class TestWhitelist:
+    def test_load_whitelist_parses_ip_and_cidr(self, tmp_path):
+        wl_path = tmp_path / "whitelist-loxone.yaml"
+        wl_path.write_text(
+            "name: whitelist-loxone\n"
+            "whitelist:\n"
+            "  ip:\n"
+            '    - "203.0.113.5"\n'
+            "  cidr:\n"
+            '    - "198.51.100.0/24"\n'
+        )
+        nets = pb.load_whitelist(str(wl_path))
+        assert ipaddress.ip_network("203.0.113.5/32") in nets
+        assert ipaddress.ip_network("198.51.100.0/24") in nets
+
+    def test_load_whitelist_missing_file_returns_empty(self, tmp_path):
+        assert pb.load_whitelist(str(tmp_path / "does-not-exist.yaml")) == []
+
+    def test_is_whitelisted_exact_ip(self):
+        nets = [ipaddress.ip_network("203.0.113.5/32")]
+        assert pb.is_whitelisted("203.0.113.5", nets) is True
+        assert pb.is_whitelisted("203.0.113.6", nets) is False
+
+    def test_is_whitelisted_cidr_membership(self):
+        nets = [ipaddress.ip_network("198.51.100.0/24")]
+        assert pb.is_whitelisted("198.51.100.42", nets) is True
+        assert pb.is_whitelisted("198.51.101.1", nets) is False
 
 
 class TestStateFile:
@@ -255,6 +360,27 @@ class TestMain:
                 with patch.object(pb, "cscli_decision_delete") as mock_del:
                     with patch.object(pb, "cscli_decision_add") as mock_add:
                         pb.main()
+                        mock_del.assert_not_called()
+                        mock_add.assert_not_called()
+
+    def test_whitelisted_ip_skipped(self, tmp_path, monkeypatch):
+        """M9/M10: an IP covered by the CrowdSec whitelist is never escalated,
+        not even counted — same guard shape as the CAPI-origin skip."""
+        wl_path = tmp_path / "whitelist-loxone.yaml"
+        wl_path.write_text('whitelist:\n  ip:\n    - "1.2.3.4"\n')
+        monkeypatch.setattr(pb, "WHITELIST_FILE", str(wl_path))
+        state_path = tmp_path / "extended-decisions.json"
+        monkeypatch.setattr(pb, "STATE_FILE", str(state_path))
+
+        active = [{"value": "1.2.3.4", "id": "2", "origin": "crowdsec",
+                   "duration": "3h58m", "scenario": "ssh-bf"}]
+
+        with patch.object(pb, "run_cscli", return_value=active):
+            with patch.object(pb, "count_offenses") as mock_count:
+                with patch.object(pb, "cscli_decision_delete") as mock_del:
+                    with patch.object(pb, "cscli_decision_add") as mock_add:
+                        pb.main()
+                        mock_count.assert_not_called()  # skipped before counting
                         mock_del.assert_not_called()
                         mock_add.assert_not_called()
 
