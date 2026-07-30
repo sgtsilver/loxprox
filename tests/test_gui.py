@@ -207,6 +207,23 @@ def test_repo_static_dir_ships_all_referenced_assets():
     assert not missing, f"referenced but not shipped: {missing}"
 
 
+def test_vendored_bundles_relative_imports_are_shipped():
+    # ESM vendor bundles may import sibling files (three.module.min.js pulls
+    # ./three.core.min.js since r167) — a missing sibling is a blank panel.
+    import glob
+    import re
+    vendor = os.path.join(os.path.dirname(_GUI_PATH), "static", "vendor")
+    bundles = glob.glob(os.path.join(vendor, "*.js"))
+    assert bundles, "vendor dir is empty — assets not committed?"
+    missing = []
+    for bundle in bundles:
+        with open(bundle, encoding="utf-8") as fh:
+            for rel in re.findall(r'from\s*"(\./[^"]+)"', fh.read()):
+                if not os.path.isfile(os.path.join(vendor, rel[2:])):
+                    missing.append(f"{os.path.basename(bundle)} -> {rel}")
+    assert not missing, f"vendor bundle imports a file that is not shipped: {missing}"
+
+
 # ----------------------------------------------------------------- history
 
 def test_log_growth_counter_counts_and_handles_rotation(tmp_path):
