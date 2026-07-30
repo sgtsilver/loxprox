@@ -1,6 +1,6 @@
 **Language:** [Deutsch](GUI-PANEL.de.md) · English
 
-# LoxProx Panel — LAN-Only Web GUI (v2.1)
+# LoxProx Panel — LAN-Only Web GUI (v2.2)
 
 > **Who this is for:** anyone who wants a point-and-click view of gateway
 > health, a one-tap way to onboard family phones, or a way to unban an IP
@@ -18,6 +18,12 @@ convenience layer on top of the same tools you'd otherwise reach over SSH
 - Default: **on** (`ENABLE_GUI="true"`), listening on `GUI_PORT="1081"`.
 - Reachable at `http://<gateway-ip>:1081` from any device on `LAN_SUBNET`
   or `SSH_ALLOWED_SUBNETS` — nowhere else.
+- Since v2.2 the panel is a **tabbed dashboard** (Overview / Security /
+  Configuration / Logs) with live 24-hour charts, an animated 3D status
+  scene, light/dark/auto theme, and a mobile layout with a bottom tab bar.
+  Everything — three.js, anime.js, the fonts — is **vendored and served
+  from the gateway itself**; the panel makes zero internet requests and
+  works on an offline LAN.
 
 ## Feature tour
 
@@ -26,7 +32,10 @@ convenience layer on top of the same tools you'd otherwise reach over SSH
 onboarding steps — stick it in the utility cabinet instead of generating
 `loxone-qr.png` by hand.
 
-**Status tiles** (the panel's home page, `/`):
+**Overview tab** (the panel's home page, `/`). A status headline ("all
+systems secure" / "attention required") over an animated particle-shield
+scene that tints green, amber, or red with gateway state, plus the status
+tiles:
 
 | Tile | Shows |
 |---|---|
@@ -39,10 +48,19 @@ onboarding steps — stick it in the utility cabinet instead of generating
 | System | Disk, RAM, load |
 | Tunnel | frpc connection state, when `ENABLE_TUNNEL=true` |
 
-**Logs.** Read-only tail view of nginx, CrowdSec, and monitor/watchdog logs
-— no more `journalctl`/`tail -f` over SSH for a quick look.
+**Charts (v2.2).** The panel samples the gateway once a minute — requests
+per minute (nginx access log growth), system load, RAM/disk, active
+CrowdSec bans, AppSec hits, Miniserver reachability — into a 24-hour ring
+buffer (`/var/lib/loxprox/gui-history.json`, survives restarts, served at
+`/api/history`). The Overview tab charts traffic and load; the Security tab
+charts bans and AppSec hits. A fresh install shows "collecting data" until
+the first samples land.
 
-**Config editor.** Edit a whitelisted subset of `/etc/loxprox/deploy.conf`
+**Logs tab.** Read-only tail view of nginx, CrowdSec, and monitor/watchdog
+logs with a follow mode — no more `journalctl`/`tail -f` over SSH for a
+quick look.
+
+**Config editor** (Configuration tab). Edit a whitelisted subset of `/etc/loxprox/deploy.conf`
 values in a form (rate limits, timeouts, AppSec mode, CrowdSec whitelist,
 TLS, tunnel, and GUI settings) and **apply** with one click — the panel
 timestamps a backup of `deploy.conf` first, then runs `deploy.sh` in the
@@ -50,10 +68,10 @@ background and shows the job log. `GATEWAY_IP`, `LAN_SUBNET`, and
 `SSH_ALLOWED_SUBNETS` are deliberately **not** editable here — a mistake in
 any of those three is an SSH lockout risk and stays an SSH-only change.
 
-**Support actions.** One button each for: unban an IP (`cscli decisions
-delete`), restart a service (nginx / CrowdSec / bouncer / frpc), force a
-TLS renewal (`deploy.sh --renew-tls`), and send a test alert (exercises the
-Discord webhook end-to-end).
+**Support actions** (Security tab). One button each for: unban an IP
+(`cscli decisions delete`), restart a service (nginx / CrowdSec / bouncer /
+frpc), force a TLS renewal (`deploy.sh --renew-tls`), and send a test alert
+(exercises the Discord webhook end-to-end).
 
 ## Security model
 
@@ -71,6 +89,10 @@ built to fail closed:
 - **CSRF header on every mutation.** All `POST` requests must carry
   `X-LoxProx-Gui: 1`; there is no CORS configuration that would let another
   origin forge this from a browser.
+- **No inline scripts, no external resources.** Since v2.2 the CSP is
+  `script-src 'self'` — every script is a file served from the gateway's
+  own `/static/` allowlist (path-contained, extension-allowlisted), and
+  `connect-src 'self'` means the page cannot phone anywhere else.
 - **Optional password on mutating actions.** `GUI_PASSWORD` is empty (no
   auth) by default — reasonable on a LAN you fully control. Set it and
   every unban/restart/renew/apply/config-write call must present it via the
@@ -85,9 +107,9 @@ built to fail closed:
   reachability and the auth option above, not process isolation.
 - **To disable entirely:** set `ENABLE_GUI="false"` in
   `/etc/loxprox/deploy.conf` and re-run `sudo bash deploy.sh`. This stops
-  and disables the `loxprox-gui` service and removes the nftables rule; the
-  installed file is left in place (harmless, unreachable) so re-enabling is
-  instant.
+  and disables the `loxprox-gui` service, removes the nftables rule, and
+  deletes the installed script and its assets; setting it back to `"true"`
+  and re-running `deploy.sh` reinstalls everything.
 
 ## Config keys
 

@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0a0e12">
+<title>LoxProx Panel</title>
+<link rel="stylesheet" href="/static/panel.css">
+<script src="/static/theme-boot.js"></script>
+<script type="module" src="/static/panel.js"></script>
+</head>
+<body>
+
+<canvas id="bg3d" aria-hidden="true"></canvas>
+<div class="aurora" aria-hidden="true"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="brand-mark" width="26" height="26" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"
+         aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8.2-7 10-4-1.8-7-5.5-7-10V6l7-3z"/>
+      <path class="brand-pulse" d="M8.5 12l2.2 2.2L15.5 9.5"/></svg>
+    <span class="brand-name">LoxProx</span>
+    <span class="live-dot" id="liveDot" title="live"></span>
+  </div>
+
+  <nav class="tabs" role="tablist" aria-label="Panel">
+    <button class="tab is-active" role="tab" aria-selected="true" data-tab="overview">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/>
+        <rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+      <span data-i18n="tab_overview"></span></button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="security">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 3l7 3v5c0 4.5-3 8.2-7 10-4-1.8-7-5.5-7-10V6l7-3z"/></svg>
+      <span data-i18n="tab_security"></span></button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="config">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <line x1="4" y1="7" x2="20" y2="7"/><circle cx="9" cy="7" r="2.2"/>
+        <line x1="4" y1="17" x2="20" y2="17"/><circle cx="15" cy="17" r="2.2"/></svg>
+      <span data-i18n="tab_config"></span></button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="logs">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="4 6 8 10 4 14"/><line x1="11" y1="14" x2="20" y2="14"/>
+        <line x1="11" y1="18" x2="16" y2="18"/></svg>
+      <span data-i18n="tab_logs"></span></button>
+  </nav>
+
+  <div class="controls">
+    <button class="icon-btn" id="themeBtn" title="Theme">
+      <svg class="theme-ico theme-ico-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" stroke="none"/></svg>
+      <svg class="theme-ico theme-ico-light" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="4.5"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg>
+      <svg class="theme-ico theme-ico-dark" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>
+    </button>
+    <button class="icon-btn" id="langBtn"></button>
+    <a href="/invite" target="_blank" class="invite-link"><button class="ghost" data-i18n="invite"></button></a>
+  </div>
+</header>
+
+<main>
+
+<!-- ══════════════ OVERVIEW ══════════════ -->
+<section id="tab-overview" class="panel-tab is-active" role="tabpanel">
+  <div class="hero">
+    <p class="hero-kicker" data-i18n="hero_kicker"></p>
+    <h1 class="hero-title" id="heroTitle">&nbsp;</h1>
+    <p class="hero-sub" id="heroSub"></p>
+    <div class="hero-stats">
+      <div class="hstat"><span class="hstat-num mono" id="hsReq">–</span><span class="hstat-label" data-i18n="hs_req"></span></div>
+      <div class="hstat"><span class="hstat-num mono" id="hsBans">–</span><span class="hstat-label" data-i18n="hs_bans"></span></div>
+      <div class="hstat"><span class="hstat-num mono" id="hsAppsec">–</span><span class="hstat-label" data-i18n="hs_appsec"></span></div>
+      <div class="hstat"><span class="hstat-num mono" id="hsCert">–</span><span class="hstat-label" data-i18n="hs_cert"></span></div>
+    </div>
+  </div>
+
+  <div class="grid tiles" id="tiles"></div>
+
+  <div class="charts-row">
+    <div class="card chart-card">
+      <div class="chart-head"><h3 data-i18n="ch_req"></h3><span class="chart-now mono" id="reqNow"></span></div>
+      <svg class="chart" id="reqChart" viewBox="0 0 600 150" preserveAspectRatio="none" aria-hidden="true"></svg>
+      <div class="chart-x"><span data-i18n="ch_24h"></span><span data-i18n="ch_now"></span></div>
+    </div>
+    <div class="card chart-card">
+      <div class="chart-head"><h3 data-i18n="ch_load"></h3><span class="chart-now mono" id="loadNow"></span></div>
+      <svg class="chart" id="loadChart" viewBox="0 0 600 150" preserveAspectRatio="none" aria-hidden="true"></svg>
+      <div class="chart-x"><span data-i18n="ch_24h"></span><span data-i18n="ch_now"></span></div>
+    </div>
+    <div class="card gauge-card">
+      <h3 data-i18n="ch_res"></h3>
+      <div class="gauges">
+        <div class="gauge"><svg viewBox="0 0 84 84" aria-hidden="true">
+          <circle class="gauge-track" cx="42" cy="42" r="36"/>
+          <circle class="gauge-val" id="gMem" cx="42" cy="42" r="36"/></svg>
+          <div class="gauge-text"><span class="mono" id="gMemPct">–</span><small>RAM</small></div></div>
+        <div class="gauge"><svg viewBox="0 0 84 84" aria-hidden="true">
+          <circle class="gauge-track" cx="42" cy="42" r="36"/>
+          <circle class="gauge-val" id="gDisk" cx="42" cy="42" r="36"/></svg>
+          <div class="gauge-text"><span class="mono" id="gDiskPct">–</span><small>Disk</small></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card qrbox">
+    <div class="qr-holder" id="qrHolder"><span class="hint" data-i18n="qr_none"></span></div>
+    <div class="qr-side">
+      <h3 data-i18n="h_qr"></h3>
+      <div class="hint" id="qrModeLine"></div>
+      <label data-i18n="qr_host"></label>
+      <div class="row">
+        <input id="qrHost" class="qr-input">
+        <button id="qrSave" data-i18n="save"></button>
+        <button id="qrCopy" class="ghost" data-i18n="copy_link"></button>
+      </div>
+      <p class="hint" data-i18n="qr_note"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════ SECURITY ══════════════ -->
+<section id="tab-security" class="panel-tab" role="tabpanel" hidden>
+  <div class="charts-row two">
+    <div class="card chart-card">
+      <div class="chart-head"><h3 data-i18n="ch_bans"></h3><span class="chart-now mono" id="bansNow"></span></div>
+      <svg class="chart" id="bansChart" viewBox="0 0 600 150" preserveAspectRatio="none" aria-hidden="true"></svg>
+      <div class="chart-x"><span data-i18n="ch_24h"></span><span data-i18n="ch_now"></span></div>
+    </div>
+    <div class="card chart-card">
+      <div class="chart-head"><h3 data-i18n="ch_appsec"></h3><span class="chart-now mono" id="appsecNow"></span></div>
+      <svg class="chart" id="appsecChart" viewBox="0 0 600 150" preserveAspectRatio="none" aria-hidden="true"></svg>
+      <div class="chart-x"><span data-i18n="ch_24h"></span><span data-i18n="ch_now"></span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 data-i18n="h_bans"></h3>
+    <div class="table-wrap">
+      <table id="banTable">
+        <thead><tr><th>IP</th><th data-i18n="t_origin"></th>
+          <th data-i18n="t_scenario"></th><th data-i18n="t_duration"></th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="row unban-row">
+      <input id="unbanIp" class="mono" placeholder="1.2.3.4">
+      <button id="unbanBtn" class="danger" data-i18n="unban"></button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 data-i18n="h_actions"></h3>
+    <div class="row" id="actionRow">
+      <button class="danger" data-restart="nginx">nginx</button>
+      <button class="danger" data-restart="crowdsec">CrowdSec</button>
+      <button class="danger" data-restart="crowdsec-firewall-bouncer">Bouncer</button>
+      <button class="danger" data-restart="frpc" id="frpcBtn" hidden>frpc</button>
+      <button id="alertBtn" data-i18n="test_alert"></button>
+    </div>
+    <p class="hint" data-i18n="actions_note"></p>
+  </div>
+</section>
+
+<!-- ══════════════ CONFIG ══════════════ -->
+<section id="tab-config" class="panel-tab" role="tabpanel" hidden>
+  <div class="card">
+    <h3 data-i18n="h_config"></h3>
+    <div id="cfgForm"></div>
+    <div class="row cfg-actions">
+      <button id="cfgSave" data-i18n="save_cfg"></button>
+      <button id="applyBtn" class="primary" data-i18n="apply"></button>
+      <button id="renewBtn" class="ghost" data-i18n="renew"></button>
+    </div>
+    <p class="hint" data-i18n="cfg_note"></p>
+    <pre id="jobLog" class="mono" hidden></pre>
+  </div>
+</section>
+
+<!-- ══════════════ LOGS ══════════════ -->
+<section id="tab-logs" class="panel-tab" role="tabpanel" hidden>
+  <div class="card">
+    <h3 data-i18n="h_logs"></h3>
+    <div class="row log-controls">
+      <div class="chips" id="logChips"></div>
+      <label class="follow-toggle"><input type="checkbox" id="logFollow">
+        <span data-i18n="follow"></span></label>
+    </div>
+    <pre id="logView" class="mono" hidden></pre>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot"><span id="footLine"></span></footer>
+<div class="toast" id="toast" role="status"></div>
+
+</body>
+</html>

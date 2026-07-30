@@ -2,6 +2,46 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **LoxProx Panel v2.2 — the dashboard grew up.** The single inline-HTML
+  page became a tabbed dashboard (Overview / Security / Configuration /
+  Logs): a status headline over an animated three.js particle-shield scene
+  that tints with gateway state, anime.js-driven tab transitions, counters
+  and chart draw-ins, live 24-hour SVG charts (requests/min, system load,
+  active bans, AppSec hits) plus RAM/disk gauges, a grouped config editor
+  with proper toggles/selects, a log viewer with follow mode,
+  light/dark/auto theme, and a mobile layout with a bottom tab bar. DE/EN
+  switching and every v2.1 function (QR invite, unban, restarts, TLS renew,
+  config apply, job log) carry over unchanged.
+- **Panel assets are fully vendored.** three.js, anime.js v4 and the
+  Inter/Syne/JetBrains Mono variable fonts ship in `gui/static/` and are
+  served by the panel itself — zero internet requests, works on an offline
+  LAN. `deploy.sh` installs the directory next to the panel script and
+  removes it again on `ENABLE_GUI="false"`.
+- **Panel CSP hardened.** `script-src` dropped `'unsafe-inline'` — every
+  script is now a served file; static serving is path-contained to the
+  asset directory with an extension allowlist (pytest-covered).
+
+### Added
+
+- **24-hour metrics history.** The panel samples once a minute (nginx
+  access-log growth, load, RAM, disk, CrowdSec decision count, AppSec log
+  growth, Miniserver reachability) into a ring buffer persisted at
+  `/var/lib/loxprox/gui-history.json` and served at `/api/history` —
+  restarts keep the day's charts.
+- `test-gateway.sh` now verifies the dashboard assets are actually served
+  (`/static/panel.js` must return 200), catching a missing asset install.
+
+### Fixed
+
+- **Config editor could not round-trip `CROWDSEC_WHITELIST_IPS`.** The raw
+  bash-array form `("a" "b")` shown in the editor failed validation on
+  save; the validator now accepts it (and the editor displays the clean
+  space-separated list).
+
 > **v1.3.0 was withdrawn on 2026-05-18 — do not use.** The systemd unit change in v1.3.0 (moving `StartLimit*` from `[Service]` to `[Unit]`) activated a previously-silent `StartLimitBurst=3` that, combined with the watchdog's 60-second timer and `FailureAction=reboot`, caused an unbounded reboot loop on the 4th start. **v1.3.1 supersedes v1.3.0** and contains the same fixes plus the burst-value correction. Install v1.3.1 or later.
 
 ## [2.1.0] — 2026-07-29

@@ -502,7 +502,7 @@ test_gui() {
     gui_port="${gui_port:-1081}"
     [[ "${enable_gui,,}" == "true" ]] || return 0
 
-    test_header "GUI Panel (v2.1)"
+    test_header "GUI Panel (v2.2)"
 
     if systemctl is-active --quiet loxprox-gui.service 2>/dev/null; then
         pass "loxprox-gui.service is running"
@@ -530,6 +530,16 @@ test_gui() {
         pass "POST without X-LoxProx-Gui header rejected (403)"
     else
         fail "POST without X-LoxProx-Gui header returned HTTP $csrf_status (expected 403)"
+    fi
+
+    # v2.2: the dashboard is a static app — a missing asset install means a
+    # blank panel even though / returns 200-shaped errors on the API side.
+    local asset_status
+    asset_status=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "http://127.0.0.1:${gui_port}/static/panel.js" 2>/dev/null)
+    if [[ "$asset_status" == "200" ]]; then
+        pass "GUI dashboard assets served (/static/panel.js)"
+    else
+        fail "GUI dashboard assets missing (/static/panel.js returned HTTP $asset_status)"
     fi
 
     if command -v qrencode >/dev/null 2>&1; then

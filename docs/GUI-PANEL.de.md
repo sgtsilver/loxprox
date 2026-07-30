@@ -1,6 +1,6 @@
 **Sprache:** Deutsch · [English](GUI-PANEL.md)
 
-# LoxProx Panel — LAN-only Web-GUI (v2.1)
+# LoxProx Panel — LAN-only Web-GUI (v2.2)
 
 > **Für wen das ist:** für alle, die eine Klick-Ansicht des Gateway-Zustands
 > wollen, eine Ein-Klick-Einladung für Familien-Handys, oder eine Möglichkeit,
@@ -19,6 +19,12 @@ erreichst (`cscli`, `systemctl`, `openssl`, `deploy.sh`).
 - Default: **an** (`ENABLE_GUI="true"`), lauscht auf `GUI_PORT="1081"`.
 - Erreichbar unter `http://<gateway-ip>:1081` von jedem Gerät in
   `LAN_SUBNET` oder `SSH_ALLOWED_SUBNETS` — sonst nirgendwo.
+- Seit v2.2 ist das Panel ein **Dashboard mit Tabs** (Übersicht / Sicherheit /
+  Konfiguration / Logs) mit Live-24-Stunden-Charts, einer animierten
+  3D-Status-Szene, Hell-/Dunkel-/Auto-Design und einem Mobil-Layout mit
+  unterer Tab-Leiste. Alles — three.js, anime.js, die Schriften — ist
+  **gebündelt und wird vom Gateway selbst ausgeliefert**; das Panel macht
+  null Internet-Requests und funktioniert auch in einem Offline-LAN.
 
 ## Feature-Tour
 
@@ -27,7 +33,10 @@ erreichst (`cscli`, `systemctl`, `openssl`, `deploy.sh`).
 DE/EN-Onboarding-Schritten — ins Technikschränkchen kleben statt
 `loxone-qr.png` von Hand zu erzeugen.
 
-**Status-Kacheln** (die Startseite des Panels, `/`):
+**Übersichts-Tab** (die Startseite des Panels, `/`). Eine Status-Schlagzeile
+("Alles im grünen Bereich" / "Eingriff erforderlich") über einer animierten
+Partikel-Schild-Szene, die sich mit dem Gateway-Zustand grün, gelb oder rot
+einfärbt, plus die Status-Kacheln:
 
 | Kachel | Zeigt |
 |---|---|
@@ -40,11 +49,19 @@ DE/EN-Onboarding-Schritten — ins Technikschränkchen kleben statt
 | System | Disk, RAM, Load |
 | Tunnel | frpc-Verbindungsstatus, wenn `ENABLE_TUNNEL=true` |
 
-**Logs.** Read-only Tail-Ansicht der nginx-, CrowdSec- und
-Monitor-/Watchdog-Logs — kein `journalctl`/`tail -f` per SSH mehr für einen
-schnellen Blick.
+**Charts (v2.2).** Das Panel misst das Gateway einmal pro Minute — Requests
+pro Minute (Wachstum des nginx-Access-Logs), Systemlast, RAM/Disk, aktive
+CrowdSec-Sperren, AppSec-Treffer, Miniserver-Erreichbarkeit — in einen
+24-Stunden-Ringpuffer (`/var/lib/loxprox/gui-history.json`, übersteht
+Neustarts, abrufbar unter `/api/history`). Der Übersichts-Tab zeigt Traffic
+und Last, der Sicherheits-Tab Sperren und AppSec-Treffer. Eine frische
+Installation zeigt "Sammle Daten", bis die ersten Messpunkte da sind.
 
-**Config-Editor.** Eine gewhitelistete Teilmenge der Werte in
+**Logs-Tab.** Read-only Tail-Ansicht der nginx-, CrowdSec- und
+Monitor-/Watchdog-Logs mit Folgen-Modus — kein `journalctl`/`tail -f` per
+SSH mehr für einen schnellen Blick.
+
+**Config-Editor** (Konfigurations-Tab). Eine gewhitelistete Teilmenge der Werte in
 `/etc/loxprox/deploy.conf` per Formular bearbeiten (Rate Limits, Timeouts,
 AppSec-Modus, CrowdSec-Whitelist, TLS, Tunnel, GUI-Einstellungen) und mit
 einem Klick **anwenden** — das Panel legt zuerst ein zeitgestempeltes
@@ -53,10 +70,11 @@ zeigt das Job-Log. `GATEWAY_IP`, `LAN_SUBNET` und `SSH_ALLOWED_SUBNETS` sind
 hier bewusst **nicht** editierbar — ein Fehler in einem dieser drei Werte
 ist ein SSH-Lockout-Risiko und bleibt eine SSH-only-Änderung.
 
-**Support-Aktionen.** Je ein Button für: eine IP entbannen (`cscli
-decisions delete`), einen Service neu starten (nginx / CrowdSec / Bouncer /
-frpc), eine TLS-Erneuerung erzwingen (`deploy.sh --renew-tls`), und einen
-Test-Alert senden (prüft den Discord-Webhook Ende-zu-Ende).
+**Support-Aktionen** (Sicherheits-Tab). Je ein Button für: eine IP
+entbannen (`cscli decisions delete`), einen Service neu starten (nginx /
+CrowdSec / Bouncer / frpc), eine TLS-Erneuerung erzwingen (`deploy.sh
+--renew-tls`), und einen Test-Alert senden (prüft den Discord-Webhook
+Ende-zu-Ende).
 
 ## Security-Modell
 
@@ -75,6 +93,11 @@ also auf Fail-Closed gebaut:
 - **CSRF-Header bei jeder Mutation.** Jeder `POST`-Request muss den Header
   `X-LoxProx-Gui: 1` mitschicken; es gibt keine CORS-Konfiguration, die es
   einem anderen Origin erlauben würde, das aus einem Browser zu fälschen.
+- **Keine Inline-Skripte, keine externen Ressourcen.** Seit v2.2 ist die
+  CSP `script-src 'self'` — jedes Skript ist eine Datei aus der
+  `/static/`-Allowlist des Gateways (pfad-eingeschlossen,
+  endungs-gewhitelistet), und `connect-src 'self'` heißt: die Seite kann
+  nirgendwo sonst hintelefonieren.
 - **Optionales Passwort für mutierende Aktionen.** `GUI_PASSWORD` ist per
   Default leer (keine Auth) — auf einem LAN, das du vollständig
   kontrollierst, vertretbar. Setzt du es, muss jeder
@@ -90,9 +113,9 @@ also auf Fail-Closed gebaut:
   die Auth-Option oben, nicht Prozess-Isolation.
 - **Ganz deaktivieren:** `ENABLE_GUI="false"` in `/etc/loxprox/deploy.conf`
   setzen und `sudo bash deploy.sh` erneut laufen lassen. Das stoppt und
-  deaktiviert den Service `loxprox-gui` und entfernt die nftables-Regel;
-  die installierte Datei bleibt liegen (harmlos, unerreichbar), damit ein
-  Wieder-Aktivieren sofort geht.
+  deaktiviert den Service `loxprox-gui`, entfernt die nftables-Regel und
+  löscht das installierte Skript samt Assets; zurück auf `"true"` setzen
+  und `deploy.sh` erneut ausführen installiert alles wieder.
 
 ## Config-Keys
 

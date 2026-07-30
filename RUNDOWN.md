@@ -49,7 +49,8 @@ Internet ──► Router:1080 ──► Gateway:1080 ──► Loxone:80
 | `tunnel-relay/install-relay.sh` | v2.0: one-shot relay-VPS installer (frps + nginx TLS + CrowdSec perimeter) |
 | `security-monitoring/network-watchdog.service` | systemd system service (root) |
 | `security-monitoring/network-watchdog.timer` | Runs watchdog every 60 seconds |
-| `gui/loxprox-gui.py` | v2.1: LoxProx Panel — LAN-only web GUI (family QR invitation, status, logs, config editor + apply, unban/restart/renew). Python 3.11 stdlib, `loxprox-gui.service`, port 1081, `ENABLE_GUI` toggle |
+| `gui/loxprox-gui.py` | LoxProx Panel — LAN-only web GUI (family QR invitation, tabbed dashboard with 24h charts, logs, config editor + apply, unban/restart/renew). Python 3.11 stdlib, `loxprox-gui.service`, port 1081, `ENABLE_GUI` toggle |
+| `gui/static/` | v2.2: the Panel's dashboard app (`panel.html/css/js`) + vendored three.js, anime.js and Inter/Syne/JetBrains Mono fonts — served by the panel itself, fully offline |
 
 ---
 
