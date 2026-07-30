@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""LoxProx Panel — LAN-only operator and family GUI (v2.1).
+"""LoxProx Panel — LAN-only operator and family GUI (v2.2).
 
-Serves the family QR invitation, live gateway status, log viewing, a guarded
-deploy.conf editor with one-click apply, and support actions (unban, service
-restart, TLS renew, test alert). Security model (see docs/GUI-PANEL.md):
-reachable only from LAN_SUBNET / SSH_ALLOWED_SUBNETS via nftables, Host-header
-allowlist against DNS rebinding, X-LoxProx-Gui header on every mutation (CSRF),
-optional GUI_PASSWORD enforced on mutations. Runs as root (cscli / systemctl /
-deploy.sh); stdlib only, no pip dependencies.
+Serves the family QR invitation, live gateway status with 24h history charts,
+log viewing, a guarded deploy.conf editor with one-click apply, and support
+actions (unban, service restart, TLS renew, test alert). The dashboard itself
+(tabs, charts, three.js scene) lives in gui/static/ and is served from disk —
+all assets are vendored, nothing loads from the internet. Security model (see
+docs/GUI-PANEL.md): reachable only from LAN_SUBNET / SSH_ALLOWED_SUBNETS via
+nftables, Host-header allowlist against DNS rebinding, X-LoxProx-Gui header on
+every mutation (CSRF), optional GUI_PASSWORD enforced on mutations, CSP with
+no inline scripts. Runs as root (cscli / systemctl / deploy.sh); stdlib only,
+no pip dependencies.
 """
 
 import hmac
@@ -23,6 +26,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -36,6 +40,12 @@ BACKUP_DIR = os.environ.get("LOXPROX_BACKUP_DIR", "/root/loxprox-backups")
 DISCORD_ALERT = os.environ.get("LOXPROX_DISCORD_ALERT", "/opt/loxprox/discord-alert.sh")
 SETTINGS_FILE = os.path.join(STATE_DIR, "gui-settings.json")
 JOB_DIR = os.path.join(STATE_DIR, "gui-jobs")
+STATIC_DIR = os.environ.get(
+    "LOXPROX_GUI_STATIC",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "static"))
+HISTORY_FILE = os.path.join(STATE_DIR, "gui-history.json")
+HISTORY_INTERVAL = 60          # seconds between samples
+HISTORY_MAX = 1440             # 24h at one sample per minute
 
 LOG_FILES = {
     "nginx-error": "/var/log/nginx/loxone-error.log",
@@ -217,7 +227,10 @@ def validate_changes(changes):
             errors[key] = "not editable"
             continue
         if kind == "cidr_array" and isinstance(val, str):
-            val = [p for p in re.split(r"[,\s]+", val.strip()) if p]
+            val = val.strip()
+            if val.startswith("(") and val.endswith(")"):  # raw bash-array form
+                val = val[1:-1]
+            val = [p for p in re.split(r"[,\s]+", val.replace('"', " ").strip()) if p]
         if _VALIDATORS[kind](val):
             clean[key] = val
         else:
@@ -375,6 +388,134 @@ def collect_status():
     }
 
 
+# ------------------------------------------------------------ static assets
+
+STATIC_TYPES = {".html": "text/html; charset=utf-8",
+                ".css": "text/css; charset=utf-8",
+                ".js": "text/javascript; charset=utf-8",
+                ".woff2": "font/woff2",
+                ".svg": "image/svg+xml"}
+
+
+def safe_static_path(rel, base_dir=None):
+    """Resolve a /static/ request path, or None if it escapes the asset dir
+    or has a non-allowlisted extension."""
+    base = os.path.realpath(base_dir or STATIC_DIR)
+    full = os.path.realpath(os.path.join(base, rel))
+    if not full.startswith(base + os.sep):
+        return None
+    if os.path.splitext(full)[1] not in STATIC_TYPES:
+        return None
+    return full
+
+
+# ------------------------------------------------------------- history (24h)
+
+class LogGrowthCounter:
+    """Counts lines appended to a log file between calls, rotation-aware."""
+
+    def __init__(self, path):
+        self.path = path
+        self.pos = None
+
+    def delta(self):
+        try:
+            size = os.path.getsize(self.path)
+        except OSError:
+            self.pos = None
+            return 0
+        if self.pos is None or size < self.pos:  # first call, or log rotated
+            self.pos = size
+            return 0
+        try:
+            with open(self.path, "rb") as fh:
+                fh.seek(self.pos)
+                chunk = fh.read(8 * 1024 * 1024)
+        except OSError:
+            return 0
+        self.pos += len(chunk)
+        return chunk.count(b"\n")
+
+
+class History:
+    """Fixed-size ring of per-minute samples, persisted across restarts."""
+
+    def __init__(self, maxlen=HISTORY_MAX):
+        self._lock = threading.Lock()
+        self._points = deque(maxlen=maxlen)
+
+    def append(self, point):
+        with self._lock:
+            self._points.append(point)
+
+    def snapshot(self):
+        with self._lock:
+            return list(self._points)
+
+    def load(self, path, now=None):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                points = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(points, list):
+            return
+        cutoff = (now or time.time()) - HISTORY_MAX * HISTORY_INTERVAL
+        with self._lock:
+            for p in points:
+                if isinstance(p, dict) and isinstance(p.get("t"), (int, float)) \
+                        and p["t"] >= cutoff:
+                    self._points.append(p)
+
+    def save(self, path):
+        points = self.snapshot()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(points, fh)
+            os.replace(tmp, path)
+        except OSError:
+            pass  # history is best-effort; never take the panel down over it
+
+
+HISTORY = History()
+
+
+def history_sample(counters):
+    stats = system_stats()
+    bans = 0
+    rc, out = run(["cscli", "decisions", "list", "-o", "json"], timeout=15)
+    if rc == 0:
+        try:
+            bans = len(json.loads(out) or [])
+        except json.JSONDecodeError:
+            pass
+    conf = load_conf(DEPLOY_CONF)
+    return {
+        "t": int(time.time()),
+        "load": stats.get("load"),
+        "mem": stats.get("mem_pct"),
+        "disk": stats.get("disk_pct"),
+        "bans": bans,
+        "req": counters["req"].delta(),
+        "sec": counters["sec"].delta(),
+        "ms": miniserver_reachable(conf),
+    }
+
+
+def history_loop():
+    counters = {"req": LogGrowthCounter(LOG_FILES["nginx-access"]),
+                "sec": LogGrowthCounter(LOG_FILES["appsec"])}
+    n = 0
+    while True:
+        HISTORY.append(history_sample(counters))
+        n += 1
+        if n % 5 == 0:
+            HISTORY.save(HISTORY_FILE)
+        time.sleep(HISTORY_INTERVAL)
+
+
 # ----------------------------------------------------------------------- QR
 
 def derive_host(conf, settings):
@@ -461,7 +602,7 @@ JOBS = JobRunner()
 # ------------------------------------------------------------- HTTP handler
 
 class PanelHandler(BaseHTTPRequestHandler):
-    server_version = "LoxProxPanel/2.1"
+    server_version = "LoxProxPanel/2.2"
     protocol_version = "HTTP/1.1"
 
     # -- plumbing ---------------------------------------------------------
@@ -474,10 +615,13 @@ class PanelHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
+        # No inline scripts anywhere (v2.2) — everything ships from /static/.
+        # style 'unsafe-inline' stays for style="" attributes in rendered HTML.
         self.send_header("Content-Security-Policy",
-                         "default-src 'none'; style-src 'unsafe-inline'; "
-                         "script-src 'unsafe-inline'; img-src 'self' data:; "
-                         "connect-src 'self'")
+                         "default-src 'none'; script-src 'self'; "
+                         "style-src 'self' 'unsafe-inline'; "
+                         "img-src 'self' data:; connect-src 'self'; "
+                         "font-src 'self'; base-uri 'none'; form-action 'none'")
 
     def _send(self, code, body, ctype="text/html; charset=utf-8"):
         data = body.encode("utf-8") if isinstance(body, str) else body
@@ -511,6 +655,28 @@ class PanelHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return None
 
+    # -- static assets ----------------------------------------------------
+
+    def _serve_static(self, rel):
+        full = safe_static_path(rel)
+        if full is None:
+            return self._json({"ok": False, "error": "not found"}, 404)
+        try:
+            with open(full, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            return self._json({"ok": False, "error": "not found"}, 404)
+        self.send_response(200)
+        self._security_headers()
+        self.send_header("Content-Type", STATIC_TYPES[os.path.splitext(full)[1]])
+        self.send_header("Content-Length", str(len(data)))
+        # Vendored libs/fonts never change between deploys of the same version;
+        # app files may. Both revalidate cheaply on a LAN.
+        cache = 86400 if ("vendor/" in rel or "fonts/" in rel) else 300
+        self.send_header("Cache-Control", f"max-age={cache}")
+        self.end_headers()
+        self.wfile.write(data)
+
     # -- GET --------------------------------------------------------------
 
     def do_GET(self):
@@ -521,9 +687,14 @@ class PanelHandler(BaseHTTPRequestHandler):
         query = {k: v[0] for k, v in parse_qs(url.query).items()}
 
         if route == "/":
-            return self._send(200, render_panel())
+            return self._serve_static("panel.html")
+        if route.startswith("/static/"):
+            return self._serve_static(route[len("/static/"):])
         if route == "/invite":
             return self._send(200, render_invite(query))
+        if route == "/api/history":
+            return self._json({"ok": True, "interval": HISTORY_INTERVAL,
+                               "points": HISTORY.snapshot()})
         if route == "/qr.svg":
             conf = load_conf(DEPLOY_CONF)
             host = query.get("host") or derive_host(conf, load_settings())[0]
@@ -543,6 +714,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             settings = load_settings()
             host, mode = derive_host(conf, settings)
             return self._json({"ok": True, "config": mask_secrets(visible),
+                               "schema": EDITABLE_KEYS,
                                "qr_host": host, "qr_mode": mode,
                                "auth_required": bool(conf.get("GUI_PASSWORD"))})
         if route.startswith("/api/log/"):
@@ -644,69 +816,11 @@ class PanelHandler(BaseHTTPRequestHandler):
 
 
 # ------------------------------------------------------------------ HTML UI
-
-def _base_css():
-    return """
-:root { --bg:#f5f5f7; --card:#ffffff; --text:#1d1d1f; --muted:#6e6e73;
-  --line:#e5e5ea; --ok:#1f7a3d; --warn:#9a6700; --bad:#b3261e; --accent:#0a66c2; }
-@media (prefers-color-scheme: dark) {
-  :root { --bg:#161617; --card:#1f1f21; --text:#f5f5f7; --muted:#98989d;
-    --line:#3a3a3c; --ok:#4cc38a; --warn:#e0b429; --bad:#f2726a; --accent:#6cb2ff; } }
-* { box-sizing:border-box; margin:0; }
-body { font-family:'Inter',-apple-system,'SF Pro Text',system-ui,sans-serif;
-  background:var(--bg); color:var(--text); line-height:1.5; padding:2rem 1.25rem 4rem; }
-main { max-width:64rem; margin:0 auto; }
-h1 { font-size:1.4rem; font-weight:600; letter-spacing:-.01em; }
-h2 { font-size:.95rem; font-weight:600; color:var(--muted); text-transform:uppercase;
-  letter-spacing:.06em; margin:2.2rem 0 .8rem; }
-.card { background:var(--card); border:1px solid var(--line); border-radius:14px;
-  padding:1.1rem 1.25rem; box-shadow:0 1px 3px rgba(0,0,0,.05); }
-.grid { display:grid; gap:.9rem; grid-template-columns:repeat(auto-fill,minmax(13rem,1fr)); }
-.tile .label { font-size:.78rem; color:var(--muted); }
-.tile .value { font-size:1.15rem; font-weight:600; margin-top:.15rem; display:flex;
-  align-items:center; gap:.45rem; }
-.dot { width:.6rem; height:.6rem; border-radius:50%; flex:none; }
-.ok .dot{background:var(--ok)} .warn .dot{background:var(--warn)} .bad .dot{background:var(--bad)}
-.ok .value{color:var(--ok)} .warn .value{color:var(--warn)} .bad .value{color:var(--bad)}
-table { width:100%; border-collapse:collapse; font-size:.85rem; }
-th,td { text-align:left; padding:.45rem .5rem; border-bottom:1px solid var(--line); }
-th { color:var(--muted); font-weight:500; }
-button { font:inherit; font-size:.85rem; font-weight:500; border:1px solid var(--line);
-  background:var(--card); color:var(--text); border-radius:9px; padding:.42rem .9rem;
-  cursor:pointer; }
-button:hover { border-color:var(--accent); color:var(--accent); }
-button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
-button.danger:hover { border-color:var(--bad); color:var(--bad); }
-input,select { font:inherit; font-size:.85rem; background:var(--bg); color:var(--text);
-  border:1px solid var(--line); border-radius:8px; padding:.4rem .6rem; width:100%; }
-label { font-size:.78rem; color:var(--muted); display:block; margin-top:.7rem; }
-pre { background:var(--bg); border:1px solid var(--line); border-radius:10px;
-  padding:.8rem; font:.75rem/1.5 'JetBrains Mono',ui-monospace,monospace;
-  overflow-x:auto; max-height:22rem; white-space:pre-wrap; }
-.row { display:flex; gap:.6rem; flex-wrap:wrap; align-items:center; }
-.topbar { display:flex; justify-content:space-between; align-items:center; gap:1rem; }
-.qrbox { display:flex; gap:1.5rem; flex-wrap:wrap; align-items:center; }
-.qrbox svg { width:11rem; height:11rem; background:#fff; border-radius:10px; padding:.5rem; }
-.hint { font-size:.78rem; color:var(--muted); }
-.toast { position:fixed; bottom:1.2rem; left:50%; transform:translateX(-50%);
-  background:var(--text); color:var(--bg); border-radius:10px; padding:.6rem 1.1rem;
-  font-size:.85rem; opacity:0; transition:opacity .25s; pointer-events:none; }
-.toast.show { opacity:1; }
-@media print { body{background:#fff;color:#000;padding:0} .noprint{display:none} }
-"""
-
-
-_ICON_SHIELD = ('<svg width="22" height="22" viewBox="0 0 24 24" fill="none" '
-                'stroke="currentColor" stroke-width="1.8" stroke-linecap="round" '
-                'stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 '
-                '4.5-3 8.2-7 10-4-1.8-7-5.5-7-10V6l7-3z"/></svg>')
-
-
-def render_panel():
-    tpl = PANEL_HTML
-    return (tpl.replace("__CSS__", _base_css())
-               .replace("__ICON__", _ICON_SHIELD))
-
+#
+# The dashboard itself is a static app (gui/static/panel.html + panel.css +
+# panel.js, vendored three.js/anime.js/fonts) served by _serve_static. Only
+# the printable invitation is still rendered server-side, because it embeds
+# the QR SVG and language-picked steps directly.
 
 def render_invite(query):
     conf = load_conf(DEPLOY_CONF)
@@ -735,244 +849,23 @@ def render_invite(query):
                  "<strong>%s</strong></p>" % safe_host)
         title, no_host = "Set up Loxone", "No public host configured."
     body = svg if svg else f"<p class='hint'>{no_host}</p>"
-    return (INVITE_HTML.replace("__CSS__", _base_css())
-            .replace("__TITLE__", title)
+    return (INVITE_HTML.replace("__TITLE__", title)
             .replace("__QR__", body)
             .replace("__STEPS__", steps))
 
 
-PANEL_HTML = """<!DOCTYPE html>
-<html lang="de"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LoxProx Panel</title><style>__CSS__</style></head>
-<body><main>
-<div class="topbar"><h1 style="display:flex;align-items:center;gap:.5rem">__ICON__ LoxProx Panel</h1>
-<div class="row noprint"><button id="langBtn"></button>
-<a href="/invite" target="_blank"><button data-i18n="invite"></button></a></div></div>
-
-<h2 data-i18n="h_status"></h2>
-<div class="grid" id="tiles"></div>
-
-<h2 data-i18n="h_qr"></h2>
-<div class="card qrbox"><div id="qrHolder"><span class="hint" data-i18n="qr_none"></span></div>
-<div style="flex:1;min-width:14rem"><div class="hint" id="qrModeLine"></div>
-<label data-i18n="qr_host"></label><div class="row"><input id="qrHost" style="max-width:18rem">
-<button id="qrSave" data-i18n="save"></button>
-<button id="qrCopy" data-i18n="copy_link"></button></div>
-<p class="hint" data-i18n="qr_note"></p></div></div>
-
-<h2 data-i18n="h_bans"></h2>
-<div class="card"><table id="banTable"><thead><tr><th>IP</th><th data-i18n="t_origin"></th>
-<th data-i18n="t_scenario"></th><th data-i18n="t_duration"></th><th></th></tr></thead>
-<tbody></tbody></table>
-<div class="row" style="margin-top:.7rem"><input id="unbanIp" placeholder="1.2.3.4" style="max-width:14rem">
-<button id="unbanBtn" class="danger" data-i18n="unban"></button></div></div>
-
-<h2 data-i18n="h_actions"></h2>
-<div class="card"><div class="row" id="actionRow">
-<button class="danger" data-restart="nginx">nginx</button>
-<button class="danger" data-restart="crowdsec">CrowdSec</button>
-<button class="danger" data-restart="crowdsec-firewall-bouncer">Bouncer</button>
-<button class="danger" data-restart="frpc" id="frpcBtn" hidden>frpc</button>
-<button id="renewBtn" data-i18n="renew"></button>
-<button id="alertBtn" data-i18n="test_alert"></button></div>
-<p class="hint" data-i18n="actions_note"></p></div>
-
-<h2 data-i18n="h_config"></h2>
-<div class="card"><div id="cfgForm" class="grid" style="grid-template-columns:repeat(auto-fill,minmax(16rem,1fr))"></div>
-<div class="row" style="margin-top:1rem"><button id="cfgSave" data-i18n="save_cfg"></button>
-<button id="applyBtn" class="primary" data-i18n="apply"></button></div>
-<p class="hint" data-i18n="cfg_note"></p><pre id="jobLog" hidden></pre></div>
-
-<h2 data-i18n="h_logs"></h2>
-<div class="card"><div class="row"><select id="logSel"></select>
-<button id="logBtn" data-i18n="load_log"></button></div><pre id="logView" hidden></pre></div>
-</main>
-<div class="toast" id="toast"></div>
-<script>
-"use strict";
-const I18N = {
- de:{invite:"Einladung öffnen",h_status:"Status",h_qr:"Familien-Einladung",
-  qr_none:"Kein QR verfügbar", qr_host:"Öffentliche Adresse (Host[:Port])",
-  save:"Speichern",copy_link:"Link kopieren",
-  qr_note:"Der QR-Code enthält nur die Adresse — nie Zugangsdaten. Jedes Familienmitglied nutzt eigenen Miniserver-Benutzer.",
-  h_bans:"Aktive Sperren (CrowdSec)",t_origin:"Quelle",t_scenario:"Szenario",t_duration:"Dauer",
-  unban:"IP entsperren",h_actions:"Aktionen",renew:"TLS-Zertifikat erneuern",
-  test_alert:"Discord-Testalarm",actions_note:"Neustarts unterbrechen aktive Verbindungen kurz.",
-  h_config:"Konfiguration",save_cfg:"Konfiguration speichern",apply:"Anwenden (deploy.sh)",
-  cfg_note:"Speichern schreibt /etc/loxprox/deploy.conf (mit Backup). Erst 'Anwenden' aktiviert Änderungen. Netz-Grundwerte (GATEWAY_IP, LAN_SUBNET, SSH) nur per SSH.",
-  h_logs:"Logs",load_log:"Anzeigen",
-  svc:"Dienste",cert:"TLS-Zertifikat",days:"Tage übrig",ms:"Miniserver",reach:"erreichbar",
-  unreach:"NICHT erreichbar",bans:"Sperren aktiv",appsec:"AppSec heute",backup:"Letztes Backup",
-  hours_ago:"h alt",sys:"System",mode:"Modus",no_cert:"kein Zertifikat",
-  confirm_restart:"Dienst wirklich neu starten: ",confirm_unban:"IP entsperren: ",
-  confirm_apply:"deploy.sh jetzt ausführen?",need_pw:"Passwort (X-LoxProx-Auth)",
-  job_running:"Job läuft…",done:"Fertig",failed:"Fehlgeschlagen"},
- en:{invite:"Open invitation",h_status:"Status",h_qr:"Family invitation",
-  qr_none:"No QR available",qr_host:"Public address (host[:port])",
-  save:"Save",copy_link:"Copy link",
-  qr_note:"The QR encodes only the address — never credentials. Give each family member their own Miniserver user.",
-  h_bans:"Active bans (CrowdSec)",t_origin:"Origin",t_scenario:"Scenario",t_duration:"Duration",
-  unban:"Unban IP",h_actions:"Actions",renew:"Renew TLS certificate",
-  test_alert:"Discord test alert",actions_note:"Restarts briefly interrupt active connections.",
-  h_config:"Configuration",save_cfg:"Save configuration",apply:"Apply (deploy.sh)",
-  cfg_note:"Save writes /etc/loxprox/deploy.conf (backed up first). Only 'Apply' activates changes. Core network keys (GATEWAY_IP, LAN_SUBNET, SSH) are SSH-only.",
-  h_logs:"Logs",load_log:"Show",
-  svc:"Services",cert:"TLS certificate",days:"days left",ms:"Miniserver",reach:"reachable",
-  unreach:"NOT reachable",bans:"active bans",appsec:"AppSec today",backup:"Last backup",
-  hours_ago:"h old",sys:"System",mode:"Mode",no_cert:"no certificate",
-  confirm_restart:"Really restart service: ",confirm_unban:"Unban IP: ",
-  confirm_apply:"Run deploy.sh now?",need_pw:"Password (X-LoxProx-Auth)",
-  job_running:"Job running…",done:"Done",failed:"Failed"}};
-let lang = localStorage.getItem("lp-lang") || "de";
-let authRequired = false;
-const $ = id => document.getElementById(id);
-const t = k => (I18N[lang][k] || k);
-function applyLang(){
-  document.querySelectorAll("[data-i18n]").forEach(el => el.textContent = t(el.dataset.i18n));
-  $("langBtn").textContent = lang === "de" ? "EN" : "DE";
-  document.documentElement.lang = lang;
-}
-$("langBtn").onclick = () => { lang = lang === "de" ? "en" : "de";
-  localStorage.setItem("lp-lang", lang); applyLang(); refresh(); };
-function toast(msg){ const el=$("toast"); el.textContent=msg; el.classList.add("show");
-  setTimeout(()=>el.classList.remove("show"), 2600); }
-function hdrs(){
-  const h = {"Content-Type":"application/json","X-LoxProx-Gui":"1"};
-  if (authRequired){
-    let pw = sessionStorage.getItem("lp-pw");
-    if (!pw){ pw = prompt(t("need_pw")) || ""; sessionStorage.setItem("lp-pw", pw); }
-    h["X-LoxProx-Auth"] = pw;
-  }
-  return h;
-}
-async function post(url, body){
-  const res = await fetch(url, {method:"POST", headers:hdrs(), body:JSON.stringify(body||{})});
-  if (res.status === 401){ sessionStorage.removeItem("lp-pw"); toast("401"); }
-  return res.json();
-}
-function tile(label, value, cls){
-  return `<div class="card tile ${cls||""}"><div class="label">${label}</div>` +
-         `<div class="value"><span class="dot"></span><span>${value}</span></div></div>`;
-}
-function esc(s){ const d=document.createElement("div"); d.textContent=String(s); return d.innerHTML; }
-async function refresh(){
-  const res = await fetch("/api/status").then(r=>r.json()).catch(()=>null);
-  if (!res || !res.ok) return;
-  const s = res.status, tiles = [];
-  const badSvc = Object.entries(s.services).filter(([,v]) => v !== "active");
-  tiles.push(tile(t("svc"), badSvc.length ? esc(badSvc.map(([k,v])=>k+": "+v).join(", "))
-    : "OK", badSvc.length ? "bad" : "ok"));
-  if (s.cert_days === null) tiles.push(tile(t("cert"), t("no_cert"), s.mode==="tls"?"warn":""));
-  else tiles.push(tile(t("cert"), s.cert_days + " " + t("days"),
-    s.cert_days < 7 ? "bad" : (s.cert_days < 21 ? "warn" : "ok")));
-  if (s.miniserver !== null) tiles.push(tile(t("ms"),
-    s.miniserver ? t("reach") : t("unreach"), s.miniserver ? "ok" : "bad"));
-  tiles.push(tile(t("bans"), s.decisions.count, s.decisions.count > 0 ? "warn" : "ok"));
-  tiles.push(tile("AppSec", s.appsec.hits + " (" + s.appsec.ips + " IPs)",
-    s.appsec.hits ? "warn" : "ok"));
-  tiles.push(tile(t("backup"), s.backup ? s.backup.age_hours + " " + t("hours_ago")
-    : "—", s.backup && s.backup.age_hours < 26 ? "ok" : "bad"));
-  const sy = s.system;
-  tiles.push(tile(t("sys"), `disk ${sy.disk_pct??"?"}% · mem ${sy.mem_pct??"?"}% · load ${sy.load??"?"}`,
-    (sy.disk_pct > 85 || sy.mem_pct > 90) ? "warn" : "ok"));
-  tiles.push(tile(t("mode"), s.mode, ""));
-  $("tiles").innerHTML = tiles.join("");
-  $("frpcBtn").hidden = s.mode !== "tunnel";
-  const tb = $("banTable").querySelector("tbody");
-  tb.innerHTML = s.decisions.items.map(d =>
-    `<tr><td>${esc(d.ip)}</td><td>${esc(d.origin)}</td><td>${esc(d.scenario)}</td>` +
-    `<td>${esc(d.duration)}</td><td><button class="danger" data-unban="${esc(d.ip)}">×</button></td></tr>`
-  ).join("") || `<tr><td colspan="5" class="hint">—</td></tr>`;
-  tb.querySelectorAll("[data-unban]").forEach(b => b.onclick = () => unban(b.dataset.unban));
-  if (s.job && s.job.running) pollJob(s.job.id);
-}
-async function loadConfig(){
-  const res = await fetch("/api/config").then(r=>r.json());
-  if (!res.ok) return;
-  authRequired = res.auth_required;
-  $("qrHost").value = res.qr_host || "";
-  $("qrModeLine").textContent = "Mode: " + res.qr_mode;
-  if (res.qr_host) $("qrHolder").innerHTML =
-    `<img src="/qr.svg?host=${encodeURIComponent(res.qr_host)}" alt="QR" style="width:11rem;height:11rem;background:#fff;border-radius:10px;padding:.4rem">`;
-  const form = $("cfgForm"); form.innerHTML = "";
-  Object.entries(res.config).forEach(([k,v]) => {
-    const wrap = document.createElement("div");
-    wrap.innerHTML = `<label>${k}</label><input data-key="${k}">`;
-    wrap.querySelector("input").value = Array.isArray(v) ? v : v;
-    form.appendChild(wrap);
-  });
-}
-async function unban(ip){
-  if (!ip || !confirm(t("confirm_unban") + ip)) return;
-  const res = await post("/api/unban", {ip});
-  toast(res.ok ? t("done") : (res.error || t("failed"))); refresh();
-}
-$("unbanBtn").onclick = () => unban($("unbanIp").value.trim());
-document.querySelectorAll("[data-restart]").forEach(b => b.onclick = async () => {
-  const svc = b.dataset.restart;
-  if (!confirm(t("confirm_restart") + svc)) return;
-  const res = await post("/api/restart", {service: svc});
-  toast((res.ok ? t("done") : t("failed")) + " — " + svc + " " + (res.state||"")); refresh();
-});
-$("alertBtn").onclick = async () => { const r = await post("/api/test-alert");
-  toast(r.ok ? t("done") : t("failed")); };
-$("renewBtn").onclick = async () => { const r = await post("/api/renew-tls");
-  if (r.ok) pollJob(r.job_id); else toast(r.error || t("failed")); };
-$("applyBtn").onclick = async () => {
-  if (!confirm(t("confirm_apply"))) return;
-  const r = await post("/api/apply");
-  if (r.ok) pollJob(r.job_id); else toast(r.error || t("failed"));
-};
-$("cfgSave").onclick = async () => {
-  const changes = {};
-  $("cfgForm").querySelectorAll("input[data-key]").forEach(i => changes[i.dataset.key] = i.value);
-  const res = await post("/api/config", {changes});
-  if (res.ok) toast(t("done") + " → " + res.hint);
-  else toast(JSON.stringify(res.errors || res.error));
-};
-$("qrSave").onclick = async () => {
-  const res = await post("/api/qr-host", {host: $("qrHost").value.trim()});
-  toast(res.ok ? t("done") : (res.error || t("failed"))); loadConfig();
-};
-$("qrCopy").onclick = () => {
-  const h = $("qrHost").value.trim();
-  if (h) { navigator.clipboard.writeText("loxone://ms?host=" + h); toast(t("done")); }
-};
-let jobTimer = null;
-function pollJob(id){
-  if (jobTimer) return;
-  $("jobLog").hidden = false;
-  jobTimer = setInterval(async () => {
-    const res = await fetch("/api/job/" + id).then(r=>r.json()).catch(()=>null);
-    if (!res || !res.ok){ clearInterval(jobTimer); jobTimer = null; return; }
-    $("jobLog").textContent = "[" + res.job.name + " · " + res.job.elapsed + "s]\\n" + (res.log||"");
-    $("jobLog").scrollTop = $("jobLog").scrollHeight;
-    if (!res.job.running){ clearInterval(jobTimer); jobTimer = null;
-      toast(res.job.rc === 0 ? t("done") : t("failed") + " (rc=" + res.job.rc + ")"); refresh(); }
-  }, 2000);
-}
-const LOGS = ["nginx-error","nginx-access","appsec","watchdog","tunnel-watchdog","monitor","deploy","gui"];
-$("logSel").innerHTML = LOGS.map(l => `<option>${l}</option>`).join("");
-$("logBtn").onclick = async () => {
-  const res = await fetch("/api/log/" + $("logSel").value).then(r=>r.json());
-  $("logView").hidden = false;
-  $("logView").textContent = res.ok ? res.lines : (res.error || "?");
-};
-applyLang(); loadConfig(); refresh(); setInterval(refresh, 10000);
-</script></body></html>
-"""
-
 INVITE_HTML = """<!DOCTYPE html>
 <html lang="de"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>__TITLE__</title><style>__CSS__</style></head>
-<body><main style="max-width:34rem">
-<h1>__TITLE__</h1>
-<div class="card" style="margin-top:1rem;text-align:center">__QR__</div>
-<div class="card" style="margin-top:1rem">__STEPS__</div>
-<div class="row noprint" style="margin-top:1rem">
-<button onclick="window.print()">Drucken / Print</button>
+<title>__TITLE__</title>
+<link rel="stylesheet" href="/static/panel.css">
+<script defer src="/static/invite.js"></script></head>
+<body class="invite-page"><main class="invite-main">
+<h1 class="invite-title">__TITLE__</h1>
+<div class="card invite-qr">__QR__</div>
+<div class="card invite-steps">__STEPS__</div>
+<div class="row noprint invite-actions">
+<button id="printBtn">Drucken / Print</button>
 <a href="/invite?lang=de"><button>DE</button></a>
 <a href="/invite?lang=en"><button>EN</button></a>
 </div></main></body></html>
@@ -1009,6 +902,8 @@ def main():
     server.conf = conf
     server.allowed_hosts = build_allowed_hosts(conf)
     signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
+    HISTORY.load(HISTORY_FILE)
+    threading.Thread(target=history_loop, daemon=True).start()
     print(f"LoxProx Panel listening on :{port} "
           f"(hosts: {', '.join(sorted(server.allowed_hosts))})")
     try:

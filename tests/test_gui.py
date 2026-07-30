@@ -1,6 +1,7 @@
 """Unit tests for gui/loxprox-gui.py pure logic (no root, no network, no subprocess)."""
 
 import importlib.util
+import json
 import os
 import sys
 
@@ -149,3 +150,126 @@ def test_update_conf_text_roundtrip_parses_back():
     conf = gui.parse_shell_conf(out)
     assert conf["LOXONE_IP"] == "9.9.9.9"
     assert conf["TLS_DOMAIN"] == "x.example"
+
+
+def test_validate_changes_cidr_array_accepts_raw_bash_form():
+    # The config editor round-trips the raw KEY=("a" "b") value from
+    # parse_shell_conf; the validator must accept it unchanged.
+    clean, errors = gui.validate_changes(
+        {"CROWDSEC_WHITELIST_IPS": '("192.168.1.0/24" "10.0.0.5")'})
+    assert errors == {}
+    assert clean["CROWDSEC_WHITELIST_IPS"] == ["192.168.1.0/24", "10.0.0.5"]
+    clean, errors = gui.validate_changes({"CROWDSEC_WHITELIST_IPS": "()"})
+    assert errors == {}
+    assert clean["CROWDSEC_WHITELIST_IPS"] == []
+
+
+# ------------------------------------------------------------- static assets
+
+@pytest.mark.parametrize("rel,ok", [
+    ("panel.html", True),
+    ("panel.css", True),
+    ("vendor/three.module.min.js", True),
+    ("fonts/inter-var.woff2", True),
+    ("../loxprox-gui.py", False),          # traversal out of the asset dir
+    ("vendor/../../loxprox-gui.py", False),
+    ("panel.html/../../loxprox-gui.py", False),
+    ("evil.py", False),                    # extension not allowlisted
+    ("panel", False),
+])
+def test_safe_static_path_containment(tmp_path, rel, ok):
+    base = tmp_path / "static"
+    for p in ("panel.html", "panel.css", "vendor/three.module.min.js",
+              "fonts/inter-var.woff2", "evil.py", "panel"):
+        f = base / p
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("x")
+    (tmp_path / "loxprox-gui.py").write_text("x")
+    resolved = gui.safe_static_path(rel, base_dir=str(base))
+    if ok:
+        assert resolved is not None and resolved.startswith(str(base))
+    else:
+        assert resolved is None
+
+
+def test_repo_static_dir_ships_all_referenced_assets():
+    # panel.html/panel.css/panel.js reference each other and the vendored
+    # files by absolute /static/ URL — every referenced file must exist.
+    import re
+    static = os.path.join(os.path.dirname(_GUI_PATH), "static")
+    refs = set()
+    for name in ("panel.html", "panel.css", "panel.js"):
+        with open(os.path.join(static, name), encoding="utf-8") as fh:
+            refs.update(re.findall(r"/static/([A-Za-z0-9_./-]+)", fh.read()))
+    assert refs, "no /static/ references found — parsing broke?"
+    missing = [r for r in sorted(refs)
+               if not os.path.isfile(os.path.join(static, r))]
+    assert not missing, f"referenced but not shipped: {missing}"
+
+
+def test_vendored_bundles_relative_imports_are_shipped():
+    # ESM vendor bundles may import sibling files (three.module.min.js pulls
+    # ./three.core.min.js since r167) — a missing sibling is a blank panel.
+    import glob
+    import re
+    vendor = os.path.join(os.path.dirname(_GUI_PATH), "static", "vendor")
+    bundles = glob.glob(os.path.join(vendor, "*.js"))
+    assert bundles, "vendor dir is empty — assets not committed?"
+    missing = []
+    for bundle in bundles:
+        with open(bundle, encoding="utf-8") as fh:
+            for rel in re.findall(r'from\s*"(\./[^"]+)"', fh.read()):
+                if not os.path.isfile(os.path.join(vendor, rel[2:])):
+                    missing.append(f"{os.path.basename(bundle)} -> {rel}")
+    assert not missing, f"vendor bundle imports a file that is not shipped: {missing}"
+
+
+# ----------------------------------------------------------------- history
+
+def test_log_growth_counter_counts_and_handles_rotation(tmp_path):
+    log = tmp_path / "access.log"
+    log.write_text("one\ntwo\n")
+    counter = gui.LogGrowthCounter(str(log))
+    assert counter.delta() == 0          # first call only anchors the offset
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write("three\nfour\nfive\n")
+    assert counter.delta() == 3
+    assert counter.delta() == 0          # nothing new
+    log.write_text("rotated\n")          # shrunk file = rotation
+    assert counter.delta() == 0          # re-anchors silently
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write("six\n")
+    assert counter.delta() == 1
+
+
+def test_log_growth_counter_missing_file(tmp_path):
+    counter = gui.LogGrowthCounter(str(tmp_path / "nope.log"))
+    assert counter.delta() == 0
+
+
+def test_history_load_prunes_old_and_garbage(tmp_path):
+    now = 1_800_000_000
+    fresh = {"t": now - 60, "req": 5}
+    stale = {"t": now - gui.HISTORY_MAX * gui.HISTORY_INTERVAL - 10, "req": 1}
+    path = tmp_path / "hist.json"
+    path.write_text(json.dumps([stale, fresh, "garbage", {"no_t": 1}]))
+    hist = gui.History()
+    hist.load(str(path), now=now)
+    assert hist.snapshot() == [fresh]
+
+
+def test_history_save_roundtrip(tmp_path):
+    hist = gui.History()
+    hist.append({"t": 1, "req": 2})
+    path = tmp_path / "sub" / "hist.json"
+    hist.save(str(path))
+    again = gui.History()
+    again.load(str(path), now=2)
+    assert again.snapshot() == [{"t": 1, "req": 2}]
+
+
+def test_history_ring_caps_at_maxlen():
+    hist = gui.History(maxlen=3)
+    for i in range(5):
+        hist.append({"t": i})
+    assert [p["t"] for p in hist.snapshot()] == [2, 3, 4]
