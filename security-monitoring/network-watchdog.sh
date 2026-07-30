@@ -16,8 +16,11 @@
 #
 # HOW IT WORKS:
 #   Every 60 seconds it runs five local health checks (gateway ping, DNS,
-#   nginx localhost, interface IP, dhclient anomaly). If checks fail for
-#   two consecutive cycles it:
+#   nginx localhost, interface IP, dhclient anomaly). A 502/504 from the local
+#   nginx counts as HEALTHY — nginx answered, so the listener is alive and only
+#   the Miniserver behind it is down; that case raises its own alert and never
+#   heals, restarts or reboots anything. If checks fail for two consecutive
+#   cycles it:
 #     1. Attempts to heal by restarting nginx, then networking.service
 #     2. If healing fails, writes a flag file, sends a Discord alert,
 #        waits 30 s, and reboots the VM.
@@ -72,6 +75,9 @@ FAILURE_COUNT_FILE="$STATE_DIR/watchdog-failure-count"
 # F4: set once when we suppress a reboot for an upstream-only outage, so we
 # alert exactly once instead of every 60 s while the ISP/DNS is down.
 UPSTREAM_FLAG="$STATE_DIR/.watchdog-upstream-alerted"
+# H5: same one-shot idiom for a Miniserver outage — the gateway itself is fine,
+# so this alerts once and is cleared (with a recovery notice) when it returns.
+BACKEND_FLAG="$STATE_DIR/.watchdog-backend-alerted"
 
 # Anti-reboot-loop protection
 MAX_REBOOTS_PER_HOUR=2
@@ -156,8 +162,38 @@ check_dns() {
     fi
 }
 
+nginx_local_status() {
+    # curl still prints its %{http_code} template on a failed transfer, so never
+    # append a fallback with `|| echo` — that concatenates two codes. Normalise
+    # anything that is not a 3-digit status to 000 (= nginx did not answer).
+    local code
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$NGINX_LOCAL" 2>/dev/null) || true
+    [[ "$code" =~ ^[0-9]{3}$ ]] || code="000"
+    echo "$code"
+}
+
 check_nginx_local() {
-    curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$NGINX_LOCAL" 2>/dev/null | grep -qE "^(200|301|302|401|403)$"
+    # H5: 502/504 means nginx ACCEPTED the connection and answered — the listener
+    # is provably alive and the Miniserver behind it is what is down. Treating
+    # that as an nginx failure made every Miniserver outage escalate into a heal
+    # and then a gateway reboot, twice an hour, for a fault a reboot cannot fix.
+    # In TLS mode the plain-HTTP probe hits error_page 497 and gets the 301.
+    case "$(nginx_local_status)" in
+        200|301|302|401|403|502|504) return 0 ;;
+        *)                           return 1 ;;
+    esac
+}
+
+# Separate condition, never a health check: nginx is up but the proxied
+# Miniserver is not answering. Alert-only — never heals, restarts or reboots.
+# "unknown" when nginx itself did not answer: that is check_nginx_local's
+# business, and must not be misread as the Miniserver having recovered.
+backend_state() {
+    case "$(nginx_local_status)" in
+        502|504) echo "down" ;;
+        000)     echo "unknown" ;;
+        *)       echo "up" ;;
+    esac
 }
 
 check_interface_ip() {
@@ -375,6 +411,30 @@ main() {
         # Already logged inside function
         : # anomaly noted but does not count as a health-check failure
     fi
+
+    # 4b. H5: Miniserver reachability. This is deliberately NOT part of "$failed"
+    # — a dead Miniserver is a backend fault, and healing or rebooting the gateway
+    # for it only drops every live session of a working gateway.
+    case "$(backend_state)" in
+        up)
+            if [[ -f "$BACKEND_FLAG" ]]; then
+                rm -f "$BACKEND_FLAG"
+                send_discord "WARNING" "Miniserver Reachable Again" \
+                    "The gateway is proxying to the Miniserver again — the full path is healthy. No action needed."
+                log "BACKEND: Miniserver reachable again, recovery reported"
+            fi
+            ;;
+        down)
+            if [[ ! -f "$BACKEND_FLAG" ]]; then
+                : > "$BACKEND_FLAG"
+                send_discord "HIGH" "Miniserver Unreachable — Gateway Healthy" \
+                    "nginx on the gateway answers on ${NGINX_LOCAL} but returns 502/504, which means the listener is alive and the Loxone Miniserver behind it is not responding.\n\nThe gateway is NOT being restarted or rebooted — that would not fix a backend fault and would drop every live session once the Miniserver returns.\n\nCheck:\n1. Miniserver powered on and on the network (ping ${LOXONE_IP:-<LOXONE_IP unset>})\n2. Miniserver web interface reachable from the LAN\n3. Miniserver rebooting after a Loxone Config update — this clears itself\n\nThis alert fires once; recovery will be reported when the Miniserver answers again."
+                log "BACKEND: nginx answers 502/504 — Miniserver down; alerting, no heal/reboot"
+            else
+                log "BACKEND: Miniserver still unreachable; alert already sent"
+            fi
+            ;;
+    esac
 
     # 5. All healthy?
     if [[ ${#failed[@]} -eq 0 ]]; then

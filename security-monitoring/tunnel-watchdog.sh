@@ -22,7 +22,11 @@
 #     1. frpc service active?
 #     2. Public path answering? (curl https://TUNNEL_PUBLIC_HOST/ — any HTTP
 #        status except 000/502/503/504 counts as up, because a 401/403/404
-#        still proves relay + tunnel + gateway nginx are all alive.)
+#        still proves relay + tunnel + gateway nginx are all alive. A public
+#        502/504 is cross-checked against the LOCAL nginx first: when the
+#        gateway itself is answering 502, the Miniserver is down and the relay
+#        is merely forwarding that 502 — the tunnel is fine and frpc is left
+#        alone rather than restarted, which would kill live WebSockets.)
 #   Two consecutive failed cycles → restart frpc, wait, re-check. If still
 #   down → one CRITICAL Discord alert (rate-limited to 1/hour), then keep
 #   retrying every cycle. Recovery is reported once when checks pass again.
@@ -55,6 +59,9 @@ DISCORD="${DISCORD_ALERT_PATH:-$SCRIPT_DIR/discord-alert.sh}"
 ENABLE_TUNNEL="${ENABLE_TUNNEL:-false}"
 TUNNEL_PUBLIC_HOST="${TUNNEL_PUBLIC_HOST:-}"
 PROBE_TIMEOUT="${TUNNEL_PROBE_TIMEOUT:-10}"
+# Same local listener the network watchdog probes — used to tell a broken
+# tunnel apart from a Miniserver outage the relay is faithfully forwarding.
+NGINX_LOCAL="${WATCHDOG_NGINX_URL:-http://127.0.0.1:1080/}"
 
 # ── State / Logging ───────────────────────────────────────────────────────────
 STATE_DIR="/var/lib/loxprox"
@@ -87,15 +94,44 @@ check_frpc_service() {
     systemctl is-active --quiet frpc 2>/dev/null
 }
 
+http_status() {
+    # curl still prints its %{http_code} template on a failed transfer, so never
+    # append a fallback with `|| echo` — that concatenates two codes into
+    # "000000", which then matches no case branch. Normalise instead.
+    local url="$1" timeout="$2" code
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time "$timeout" "$url" 2>/dev/null) || true
+    [[ "$code" =~ ^[0-9]{3}$ ]] || code="000"
+    echo "$code"
+}
+
+# M11: is the gateway's own nginx returning 502/504 (Miniserver down)?
+backend_down_locally() {
+    case "$(http_status "$NGINX_LOCAL" 5)" in
+        502|504) return 0 ;;
+        *)       return 1 ;;
+    esac
+}
+
 check_public_path() {
     # No public host configured → nothing to probe, treat as healthy.
     [[ -z "$TUNNEL_PUBLIC_HOST" ]] && return 0
     local code
-    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time "$PROBE_TIMEOUT" \
-        "https://${TUNNEL_PUBLIC_HOST}/" 2>/dev/null || echo "000")
+    code=$(http_status "https://${TUNNEL_PUBLIC_HOST}/" "$PROBE_TIMEOUT")
     case "$code" in
-        000|502|503|504) return 1 ;;   # no answer / relay up but tunnel dead
-        *)               return 0 ;;   # any real answer proves the full path
+        502|504)
+            # M11: the relay proxies the gateway's own 502 straight through, so a
+            # 502 at the public edge does not by itself prove a transport failure.
+            # If the local nginx is answering 502 too, the Miniserver is the fault
+            # — restarting frpc would drop every live WebSocket for nothing, and
+            # the network watchdog already alerts on the backend outage.
+            if backend_down_locally; then
+                log "Public path returned $code but local nginx returns 502/504 too — Miniserver down, tunnel transport OK, not restarting frpc"
+                return 0
+            fi
+            return 1
+            ;;
+        000|503) return 1 ;;   # no answer / relay up but tunnel dead
+        *)       return 0 ;;   # any real answer proves the full path
     esac
 }
 

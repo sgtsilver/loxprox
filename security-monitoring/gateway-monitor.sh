@@ -2,8 +2,8 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 # LoxProx — Real-Time Security Monitor
 # ═══════════════════════════════════════════════════════════════════════════════
-# Watches nginx access logs, CrowdSec decisions, auth attempts, and system
-# anomalies. Sends Discord alerts on detection.
+# Watches nginx access logs, CrowdSec decisions, auth attempts, system
+# anomalies, and TLS certificate expiry. Sends Discord alerts on detection.
 #
 # Run manually or via systemd timer every 60s.
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -24,6 +24,14 @@ DISCORD="${DISCORD_ALERT_PATH:-$SCRIPT_DIR/discord-alert.sh}"
 LOG_FILE="/var/log/loxprox-monitor.log"
 STATE_DIR="/var/lib/loxprox"
 ALERT_COOLDOWN=300  # 5 min between identical alert types
+CERT_ALERT_COOLDOWN=86400  # H13: cert expiry is a slow-moving fact — 1 alert/day/level
+
+# H13: paths deploy.sh writes for TLS mode. The cert files are deliberately KEPT
+# when ENABLE_TLS is toggled off, so the marker deploy.sh brackets the
+# ssl_certificate directives with — not the file's existence — is what says TLS
+# is actually live.
+TLS_CERT="${LOXPROX_TLS_CERT:-/etc/loxprox/tls/fullchain.pem}"
+NGINX_SITE="${LOXPROX_NGINX_SITE:-/etc/nginx/sites-available/loxone}"
 
 mkdir -p "$STATE_DIR"
 
@@ -43,11 +51,12 @@ record_alert_time() {
 
 can_alert() {
     local key="$1"
+    local cooldown="${2:-$ALERT_COOLDOWN}"
     local last
     last=$(last_alert_time "$key")
     local now
     now=$(date +%s)
-    [ $((now - last)) -gt $ALERT_COOLDOWN ]
+    [ $((now - last)) -gt "$cooldown" ]
 }
 
 send_alert() {
@@ -55,8 +64,9 @@ send_alert() {
     local title="$2"
     local message="$3"
     local key="$4"
-    
-    if can_alert "$key"; then
+    local cooldown="${5:-$ALERT_COOLDOWN}"
+
+    if can_alert "$key" "$cooldown"; then
         record_alert_time "$key"
         "$DISCORD" "$severity" "$title" "$message" || true
         log "ALERT [$severity]: $title"
@@ -171,12 +181,15 @@ check_appsec_detections() {
     [ "$current_pos" -le "$last_pos" ] && { echo "$current_pos" > "$last_check_file"; return 0; }
     
     local detections
-    detections=$(tail -c +$((last_pos + 1)) "$log" 2>/dev/null | awk '{print $1}' | sort | uniq -c | sort -rn | head -10) || true  # H2-class: SIGPIPE/no-match must not abort
-    
+    # M7: the appsec_evt log_format is `$time_iso8601 $remote_addr "$request" ...`
+    # — field 1 is the timestamp, so aggregating it produced one line per second
+    # instead of a top-offender list. Field 2 is the client IP.
+    detections=$(tail -c +$((last_pos + 1)) "$log" 2>/dev/null | awk '{print $2}' | sort | uniq -c | sort -rn | head -10) || true  # H2-class: SIGPIPE/no-match must not abort
+
     echo "$current_pos" > "$last_check_file"
-    
+
     if [ -n "$detections" ]; then
-        send_alert "WARNING" "AppSec Detections" "New AppSec WAF detections:\n$detections" "appsec_detections"
+        send_alert "WARNING" "AppSec Detections" "New AppSec WAF detections (hits IP):\n$detections" "appsec_detections"
     fi
 }
 
@@ -203,6 +216,48 @@ check_system_resources() {
     fi
 }
 
+check_cert_expiry() {
+    # H13: acme.sh renews via cron and reports failures to a mailbox that does not
+    # exist on this box (no MTA), so a broken renewal is otherwise silent until the
+    # cert expires and every family phone stops connecting. Quiet no-op unless the
+    # live site is actually in TLS mode.
+    grep -q '^[[:space:]]*# LOXPROX-TLS-BEGIN[[:space:]]*$' "$NGINX_SITE" 2>/dev/null || return 0
+    [ -f "$TLS_CERT" ] || return 0
+
+    local end_date
+    end_date=$(openssl x509 -enddate -noout -in "$TLS_CERT" 2>/dev/null | cut -d= -f2) || true
+    [ -n "$end_date" ] || return 0
+
+    local expiry_epoch
+    expiry_epoch=$(date -d "$end_date" +%s 2>/dev/null) || true
+    [ -n "$expiry_epoch" ] || return 0
+
+    local now days
+    now=$(date +%s)
+    days=$(( (expiry_epoch - now) / 86400 ))
+
+    local detail
+    detail="Certificate: $TLS_CERT\nExpires: $end_date\n\n"
+    detail+="acme.sh renews at 30 days left and has no way to tell you when it fails.\nCheck the renewal cron and force a renewal:\n"
+    detail+="  crontab -l | grep acme\n"
+    detail+="  sudo bash deploy.sh --renew-tls\n"
+    detail+="Common causes: the WAN:80 → gateway:80 forward was removed, DNS no longer\npoints at your WAN IP, or the ACME challenge listener was overwritten."
+
+    if [ "$days" -lt 0 ]; then
+        send_alert "CRITICAL" "TLS Certificate EXPIRED" \
+            "The gateway's TLS certificate expired $(( -days )) day(s) ago. Clients get a certificate error and the Loxone apps will refuse to connect.\n\n$detail" \
+            "cert_expired" "$CERT_ALERT_COOLDOWN"
+    elif [ "$days" -lt 7 ]; then
+        send_alert "CRITICAL" "TLS Certificate Expires in ${days}d" \
+            "The gateway's TLS certificate expires in $days day(s) and has not been renewed.\n\n$detail" \
+            "cert_expiry_critical" "$CERT_ALERT_COOLDOWN"
+    elif [ "$days" -lt 21 ]; then
+        send_alert "WARNING" "TLS Certificate Expires in ${days}d" \
+            "The gateway's TLS certificate expires in $days day(s). Automatic renewal should have happened at 30 days — it did not.\n\n$detail" \
+            "cert_expiry_warning" "$CERT_ALERT_COOLDOWN"
+    fi
+}
+
 check_gateway_health() {
     if ! systemctl is-active --quiet nginx; then
         send_alert "CRITICAL" "NGINX DOWN" "nginx service is not running on the gateway." "nginx_down"
@@ -226,6 +281,7 @@ main() {
     check_auth_attempts
     check_appsec_detections
     check_system_resources
+    check_cert_expiry
     
     log "Security monitor cycle completed"
 }
