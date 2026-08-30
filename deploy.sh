@@ -3492,6 +3492,29 @@ EOF
 
     chmod 640 "$GATEWAY_CONFIG_FILE"
     ok "Runtime config written to $GATEWAY_CONFIG_FILE"
+
+    # Version marker (2026-08-30 maintenance decision): make the deployed
+    # release readable on-box instead of inferred. Source of truth is the
+    # VERSION file that local-deployment/push-to-vm.sh packs into the source
+    # tarball (version= / commit= / packaged=); a git checkout falls back to
+    # `git describe`; anything else is marked unknown. Always written, so
+    # test-gateway.sh can assert its presence unconditionally.
+    local version_src="${SCRIPT_DIR:-.}/VERSION"
+    local version_out="$GATEWAY_CONFIG_DIR/VERSION"
+    {
+        if [[ -f "$version_src" ]]; then
+            cat "$version_src"
+        elif command -v git >/dev/null 2>&1 \
+                && git -C "${SCRIPT_DIR:-.}" rev-parse --git-dir >/dev/null 2>&1; then
+            echo "version=$(git -C "${SCRIPT_DIR:-.}" describe --tags --always --dirty 2>/dev/null || echo unknown)"
+            echo "commit=$(git -C "${SCRIPT_DIR:-.}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+        else
+            echo "version=unknown"
+        fi
+        echo "deployed=$(date -Iseconds)"
+    } > "$version_out"
+    chmod 644 "$version_out"
+    ok "Version marker written to $version_out ($(head -1 "$version_out"))"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
