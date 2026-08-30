@@ -640,6 +640,20 @@ test_gui() {
     fi
 }
 
+test_version() {
+    test_header "Version Marker"
+
+    # 2026-08-30: write_runtime_config() always writes /etc/loxprox/VERSION
+    # (from the tarball's VERSION file, git describe, or "unknown"), so a
+    # missing/empty file means the running install predates the marker or the
+    # deploy was interrupted before write_runtime_config.
+    if [[ -s /etc/loxprox/VERSION ]] && grep -q '^version=' /etc/loxprox/VERSION; then
+        pass "Version marker present: $(grep '^version=' /etc/loxprox/VERSION | head -1)"
+    else
+        fail "/etc/loxprox/VERSION missing or malformed — deployed release is not readable on-box (re-run deploy.sh)"
+    fi
+}
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 main() {
@@ -661,6 +675,7 @@ main() {
     test_tunnel
     test_tls
     test_gui
+    test_version
 
     echo ""
     echo "═══════════════════════════════════════════════════════════════════════════════"

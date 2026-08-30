@@ -2590,12 +2590,33 @@ setup_apparmor() {
     systemctl enable apparmor
     systemctl start apparmor
 
-    # Enforce nginx profile if it exists
-    if [[ -f /etc/apparmor.d/usr.sbin.nginx ]]; then
-        aa-enforce /etc/apparmor.d/usr.sbin.nginx
-        ok "AppArmor: nginx profile enforced."
+    # 2026-08-30: ship our own nginx profile — Debian provides none, so the
+    # pre-existing "enforce if present" branch never fired and the documented
+    # AppArmor layer silently did not exist.
+    #
+    # SAFETY GATE: the profile is (re)loaded in COMPLAIN mode on every deploy
+    # unless the operator explicitly sets APPARMOR_NGINX_MODE="enforce" in
+    # deploy.conf. Enforcement waits for a multi-week complain soak covering
+    # at least one ~60-day acme.sh renewal cycle — see docs/adr/0006. The old
+    # behavior (unconditional aa-enforce of any existing profile) could have
+    # flipped a soaking profile to enforce on the next deploy; it is gone.
+    local profile_src="${SCRIPT_DIR:-.}/apparmor/usr.sbin.nginx"
+    local profile_dst="/etc/apparmor.d/usr.sbin.nginx"
+    local aa_mode="${APPARMOR_NGINX_MODE:-complain}"
+
+    if [[ -f "$profile_src" ]]; then
+        install -m 0644 -o root -g root "$profile_src" "$profile_dst"
+        if [[ "$aa_mode" == "enforce" ]]; then
+            aa-enforce "$profile_dst"
+            ok "AppArmor: nginx profile ENFORCED (APPARMOR_NGINX_MODE=enforce)."
+        else
+            aa-complain "$profile_dst"
+            ok "AppArmor: nginx profile loaded in COMPLAIN mode (soak phase — set APPARMOR_NGINX_MODE=\"enforce\" in deploy.conf after the soak; see docs/adr/0006)."
+        fi
+    elif [[ -f "$profile_dst" ]]; then
+        warn "AppArmor: $profile_dst exists but the source tree carries no profile — leaving its mode untouched."
     else
-        warn "AppArmor: nginx profile not found — install 'apparmor-profiles' if needed."
+        warn "AppArmor: no nginx profile available — the AppArmor layer is inactive (Debian ships none)."
     fi
 }
 
@@ -3492,6 +3513,29 @@ EOF
 
     chmod 640 "$GATEWAY_CONFIG_FILE"
     ok "Runtime config written to $GATEWAY_CONFIG_FILE"
+
+    # Version marker (2026-08-30 maintenance decision): make the deployed
+    # release readable on-box instead of inferred. Source of truth is the
+    # VERSION file that local-deployment/push-to-vm.sh packs into the source
+    # tarball (version= / commit= / packaged=); a git checkout falls back to
+    # `git describe`; anything else is marked unknown. Always written, so
+    # test-gateway.sh can assert its presence unconditionally.
+    local version_src="${SCRIPT_DIR:-.}/VERSION"
+    local version_out="$GATEWAY_CONFIG_DIR/VERSION"
+    {
+        if [[ -f "$version_src" ]]; then
+            cat "$version_src"
+        elif command -v git >/dev/null 2>&1 \
+                && git -C "${SCRIPT_DIR:-.}" rev-parse --git-dir >/dev/null 2>&1; then
+            echo "version=$(git -C "${SCRIPT_DIR:-.}" describe --tags --always --dirty 2>/dev/null || echo unknown)"
+            echo "commit=$(git -C "${SCRIPT_DIR:-.}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+        else
+            echo "version=unknown"
+        fi
+        echo "deployed=$(date -Iseconds)"
+    } > "$version_out"
+    chmod 644 "$version_out"
+    ok "Version marker written to $version_out ($(head -1 "$version_out"))"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
