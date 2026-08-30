@@ -292,3 +292,12 @@ GUI_PASSWORD=""
 #   Format: 24-hour clock, local time.
 #   Example: "03:00" = 3 AM. Set to a time when no one uses the Loxone.
 AUTOREBOOT_TIME="03:00"
+
+# AppArmor mode for the shipped nginx profile (apparmor/usr.sbin.nginx).
+#   "complain" (default): profile loaded, violations logged, nothing blocked —
+#     the soak phase. Watch `aa-status` and `journalctl -g apparmor` for
+#     ALLOWED events before even thinking about enforce.
+#   "enforce": only after a multi-week complain soak that covered at least one
+#     ~60-day acme.sh certificate renewal and one full deploy run. See
+#     docs/adr/0006. deploy.sh never enforces on its own.
+APPARMOR_NGINX_MODE="complain"

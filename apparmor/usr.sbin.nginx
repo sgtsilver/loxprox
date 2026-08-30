@@ -1,0 +1,75 @@
+# LoxProx — AppArmor profile for nginx (Debian 12)
+#
+# Installed by deploy.sh:setup_apparmor() to /etc/apparmor.d/usr.sbin.nginx.
+# Debian ships no nginx profile, so this is authored for exactly the gateway's
+# nginx surface: reverse proxy on :1080 (TLS) + ACME listener on :80,
+# CrowdSec AppSec auth_request to 127.0.0.1:7422, logrotate USR1 log reopen,
+# acme.sh-renewed certificates under /etc/loxprox/tls/ (read-only here —
+# acme.sh itself runs unconfined and writes them).
+#
+# MODE: loaded in COMPLAIN mode by default (aa-complain via deploy.sh).
+# Enforcement is gated on APPARMOR_NGINX_MODE="enforce" in deploy.conf and
+# waits for a multi-week complain soak that covers at least one ~60-day
+# acme.sh renewal and one full deploy run. See docs/adr/0006.
+#
+# Containment intent: a compromised nginx must NOT read /etc/loxprox/
+# outside tls/ (deploy.conf holds the Discord webhook + panel password),
+# must not touch /opt/loxprox/, and must not execute anything.
+
+#include <tunables/global>
+
+/usr/sbin/nginx {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+  #include <abstractions/openssl>
+  #include <abstractions/ssl_certs>
+
+  capability chown,
+  capability dac_override,
+  capability kill,
+  capability net_bind_service,
+  capability setgid,
+  capability setuid,
+
+  # master <-> worker signalling; systemd/logrotate signal the master
+  signal (send, receive) peer=/usr/sbin/nginx,
+  signal (receive) peer=unconfined,
+
+  network inet stream,
+  network inet6 stream,
+  network inet dgram,
+  network inet6 dgram,
+  network unix stream,
+  network netlink raw,
+
+  /usr/sbin/nginx mr,
+  /usr/lib/nginx/modules/ r,
+  /usr/lib/nginx/modules/*.so mr,
+
+  # configuration (read-only)
+  /etc/nginx/ r,
+  /etc/nginx/** r,
+  /usr/share/nginx/ r,
+  /usr/share/nginx/** r,
+
+  # GeoIP databases for the geoip/geoip2 dynamic modules
+  /usr/share/GeoIP/ r,
+  /usr/share/GeoIP/** r,
+
+  # TLS material — READ ONLY by design (acme.sh writes renewals, unconfined)
+  /etc/loxprox/tls/ r,
+  /etc/loxprox/tls/** r,
+
+  # ACME HTTP-01 webroot (deploy.sh + acme.sh stage challenges here)
+  /var/www/acme/ r,
+  /var/www/acme/** r,
+
+  # logs — created/reopened on logrotate's USR1
+  /var/log/nginx/ r,
+  /var/log/nginx/** w,
+
+  # runtime state
+  /run/nginx.pid rw,
+  /var/lib/nginx/ r,
+  /var/lib/nginx/** rw,
+}
