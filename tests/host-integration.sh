@@ -164,20 +164,24 @@ t_auditd() {
             note "${rules//$'\n'/$'\n'    }"
         fi
     done
+    note "auditctl -s: $(auditctl -s 2>&1 | tr '\n' ' ')"
     local probe
     for probe in /etc/loxprox/ci-audit-probe /opt/loxprox/ci-audit-probe /etc/apparmor.d/ci-audit-probe; do
         touch "$probe"; rm -f "$probe"
     done
-    sleep 2
-    local pair
+    sleep 3
+    local pair events
     for pair in loxprox_config:/etc/loxprox/ apparmor_config:/etc/apparmor.d/ loxprox_scripts:/opt/loxprox/; do
         key="${pair%%:*}"
-        if ausearch -k "$key" -ts recent 2>/dev/null | grep -q "${pair#*:}ci-audit-probe"; then
+        events=$(ausearch -i -k "$key" 2>&1)
+        if grep -q "ci-audit-probe" <<<"$events"; then
             pass "write under ${pair#*:} produced an audit event (key $key)"
         else
             fail "no audit event for ${pair#*:}ci-audit-probe under key $key"
+            note "ausearch -k $key: $(tail -5 <<<"$events" | tr '\n' ' ')"
         fi
     done
+    [[ $FAILED -eq 0 ]] || note "audit.log tail: $(tail -5 /var/log/audit/audit.log 2>&1 | cut -c1-300 | tr '\n' ' ')"
 }
 
 # ── panel jobs: a deploy started by the panel outlives the panel's unit ──────
@@ -391,6 +395,16 @@ aa_events() {  # kernel AppArmor lines for the nginx profile since the last dmes
         | grep 'apparmor=' | grep 'profile="/usr/sbin/nginx"' || true
 }
 
+aa_summary() {  # one line per distinct event: verdict, operation, object, masks
+    local f
+    while IFS= read -r line; do
+        for f in apparmor operation name peer requested_mask denied_mask signal info; do
+            [[ "$line" =~ $f=\"?([^\" ]*)\"? ]] && printf '%s=%s ' "$f" "${BASH_REMATCH[1]}"
+        done
+        echo
+    done | sort | uniq -c | sort -rn | sed 's/^/      /'
+}
+
 t_nginx_apparmor() {
     section "nginx-extras (Debian 12) — proxied headers + AppArmor profile, complain and enforce"
     command -v docker >/dev/null || { fail "docker missing"; return; }
@@ -406,6 +420,7 @@ t_nginx_apparmor() {
     docker exec "$CTR" bash /workspace/tests/host-integration.sh nginx-container-setup \
         || { fail "container nginx setup failed"; return; }
     note "$(docker exec "$CTR" nginx -v 2>&1); modules: $(docker exec "$CTR" ls /etc/nginx/modules-enabled | tr '\n' ' ')"
+    note "lua-resty-core in the container: $(docker exec "$CTR" sh -c 'ls /usr/share/lua/5.1/resty/core.lua 2>&1; dpkg -l lua-resty-core 2>/dev/null | tail -1')"
 
     # ── Fix 5: proxied response headers (unconfined; independent of AppArmor)
     docker exec "$CTR" nginx
@@ -460,7 +475,7 @@ t_nginx_apparmor() {
     fi
     if grep -q 'apparmor="ALLOWED"' <<<"$events"; then
         pass "control reproduces ALLOWED events with the pre-fix profile ($(grep -c 'apparmor="ALLOWED"' <<<"$events") lines):"
-        grep -oE 'operation="[^"]+"|name="[^"]+"' <<<"$events" | paste - - | sort | uniq -c | sort -rn | head -25 | sed 's/^/      /'
+        aa_summary <<<"$events"
     else
         fail "pre-fix profile produced no ALLOWED events — the control cannot show the fix"
     fi
@@ -475,7 +490,7 @@ t_nginx_apparmor() {
         pass "fixed profile, complain mode: zero ALLOWED events over start/reload/USR1/USR2-upgrade/TLS request/stop"
     else
         fail "fixed profile still logs ALLOWED events:"
-        grep -oE 'operation="[^"]+"|name="[^"]+"|requested_mask="[^"]+"' <<<"$events" | paste - - - | sort | uniq -c | sed 's/^/      /'
+        aa_summary <<<"$events"
     fi
 
     # (c) fixed profile, ENFORCE → nothing denied, every lifecycle step works
@@ -491,7 +506,7 @@ t_nginx_apparmor() {
         pass "enforce: zero DENIED events"
     else
         fail "enforce: DENIED events:"
-        grep -oE 'operation="[^"]+"|name="[^"]+"|requested_mask="[^"]+"' <<<"$events" | paste - - - | sort | uniq -c | sed 's/^/      /'
+        aa_summary <<<"$events"
     fi
 
     apparmor_parser -R "$new_profile" >/dev/null 2>&1

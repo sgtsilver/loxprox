@@ -19,14 +19,17 @@ test_header() {
     echo "━━━ $1 ━━━"
 }
 
+# Counters use an assignment, not ((x++)): ((x++)) returns status 1 while x
+# is 0, so the first `check && pass ... || fail ...` of a run also recorded a
+# bogus failure.
 pass() {
     echo -e "  ${GREEN}✓${NC} $1"
-    ((TESTS_PASSED++))
+    TESTS_PASSED=$((TESTS_PASSED + 1))
 }
 
 fail() {
     echo -e "  ${RED}✗${NC} $1"
-    ((TESTS_FAILED++))
+    TESTS_FAILED=$((TESTS_FAILED + 1))
 }
 
 warn() {
