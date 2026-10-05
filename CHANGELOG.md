@@ -190,6 +190,77 @@ default behavior; every existing install upgrades in place.
   optional steps (`deploy.sh` exit `3`) as a distinct warning, not a
   failure.**
 
+### 2026-10-05 follow-up — merged into the v2.2.0 line (PR #43)
+
+Lands on `main` without a new tag (merges ride the last release line). A
+front-end redesign of the LoxProx Panel; no gateway, firewall, proxy, or API
+behavior changes — every `/api/*` path, method and JSON shape is unchanged,
+and an existing install upgrades in place with a normal `deploy.sh` run.
+
+#### Changed
+
+- **LoxProx Panel redesigned as a calm, status-first ops console.** The
+  overview now answers "is everything OK, and if not, what should I do?":
+  one plain-language summary, then a "what to do" list with the fixing
+  action on each item (restart a stopped service, renew an expiring
+  certificate, check the Miniserver address, open a failed job's log), then
+  dense status tiles and the 24h charts. Neutral light/dark themes with
+  Loxone green only as a restrained accent; no gradients, glass or glow;
+  status is always icon + word, never color alone. DE (default) / EN and
+  the light/dark/auto override carry over.
+- **three.js and anime.js removed.** The particle-shield scene and the
+  vendored `gui/static/vendor/` bundles (~870 KB) are gone; motion is
+  limited to short state transitions and a progress spinner, and
+  `prefers-reduced-motion` disables those. `deploy.sh` already replaces
+  the installed `static/` directory wholesale, so an upgrade deletes the
+  stale bundles (now covered by the deploy integration test, and
+  `test-gateway.sh` checks they are no longer served).
+- **Charts are legible and have text equivalents.** Hand-rolled SVG charts
+  plot real time (gaps stay gaps), show axis values, a one-sentence summary
+  and an hourly "values as a table" view; hover or arrow keys read single
+  values. AppSec hits are now shown per hour as bars.
+- **Real states everywhere.** Loading, "collecting data" (fresh history),
+  failed request vs. empty result, stale data with "last updated" and
+  automatic retry, and background jobs as running / ok / finished with
+  warnings / failed / result unknown (when the apply restarts the panel
+  mid-job).
+- **Config editor** is typed from the server schema with per-field format
+  hints, client-side checks plus server error mapping (error summary and
+  inline messages), a changed-field count, "discard changes", and secrets
+  that are never displayed (leave empty to keep, explicit "remove"). Save
+  sends only changed keys; Apply offers to save unsaved changes first.
+- **Navigation** is four hash-addressable views (`#overview`, `#security`,
+  `#config`, `#logs`) with focus moved to the view heading; on phones a
+  bottom tab bar that stops being fixed on short (zoomed) viewports. The
+  family-invite QR card moved to Configuration; the printable invite stays
+  one click away in the header.
+- **Password prompt** for `GUI_PASSWORD` is a proper dialog with a
+  wrong-password message instead of `window.prompt`; destructive and
+  impactful actions (unban, restart, apply, renew) confirm in a dialog and
+  report their result in place.
+- **`/invite`** renders `lang="en"` for the English page, uses real links
+  for the DE/EN switch (no buttons nested in links), keeps an explicit
+  `?host=` across the language switch, follows the panel theme, and says
+  "QR code could not be generated" instead of "no host" when qrencode fails.
+
+#### Added
+
+- pytest guards for the front-end: every `/static/` reference resolves,
+  only allowlisted file types are shipped, no `vendor/` bundles, no
+  external URLs, no inline script/handlers/styles, no HTML-string sinks or
+  dynamic code in the JS, no emoji, DE/EN string parity, every editable
+  key has a DE/EN label; plus tests for the CSP string, the static cache
+  policy and the invite page.
+
+#### Accessibility
+
+- WCAG 2.2 AA pass: skip link, landmarks and heading order, visible focus,
+  full keyboard operation (including chart readouts), text contrast ≥ 4.5:1
+  and indicators/control boundaries ≥ 3:1 in both themes, 44 px touch
+  targets on touch screens, reflow at 320 px, labelled fields with
+  associated errors, and polite live-region announcements for status
+  changes and results.
+
 > **v1.3.0 was withdrawn on 2026-05-18 — do not use.** The systemd unit change in v1.3.0 (moving `StartLimit*` from `[Service]` to `[Unit]`) activated a previously-silent `StartLimitBurst=3` that, combined with the watchdog's 60-second timer and `FailureAction=reboot`, caused an unbounded reboot loop on the 4th start. **v1.3.1 supersedes v1.3.0** and contains the same fixes plus the burst-value correction. Install v1.3.1 or later.
 
 ## [2.1.0] — 2026-07-29
