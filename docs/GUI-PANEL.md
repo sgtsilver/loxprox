@@ -18,67 +18,111 @@ convenience layer on top of the same tools you'd otherwise reach over SSH
 - Default: **on** (`ENABLE_GUI="true"`), listening on `GUI_PORT="1081"`.
 - Reachable at `http://<gateway-ip>:1081` from any device on `LAN_SUBNET`
   or `SSH_ALLOWED_SUBNETS` — nowhere else.
-- Since v2.2 the panel is a **tabbed dashboard** (Overview / Security /
-  Configuration / Logs) with live 24-hour charts, an animated 3D status
-  scene, light/dark/auto theme, and a mobile layout with a bottom tab bar.
-  Everything — three.js, anime.js, the fonts — is **vendored and served
-  from the gateway itself**; the panel makes zero internet requests and
+- The panel is a **calm, status-first console** with four areas —
+  Overview, Security, Configuration, Logs — in German (default) or English,
+  light/dark/automatic theme, and a phone layout with a bottom tab bar.
+- Everything it needs — the page, its scripts, the Inter / Syne /
+  JetBrains Mono fonts — is **served from the gateway itself**. There are no
+  third-party libraries and the panel makes zero internet requests, so it
   works on an offline LAN.
 
 ## Feature tour
 
-**Family invite.** `/invite` is a printable page with the QR code (see
-[`FAMILY-ONBOARDING.md`](FAMILY-ONBOARDING.md)) plus the same DE/EN
-onboarding steps — stick it in the utility cabinet instead of generating
-`loxone-qr.png` by hand.
+**Overview** (the home page, `/`). It answers one question first: *is
+everything OK, and if not, what should I do?*
 
-**Overview tab** (the panel's home page, `/`). A status headline ("all
-systems secure" / "attention required") over an animated particle-shield
-scene that tints green, amber, or red with gateway state, plus the status
-tiles:
+- **Status summary** — one plain-language line ("Everything is OK", "2 items
+  need your attention", "Action needed"), the connection type and the time
+  of the last update. If the panel stops answering, the summary says so,
+  keeps the last known values marked as out of date, and retries on its own.
+- **What to do** — every item that needs attention, worst first, each with
+  an explanation and the action that fixes it: restart a stopped service,
+  renew an expiring certificate, check the Miniserver address, open the log
+  of a failed apply. Timer-driven units that can't be restarted from the
+  panel show the `systemctl status …` command to run over SSH instead.
+- **Details** — dense tiles:
 
 | Tile | Shows |
 |---|---|
-| Services | nginx, CrowdSec, firewall bouncer, frpc (when the tunnel is on), `loxprox-monitor.timer`, `network-watchdog.timer` |
-| Cert expiry | Days left on `/etc/loxprox/tls/fullchain.pem` (when TLS is on) |
-| Miniserver reachability | Live TCP check against `LOXONE_IP:LOXONE_PORT` |
-| CrowdSec decisions | Count + last 10 (origin, country, duration) |
-| AppSec detections | Count of blocked requests today |
-| Backup age | Age + size of the latest `/root/loxprox-backups/*.tar.gz` |
-| System | Disk, RAM, load |
-| Tunnel | frpc connection state, when `ENABLE_TUNNEL=true` |
+| Services | Each unit and its state: nginx, CrowdSec, firewall bouncer, `loxprox-monitor.timer`, `network-watchdog.timer`, plus frpc and `tunnel-watchdog.timer` when the tunnel is on |
+| Miniserver | Live TCP check against `LOXONE_IP:LOXONE_PORT` |
+| TLS certificate | Days left on `/etc/loxprox/tls/fullchain.pem` — warning under 21 days, problem under 7 |
+| Blocked addresses | Number of active CrowdSec decisions (informational — bans mean the protection works) |
+| Attacks blocked today | AppSec detections today and from how many addresses |
+| Last backup | Age and size of the newest `/root/loxprox-backups/*.tar.gz` — warning when older than 26 hours or missing |
+| System | Disk, memory and load as labelled meters |
+| Connection | TLS, tunnel (with the frpc state) or direct HTTP |
 
-**Charts (v2.2).** The panel samples the gateway once a minute — requests
-per minute (nginx access log growth), system load, RAM/disk, active
-CrowdSec bans, AppSec hits, Miniserver reachability — into a 24-hour ring
-buffer (`/var/lib/loxprox/gui-history.json`, survives restarts, served at
-`/api/history`). The Overview tab charts traffic and load; the Security tab
-charts bans and AppSec hits. A fresh install shows "collecting data" until
-the first samples land.
+- **Last 24 hours** — requests per minute and system load as line charts.
 
-**Logs tab.** Read-only tail view of nginx, CrowdSec, and monitor/watchdog
-logs with a follow mode — no more `journalctl`/`tail -f` over SSH for a
-quick look.
+Status is never shown by color alone: every state carries an icon and a
+word, and screen readers hear overall state changes without focus moving.
 
-**Config editor** (Configuration tab). Edit a whitelisted subset of `/etc/loxprox/deploy.conf`
-values in a form (rate limits, timeouts, AppSec mode, CrowdSec whitelist,
-TLS, tunnel, and GUI settings) and **apply** with one click — the panel
-timestamps a backup of `deploy.conf` first, then runs `deploy.sh` in the
-background and shows the job log. `GATEWAY_IP`, `LAN_SUBNET`, and
-`SSH_ALLOWED_SUBNETS` are deliberately **not** editable here — a mistake in
-any of those three is an SSH lockout risk and stays an SSH-only change.
+**Charts.** The panel samples the gateway once a minute — requests per
+minute (nginx access-log growth), system load, RAM/disk, active CrowdSec
+bans, AppSec hits, Miniserver reachability — into a 24-hour ring buffer
+(`/var/lib/loxprox/gui-history.json`, survives restarts, served at
+`/api/history`). Each chart has a one-sentence summary and a "values as a
+table" view with hourly figures; hover or focus a chart and use the arrow
+keys to read single values. A fresh install shows "collecting data" until
+the first samples land; a failed request says so instead of drawing an
+empty chart.
 
-The apply job surfaces `deploy.sh`'s own exit code as a job status:
-`0` → **ok**, `3` → **degraded** (the deploy went through but one or more
-*optional* steps — TLS, tunnel, CrowdSec — didn't; the gateway still
-proxies, those features just aren't active), anything else → **failed**.
-A degraded run shows as its own warning state instead of a failure — the
-job log lists exactly which step(s) need a second look.
+**Security.** Charts for active bans and AppSec hits per hour; the list of
+blocked addresses with an **Unban** button per row plus a field to unban any
+other IP; restart buttons for nginx / CrowdSec / bouncer / frpc (frpc only
+in tunnel mode) with each service's current state; **send a test alert**
+(exercises the Discord webhook end-to-end) and **renew the TLS
+certificate** (`deploy.sh --renew-tls`). Every unban and restart asks for
+confirmation first and reports the result in place.
 
-**Support actions** (Security tab). One button each for: unban an IP
-(`cscli decisions delete`), restart a service (nginx / CrowdSec / bouncer /
-frpc), force a TLS renewal (`deploy.sh --renew-tls`), and send a test alert
-(exercises the Discord webhook end-to-end).
+**Configuration.**
+
+- *Family invitation* — the QR code (see
+  [`FAMILY-ONBOARDING.md`](FAMILY-ONBOARDING.md)), where its address comes
+  from, the `loxone://` link with a copy button, and the manual address
+  setting. The printable `/invite` page (DE/EN) is also one click away in
+  the header — stick it in the utility cabinet instead of generating
+  `loxone-qr.png` by hand.
+- *Gateway settings* — edit a whitelisted subset of
+  `/etc/loxprox/deploy.conf` (rate limits, timeouts, AppSec mode, CrowdSec
+  whitelist, TLS, tunnel, panel settings). Each field is typed from the
+  server's schema (switches, selects, text with a format hint), shows its
+  `deploy.conf` key, and is checked before saving; errors are listed at the
+  top and next to each field. Secrets (`TUNNEL_TOKEN`, `GUI_PASSWORD`,
+  `DISCORD_WEBHOOK_URL`) are never displayed — leave the field empty to
+  keep the value, or tick "remove the stored value". **Save** writes only
+  the changed keys (with a timestamped backup of `deploy.conf`); **Apply**
+  runs `deploy.sh` in the background after a confirmation (and offers to
+  save unsaved changes first). `GATEWAY_IP`, `LAN_SUBNET`, and
+  `SSH_ALLOWED_SUBNETS` are deliberately **not** editable here — a mistake
+  in any of those three is an SSH lockout risk and stays an SSH-only change.
+
+Apply and certificate renewal run as a **background job** shown at the top
+of every view: running time, a live log tail, and the outcome. The job
+status follows `deploy.sh`'s exit code: `0` → **ok**, `3` → **finished with
+warnings** (the deploy went through but one or more *optional* steps — TLS,
+tunnel, CrowdSec — didn't; the gateway still proxies, those features just
+aren't active), anything else → **failed**. If the panel itself is
+restarted while the job runs (the apply re-installs the panel), the job
+shows as "result unknown" and points to the deploy log rather than guessing.
+
+**Logs.** Read-only tail view of the nginx error/access logs, AppSec hits,
+the network and tunnel watchdogs, the monitor, the deploy log and the panel
+log — with a line filter and a follow mode (refresh every 5 s) — no more
+`tail -f` over SSH for a quick look.
+
+**Password prompt.** When `GUI_PASSWORD` is set, the first change you make
+asks for it in a dialog; it is kept for the browser tab only. A wrong
+password is reported in the same dialog; cancelling aborts the change.
+
+**Accessibility.** The panel targets WCAG 2.2 AA: semantic headings and
+landmarks, full keyboard operation with a visible focus ring and a "skip to
+content" link, focus moved to the view heading on navigation, text contrast
+of at least 4.5:1 and indicators of at least 3:1 in both themes, 44 px
+buttons and touch targets on touch screens, reflow down to 320 px width, and
+`prefers-reduced-motion` honored (the only motion is a short state
+transition and a progress spinner).
 
 ## Security model
 
@@ -96,14 +140,20 @@ built to fail closed:
 - **CSRF header on every mutation.** All `POST` requests must carry
   `X-LoxProx-Gui: 1`; there is no CORS configuration that would let another
   origin forge this from a browser.
-- **No inline scripts, no external resources.** Since v2.2 the CSP is
+- **No inline scripts, no external resources.** The CSP is
   `script-src 'self'` — every script is a file served from the gateway's
   own `/static/` allowlist (path-contained, extension-allowlisted), and
-  `connect-src 'self'` means the page cannot phone anywhere else.
+  `connect-src 'self'` means the page cannot phone anywhere else. The
+  front-end contains no third-party code and builds its DOM without HTML
+  strings, so data from the API (IPs, log lines, error text) can never turn
+  into markup. pytest guards these rules (no inline script/handlers, no
+  external URLs, no emoji, DE/EN string parity).
 - **Optional password on mutating actions.** `GUI_PASSWORD` is empty (no
   auth) by default — reasonable on a LAN you fully control. Set it and
   every unban/restart/renew/apply/config-write call must present it via the
-  `X-LoxProx-Auth` header (checked with a constant-time comparison).
+  `X-LoxProx-Auth` header (checked with a constant-time comparison); the
+  panel asks for it once per browser tab. Viewing status and logs needs no
+  password.
   **Recommended if untrusted devices — guests, IoT, kids' tablets — share
   your `LAN_SUBNET` or a routed VLAN that reaches the gateway.**
 - **Runs as root.** The panel shells out to `cscli`, `systemctl`, reads
@@ -137,7 +187,10 @@ way an operator would pick it by hand:
    `/var/lib/loxprox/gui-settings.json` (set it once from the panel — there
    is no way to guess a plain port-forward's public DNS name automatically).
 
-You can always override the detected value from the panel.
+The manual address is only used when neither the tunnel nor TLS is on;
+with either of them active, fix `TUNNEL_PUBLIC_HOST` / `TLS_DOMAIN`
+instead. A specific host can always be printed via
+`/invite?host=<host>&lang=de|en`.
 
 ## Troubleshooting
 
@@ -153,7 +206,7 @@ You can always override the detected value from the panel.
 means a stale `TUNNEL_PUBLIC_HOST` or `TLS_DOMAIN` wins over whatever you
 typed manually. Check which mode is actually active
 (`ENABLE_TUNNEL`/`ENABLE_TLS` in `deploy.conf`) and either fix that value or
-override the host directly in the panel.
+set the manual address in the panel (plain port-forward setups only).
 
 ## Pointers
 

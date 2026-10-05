@@ -19,70 +19,125 @@ erreichst (`cscli`, `systemctl`, `openssl`, `deploy.sh`).
 - Default: **an** (`ENABLE_GUI="true"`), lauscht auf `GUI_PORT="1081"`.
 - Erreichbar unter `http://<gateway-ip>:1081` von jedem Gerät in
   `LAN_SUBNET` oder `SSH_ALLOWED_SUBNETS` — sonst nirgendwo.
-- Seit v2.2 ist das Panel ein **Dashboard mit Tabs** (Übersicht / Sicherheit /
-  Konfiguration / Logs) mit Live-24-Stunden-Charts, einer animierten
-  3D-Status-Szene, Hell-/Dunkel-/Auto-Design und einem Mobil-Layout mit
-  unterer Tab-Leiste. Alles — three.js, anime.js, die Schriften — ist
-  **gebündelt und wird vom Gateway selbst ausgeliefert**; das Panel macht
-  null Internet-Requests und funktioniert auch in einem Offline-LAN.
+- Das Panel ist eine **ruhige Status-Konsole** mit vier Bereichen —
+  Übersicht, Sicherheit, Konfiguration, Logs — auf Deutsch (Standard) oder
+  Englisch, mit hellem/dunklem/automatischem Design und einem Handy-Layout
+  mit Tab-Leiste unten.
+- Alles, was es braucht — die Seite, ihre Skripte, die Schriften Inter /
+  Syne / JetBrains Mono — **liefert das Gateway selbst aus**. Es gibt keine
+  Fremdbibliotheken, das Panel macht null Internet-Requests und
+  funktioniert auch in einem Offline-LAN.
 
 ## Feature-Tour
 
-**Familien-Einladung.** `/invite` ist eine druckbare Seite mit dem QR-Code
-(siehe [`FAMILY-ONBOARDING.de.md`](FAMILY-ONBOARDING.de.md)) plus denselben
-DE/EN-Onboarding-Schritten — ins Technikschränkchen kleben statt
-`loxone-qr.png` von Hand zu erzeugen.
+**Übersicht** (die Startseite, `/`). Sie beantwortet zuerst eine Frage:
+*Ist alles in Ordnung — und wenn nicht, was ist zu tun?*
 
-**Übersichts-Tab** (die Startseite des Panels, `/`). Eine Status-Schlagzeile
-("Alles im grünen Bereich" / "Eingriff erforderlich") über einer animierten
-Partikel-Schild-Szene, die sich mit dem Gateway-Zustand grün, gelb oder rot
-einfärbt, plus die Status-Kacheln:
+- **Status-Zusammenfassung** — eine Zeile in Klartext („Alles in Ordnung“,
+  „2 Punkte brauchen deine Aufmerksamkeit“, „Handlungsbedarf“), dazu die
+  Verbindungsart und der Zeitpunkt der letzten Aktualisierung. Antwortet das
+  Panel nicht mehr, steht das genau so da: die letzten bekannten Werte
+  bleiben sichtbar, als veraltet markiert, und das Panel versucht es
+  selbstständig weiter.
+- **Was zu tun ist** — jeder Punkt, der Aufmerksamkeit braucht, das
+  Wichtigste zuerst, jeweils mit Erklärung und passender Aktion: gestoppten
+  Dienst neu starten, ablaufendes Zertifikat erneuern, Miniserver-Adresse
+  prüfen, Protokoll eines fehlgeschlagenen Anwendens öffnen. Für
+  zeitgesteuerte Units, die das Panel nicht neu starten kann, steht der
+  passende `systemctl status …`-Befehl für SSH da.
+- **Zustand im Detail** — kompakte Kacheln:
 
 | Kachel | Zeigt |
 |---|---|
-| Services | nginx, CrowdSec, Firewall-Bouncer, frpc (wenn der Tunnel an ist), `loxprox-monitor.timer`, `network-watchdog.timer` |
-| Cert-Ablauf | Verbleibende Tage von `/etc/loxprox/tls/fullchain.pem` (wenn TLS an ist) |
-| Miniserver-Erreichbarkeit | Live-TCP-Check gegen `LOXONE_IP:LOXONE_PORT` |
-| CrowdSec-Decisions | Anzahl + letzte 10 (Herkunft, Land, Dauer) |
-| AppSec-Detections | Anzahl heute geblockter Requests |
-| Backup-Alter | Alter + Größe des neuesten `/root/loxprox-backups/*.tar.gz` |
-| System | Disk, RAM, Load |
-| Tunnel | frpc-Verbindungsstatus, wenn `ENABLE_TUNNEL=true` |
+| Dienste | Jede Unit mit Zustand: nginx, CrowdSec, Firewall-Bouncer, `loxprox-monitor.timer`, `network-watchdog.timer`, dazu frpc und `tunnel-watchdog.timer`, wenn der Tunnel an ist |
+| Miniserver | Live-TCP-Check gegen `LOXONE_IP:LOXONE_PORT` |
+| TLS-Zertifikat | Verbleibende Tage von `/etc/loxprox/tls/fullchain.pem` — Warnung unter 21 Tagen, Problem unter 7 |
+| Gesperrte Adressen | Anzahl aktiver CrowdSec-Decisions (zur Info — Sperren heißen: der Schutz arbeitet) |
+| Abgewehrte Angriffe heute | AppSec-Detections heute und von wie vielen Adressen |
+| Letztes Backup | Alter und Größe des neuesten `/root/loxprox-backups/*.tar.gz` — Warnung, wenn älter als 26 Stunden oder keins da ist |
+| System | Speicherplatz, Arbeitsspeicher und Auslastung als beschriftete Balken |
+| Verbindungsart | TLS, Tunnel (mit frpc-Zustand) oder direktes HTTP |
 
-**Charts (v2.2).** Das Panel misst das Gateway einmal pro Minute — Requests
-pro Minute (Wachstum des nginx-Access-Logs), Systemlast, RAM/Disk, aktive
+- **Letzte 24 Stunden** — Anfragen pro Minute und Systemlast als
+  Linien-Charts.
+
+Ein Zustand wird nie nur über Farbe gezeigt: jeder hat ein Icon und ein
+Wort, und Screenreader bekommen Änderungen des Gesamtzustands angesagt, ohne
+dass der Fokus springt.
+
+**Charts.** Das Panel misst das Gateway einmal pro Minute — Requests pro
+Minute (Wachstum des nginx-Access-Logs), Systemlast, RAM/Disk, aktive
 CrowdSec-Sperren, AppSec-Treffer, Miniserver-Erreichbarkeit — in einen
 24-Stunden-Ringpuffer (`/var/lib/loxprox/gui-history.json`, übersteht
-Neustarts, abrufbar unter `/api/history`). Der Übersichts-Tab zeigt Traffic
-und Last, der Sicherheits-Tab Sperren und AppSec-Treffer. Eine frische
-Installation zeigt "Sammle Daten", bis die ersten Messpunkte da sind.
+Neustarts, abrufbar unter `/api/history`). Jeder Chart hat eine
+Zusammenfassung in einem Satz und eine Ansicht „Werte als Tabelle“ mit
+Stundenwerten; per Maus oder Tastatur-Fokus plus Pfeiltasten lassen sich
+einzelne Werte ablesen. Eine frische Installation zeigt „Sammle Daten“, bis
+die ersten Messpunkte da sind; ein fehlgeschlagener Abruf wird als Fehler
+angezeigt statt als leerer Chart.
 
-**Logs-Tab.** Read-only Tail-Ansicht der nginx-, CrowdSec- und
-Monitor-/Watchdog-Logs mit Folgen-Modus — kein `journalctl`/`tail -f` per
-SSH mehr für einen schnellen Blick.
+**Sicherheit.** Charts für aktive Sperren und AppSec-Treffer pro Stunde;
+die Liste der gesperrten Adressen mit einem **Entsperren**-Button pro Zeile
+plus einem Feld, um eine beliebige andere IP zu entsperren;
+Neustart-Buttons für nginx / CrowdSec / Bouncer / frpc (frpc nur im
+Tunnel-Modus) mit dem aktuellen Zustand jedes Dienstes; **Testalarm
+senden** (prüft den Discord-Webhook Ende-zu-Ende) und **TLS-Zertifikat
+erneuern** (`deploy.sh --renew-tls`). Jedes Entsperren und jeder Neustart
+fragt vorher nach und meldet das Ergebnis direkt an Ort und Stelle.
 
-**Config-Editor** (Konfigurations-Tab). Eine gewhitelistete Teilmenge der Werte in
-`/etc/loxprox/deploy.conf` per Formular bearbeiten (Rate Limits, Timeouts,
-AppSec-Modus, CrowdSec-Whitelist, TLS, Tunnel, GUI-Einstellungen) und mit
-einem Klick **anwenden** — das Panel legt zuerst ein zeitgestempeltes
-Backup von `deploy.conf` an, führt dann `deploy.sh` im Hintergrund aus und
-zeigt das Job-Log. `GATEWAY_IP`, `LAN_SUBNET` und `SSH_ALLOWED_SUBNETS` sind
-hier bewusst **nicht** editierbar — ein Fehler in einem dieser drei Werte
-ist ein SSH-Lockout-Risiko und bleibt eine SSH-only-Änderung.
+**Konfiguration.**
 
-Der Apply-Job spiegelt den Exit-Code von `deploy.sh` als Job-Status:
-`0` → **ok**, `3` → **degraded** (das Deploy ist durchgelaufen, aber ein
-oder mehrere *optionale* Schritte — TLS, Tunnel, CrowdSec — nicht; das
-Gateway proxied trotzdem weiter, nur diese Features sind nicht aktiv),
-alles andere → **failed**. Ein degradierter Lauf erscheint als eigener
-Warn-Status statt als Fehlschlag — das Job-Log listet genau auf, welche(r)
-Schritt(e) einen zweiten Blick brauchen.
+- *Familien-Einladung* — der QR-Code (siehe
+  [`FAMILY-ONBOARDING.de.md`](FAMILY-ONBOARDING.de.md)), woher seine
+  Adresse kommt, der `loxone://`-Link mit Kopier-Button und die manuelle
+  Adresse. Die druckbare Seite `/invite` (DE/EN) ist außerdem oben im
+  Kopfbereich mit einem Klick erreichbar — ins Technikschränkchen kleben
+  statt `loxone-qr.png` von Hand zu erzeugen.
+- *Gateway-Einstellungen* — eine gewhitelistete Teilmenge von
+  `/etc/loxprox/deploy.conf` bearbeiten (Rate Limits, Timeouts,
+  AppSec-Modus, CrowdSec-Whitelist, TLS, Tunnel, Panel-Einstellungen). Jedes
+  Feld ist nach dem Schema des Servers typisiert (Schalter, Auswahl,
+  Textfeld mit Format-Hinweis), zeigt seinen `deploy.conf`-Key und wird vor
+  dem Speichern geprüft; Fehler stehen gesammelt oben und direkt am Feld.
+  Geheimnisse (`TUNNEL_TOKEN`, `GUI_PASSWORD`, `DISCORD_WEBHOOK_URL`) werden
+  nie angezeigt — Feld leer lassen behält den Wert, „Gespeicherten Wert
+  entfernen“ löscht ihn. **Speichern** schreibt nur die geänderten Keys (mit
+  zeitgestempeltem Backup von `deploy.conf`); **Anwenden** führt nach einer
+  Rückfrage `deploy.sh` im Hintergrund aus (und bietet an, ungespeicherte
+  Änderungen vorher zu speichern). `GATEWAY_IP`, `LAN_SUBNET` und
+  `SSH_ALLOWED_SUBNETS` sind hier bewusst **nicht** editierbar — ein Fehler
+  in einem dieser Werte ist ein SSH-Lockout-Risiko und bleibt eine
+  SSH-only-Änderung.
 
-**Support-Aktionen** (Sicherheits-Tab). Je ein Button für: eine IP
-entbannen (`cscli decisions delete`), einen Service neu starten (nginx /
-CrowdSec / Bouncer / frpc), eine TLS-Erneuerung erzwingen (`deploy.sh
---renew-tls`), und einen Test-Alert senden (prüft den Discord-Webhook
-Ende-zu-Ende).
+Anwenden und Zertifikats-Erneuerung laufen als **Hintergrund-Vorgang**, der
+oben in jeder Ansicht erscheint: Laufzeit, Live-Ausschnitt des Protokolls
+und das Ergebnis. Der Status folgt dem Exit-Code von `deploy.sh`: `0` →
+**ok**, `3` → **fertig, mit Einschränkungen** (das Deploy ist
+durchgelaufen, aber ein oder mehrere *optionale* Schritte — TLS, Tunnel,
+CrowdSec — nicht; das Gateway proxied trotzdem weiter, nur diese Features
+sind nicht aktiv), alles andere → **fehlgeschlagen**. Wird das Panel selbst
+während des Vorgangs neu gestartet (das Anwenden installiert das Panel neu),
+zeigt es „Ergebnis unbekannt“ und verweist aufs Deploy-Log, statt zu raten.
+
+**Logs.** Read-only-Ansicht der nginx-Fehler- und Zugriffs-Logs, der
+AppSec-Treffer, des Netzwerk- und Tunnel-Watchdogs, der Überwachung, des
+Deploy-Logs und des Panel-Logs — mit Zeilenfilter und Folgen-Modus
+(Aktualisierung alle 5 s) — kein `tail -f` per SSH mehr für einen schnellen
+Blick.
+
+**Passwort-Abfrage.** Ist `GUI_PASSWORD` gesetzt, fragt das Panel bei der
+ersten Änderung in einem Dialog danach; es bleibt nur für diesen
+Browser-Tab gespeichert. Ein falsches Passwort meldet derselbe Dialog;
+Abbrechen bricht die Änderung ab.
+
+**Barrierefreiheit.** Ziel ist WCAG 2.2 AA: semantische Überschriften und
+Landmarks, komplette Bedienung per Tastatur mit sichtbarem Fokus und
+„Zum Inhalt springen“-Link, Fokus springt beim Bereichswechsel auf die
+Überschrift, Textkontrast mindestens 4,5:1 und Zustandsanzeigen mindestens
+3:1 in beiden Designs, 44-px-Buttons und -Touch-Ziele auf Touchscreens,
+Umbruch bis 320 px Breite, und `prefers-reduced-motion` wird respektiert
+(die einzige Bewegung ist ein kurzer Zustandswechsel und ein
+Fortschritts-Spinner).
 
 ## Security-Modell
 
@@ -101,16 +156,22 @@ also auf Fail-Closed gebaut:
 - **CSRF-Header bei jeder Mutation.** Jeder `POST`-Request muss den Header
   `X-LoxProx-Gui: 1` mitschicken; es gibt keine CORS-Konfiguration, die es
   einem anderen Origin erlauben würde, das aus einem Browser zu fälschen.
-- **Keine Inline-Skripte, keine externen Ressourcen.** Seit v2.2 ist die
-  CSP `script-src 'self'` — jedes Skript ist eine Datei aus der
+- **Keine Inline-Skripte, keine externen Ressourcen.** Die CSP ist
+  `script-src 'self'` — jedes Skript ist eine Datei aus der
   `/static/`-Allowlist des Gateways (pfad-eingeschlossen,
   endungs-gewhitelistet), und `connect-src 'self'` heißt: die Seite kann
-  nirgendwo sonst hintelefonieren.
+  nirgendwo sonst hintelefonieren. Das Frontend enthält keinen Fremdcode
+  und baut sein DOM ohne HTML-Strings auf, sodass Daten aus der API (IPs,
+  Log-Zeilen, Fehlertexte) nie zu Markup werden können. pytest bewacht diese
+  Regeln (keine Inline-Skripte/-Handler, keine externen URLs, keine Emoji,
+  gleiche DE/EN-Texte).
 - **Optionales Passwort für mutierende Aktionen.** `GUI_PASSWORD` ist per
   Default leer (keine Auth) — auf einem LAN, das du vollständig
   kontrollierst, vertretbar. Setzt du es, muss jeder
   Unban-/Restart-/Renew-/Apply-/Config-Write-Call es über den Header
-  `X-LoxProx-Auth` mitschicken (Prüfung per Constant-Time-Vergleich).
+  `X-LoxProx-Auth` mitschicken (Prüfung per Constant-Time-Vergleich); das
+  Panel fragt einmal pro Browser-Tab danach. Status und Logs ansehen geht
+  ohne Passwort.
   **Empfohlen, wenn untrusted Geräte — Gäste, IoT, Kinder-Tablets — dein
   `LAN_SUBNET` oder ein geroutetes VLAN teilen, das das Gateway erreicht.**
 - **Läuft als root.** Das Panel ruft `cscli`, `systemctl` auf, liest
@@ -145,7 +206,10 @@ ein Operator ihn von Hand wählen würde:
    öffentlichen DNS-Namen eines reinen Port-Forwards kann niemand
    automatisch erraten).
 
-Der erkannte Wert lässt sich im Panel jederzeit überschreiben.
+Die manuelle Adresse gilt nur, wenn weder Tunnel noch TLS aktiv ist; ist
+eins von beiden an, korrigierst du stattdessen `TUNNEL_PUBLIC_HOST` bzw.
+`TLS_DOMAIN`. Einen bestimmten Host kannst du jederzeit über
+`/invite?host=<host>&lang=de|en` drucken.
 
 ## Troubleshooting
 
@@ -161,8 +225,8 @@ Der erkannte Wert lässt sich im Panel jederzeit überschreiben.
 Reihenfolge oben bedeutet, dass ein veraltetes `TUNNEL_PUBLIC_HOST` oder
 `TLS_DOMAIN` gegenüber dem, was du manuell eingetragen hast, gewinnt. Prüfe,
 welcher Modus wirklich aktiv ist (`ENABLE_TUNNEL`/`ENABLE_TLS` in
-`deploy.conf`) und korrigiere entweder diesen Wert oder überschreibe den
-Host direkt im Panel.
+`deploy.conf`) und korrigiere entweder diesen Wert oder trage im Panel die
+manuelle Adresse ein (nur bei reinem Port-Forward).
 
 ## Verweise
 

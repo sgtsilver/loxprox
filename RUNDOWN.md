@@ -3,11 +3,11 @@
 **Status:** Published on GitHub  
 **Repo:** https://github.com/sgtsilver/loxprox  
 **Version:** 2.2.0 (released)  
-**Last updated:** 2026-07-30 (v2.2 — Panel dashboard overhaul: tabbed UI with 24h charts fed by a
-1-min history sampler, three.js status scene + anime.js motion, light/dark/auto theme, mobile tab
-bar; all assets vendored in `gui/static/` and served offline; CSP `script-src 'self'`;
-test-gateway.sh asserts the dashboard assets; sweep-4 open findings still tracked in the local-only
-gitignored `audits/2026-07-29-sweep4-audit.md`)  
+**Last updated:** 2026-10-05 (v2.2 line — Panel "calm ops console" redesign: status-first overview
+with plain-language action items, typed config editor with inline validation, SVG charts with table
+equivalents, WCAG 2.2 AA pass; the vendored scene/motion libraries are gone — `gui/static/` now holds
+only the panel's own HTML/CSS/JS and fonts, served offline; CSP `script-src 'self'`; sweep-4 open
+findings still tracked in the local-only gitignored `audits/2026-07-29-sweep4-audit.md`)  
 **Previous:** 2026-07-02 (v2.0.1 — fix: deploy.sh aborted on TLS hosts when the acme.sh cron line was written in acme.sh's quoted-home form; verified by a full clean deploy on the live production VM. v2.0.0 — zero-open-ports frp tunnel (opt-in, `ENABLE_TUNNEL`), `/ws/` WebSocket template fix, Tier-2 resilience: tunnel watchdog + ACME fallback CA; token configs locked 0640 before chown; layered on top of the v1.5.2 audit)
 
 ---
@@ -50,7 +50,7 @@ Internet ──► Router:1080 ──► Gateway:1080 ──► Loxone:80
 | `security-monitoring/network-watchdog.service` | systemd system service (root) |
 | `security-monitoring/network-watchdog.timer` | Runs watchdog every 60 seconds |
 | `gui/loxprox-gui.py` | LoxProx Panel — LAN-only web GUI (family QR invitation, tabbed dashboard with 24h charts, logs, config editor + apply, unban/restart/renew). Python 3.11 stdlib, `loxprox-gui.service`, port 1081, `ENABLE_GUI` toggle |
-| `gui/static/` | v2.2: the Panel's dashboard app (`panel.html/css/js`) + vendored three.js, anime.js and Inter/Syne/JetBrains Mono fonts — served by the panel itself, fully offline |
+| `gui/static/` | The Panel's front-end (`panel.html/css/js`, `i18n.js` DE/EN strings, `charts.js` SVG charts, `theme-boot.js`, `invite.js`, `favicon.svg`) + vendored Inter/Syne/JetBrains Mono fonts — no third-party code, served by the panel itself, fully offline |
 
 ---
 
@@ -264,7 +264,7 @@ All 23 findings from the 2026-05-06 Ezio audit have been addressed:
 ```
 tests/
 ├── run-tests.sh              # unified test runner (runs all of tests/)
-├── test_gui.py               # 25 pytest cases for the Panel's pure logic (v2.1)
+├── test_gui.py               # pytest for the Panel: pure logic, static-asset/CSP/i18n guards, invite page
 ├── test_progressive_ban.py   # 22 pytest cases for ban script
 ├── test_repo_hygiene.py      # 14 repo-hygiene guards (OpSec, versions, hardware,
 │                             #   config model, dead-file refs, links, bilingual,
