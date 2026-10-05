@@ -26,7 +26,7 @@ Der Loxone Miniserver Gen 1 hat kein TLS, kein Rate Limiting, keine native Auth-
 
 ## README About-Abschnitt (Absatz)
 
-**LoxProx** ist ein Security-Gateway, gebaut speziell für den Loxone Miniserver Gen 1 — Legacy-Hardware der ersten Generation, die sich selbst nicht schützen kann. Es sitzt zwischen dem Internet und deinem Miniserver und ergänzt TLS-Termination, Rate Limiting, eine Web Application Firewall (CrowdSec AppSec), Intrusion Detection (CrowdSec IDS), nftables-Firewall-Regeln, AppArmor-Confinement, Audit-Logging und Echtzeit-Discord-Alerting. LAN-Traffic umgeht das Gateway vollständig, lokale Nutzer sind also nicht betroffen. Nur externer Traffic wird inspiziert und gehärtet. Deployment: ein Script auf einer Debian-12-VM.
+**LoxProx** ist ein Security-Gateway, gebaut speziell für den Loxone Miniserver Gen 1 — Legacy-Hardware der ersten Generation, die sich selbst nicht schützen kann. Es sitzt zwischen dem Internet und deinem Miniserver und ergänzt TLS-Termination, Rate Limiting, eine Web Application Firewall (CrowdSec AppSec), Intrusion Detection (CrowdSec IDS), nftables-Firewall-Regeln, ein AppArmor-Profil für nginx, Audit-Logging und Echtzeit-Discord-Alerting. LAN-Traffic umgeht das Gateway vollständig, lokale Nutzer sind also nicht betroffen. Nur externer Traffic wird inspiziert und gehärtet. Deployment: ein Script auf einer Debian-12-VM.
 
 ---
 
@@ -62,7 +62,7 @@ Stack:
 - auditd für die Erkennung von Config-Tampering
 - Discord-Alerting bei Security-Events
 
-Deploy: ein Script (`deploy.sh`, ~4100 Zeilen, idempotent). Validierung: 50+ automatisierte Checks. Note: A- über CIS Debian 12, OWASP Top 10 und OWASP IoT Top 10.
+Deploy: ein Script (`deploy.sh`, ~4600 Zeilen, idempotent). Validierung: 50+ automatisierte Checks. Note: A- über CIS Debian 12, OWASP Top 10 und OWASP IoT Top 10.
 
 LAN umgeht das Gateway vollständig — nur internet-facing Traffic wird gehärtet. Läuft auf einer 1 vCPU / 1 GB VM (2 vCPU / 2 GB empfohlen für Angriffs-Reserve) oder einem Raspberry Pi 4. **Nur VM — LXC wird nicht unterstützt**, weil sich mehrere Kernel-Level-Verteidigungen (Sysctls inklusive der Fragnesia-Mitigation, auditd, AppArmor-Enforcement, nftables) aus einem Container heraus nicht anwenden lassen und stillschweigend zu No-Ops würden.
 
@@ -77,7 +77,7 @@ Non-commercial lizensiert. Feedback von allen willkommen, die CrowdSec auf resso
 LoxProx deployt einen Sechs-Schichten-Verteidigungsstack (nftables → nginx → CrowdSec IDS → AppSec WAF → Firewall Bouncer → AppArmor/auditd) auf einer Debian-12-VM und schützt den externen Zugriff transparent, ohne LAN-Nutzer zu beeinträchtigen.
 
 Technische Highlights:
-- Idempotentes Deploy-Script mit ~4100 Zeilen
+- Idempotentes Deploy-Script mit ~4600 Zeilen
 - Validierungs-Suite mit 50+ automatisierten Checks
 - Self-contained HTML-Security-Report (Note A-)
 - Raspberry Pi 4/5 kompatibel

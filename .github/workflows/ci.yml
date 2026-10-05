@@ -137,7 +137,9 @@ jobs:
             if [[ ! -f "$NGINX_SITE" ]]; then echo "FAIL: nginx site missing"; exit 1; fi
             if ! grep -q "listen 1080" "$NGINX_SITE"; then echo "FAIL: listen 1080 missing"; exit 1; fi
             if ! grep -q "Content-Security-Policy" "$NGINX_SITE"; then echo "FAIL: CSP missing"; exit 1; fi
-            if grep -q "X-XSS-Protection" "$NGINX_SITE"; then echo "FAIL: X-XSS-Protection should be removed"; exit 1; fi
+            if grep -qE "^[[:space:]]*add_header[[:space:]]+X-XSS-Protection" "$NGINX_SITE"; then echo "FAIL: X-XSS-Protection should not be added"; exit 1; fi
+            if ! grep -q "proxy_hide_header X-XSS-Protection;" "$NGINX_SITE"; then echo "FAIL: upstream X-XSS-Protection not hidden"; exit 1; fi
+            if ! grep -q "proxy_hide_header X-Frame-Options;" "$NGINX_SITE"; then echo "FAIL: upstream X-Frame-Options not hidden"; exit 1; fi
             if ! grep -q "proxy_hide_header Server" "$NGINX_SITE"; then echo "FAIL: proxy_hide_header missing"; exit 1; fi
 
             if [[ ! -f "$NFTABLES_CONF" ]]; then echo "FAIL: nftables.conf missing"; exit 1; fi
@@ -154,6 +156,72 @@ jobs:
             echo ""
             echo "=== All integration validations passed ==="
           '
+
+  # The checks below run deploy.sh's own functions against REAL services on a
+  # throwaway runner / container (tests/host-integration.sh refuses to run
+  # without CI=true). They prove what the portable suite can only mock.
+
+  host-services:
+    name: Host integration — cron, journald, auditd
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install cron + auditd
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq cron auditd >/dev/null
+          systemctl --no-pager --quiet is-active cron auditd systemd-journald
+
+      - name: cron / journald / auditd against the real daemons
+        run: sudo CI=true bash tests/host-integration.sh cron journald auditd
+
+  logrotate-debian12:
+    name: Host integration — logrotate (Debian 12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Debian 12 logrotate with the stock nginx stanza present
+        run: |
+          docker run --rm -e CI=true -v "$PWD:/workspace" -w /workspace debian:12 bash -c '
+            set -e
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq logrotate nginx > /dev/null 2>&1
+            echo "--- stock /etc/logrotate.d/nginx:"; cat /etc/logrotate.d/nginx
+            bash tests/host-integration.sh logrotate
+          '
+
+  apparmor-nginx:
+    name: AppArmor profile — parser + nginx-extras runtime, proxied headers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: apparmor_parser (Debian 12's parser + abstractions) accepts the profile
+        run: |
+          docker run --rm -v "$PWD:/workspace:ro" -w /workspace debian:12 bash -c '
+            set -e
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq apparmor > /dev/null 2>&1
+            apparmor_parser --version | head -1
+            # -Q: compile fully, do not load into the kernel; -T/-K: no cache.
+            apparmor_parser -QTK apparmor/usr.sbin.nginx
+            echo "OK: profile compiles"
+            # Negative control — the step must be able to fail.
+            cp apparmor/usr.sbin.nginx /tmp/broken.profile
+            sed -i "s#/run/nginx.pid.oldbin rw,#/run/nginx.pid.oldbin rwq,#" /tmp/broken.profile
+            if apparmor_parser -QTK /tmp/broken.profile 2>/dev/null; then
+              echo "FAIL: parser accepted a broken permission string"; exit 1
+            fi
+            echo "OK: parser rejects a broken copy"
+          '
+
+      - name: apparmor_parser (runner kernel) accepts the profile
+        run: sudo apparmor_parser -QTK apparmor/usr.sbin.nginx && echo "OK"
+
+      - name: nginx-extras (Debian 12) under the profile — complain, enforce, headers
+        run: sudo CI=true bash tests/host-integration.sh nginx-apparmor
 
   markdown-lint:
     runs-on: ubuntu-latest

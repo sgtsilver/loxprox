@@ -190,6 +190,49 @@ default behavior; every existing install upgrades in place.
   optional steps (`deploy.sh` exit `3`) as a distinct warning, not a
   failure.**
 
+### 2026-08-30 follow-up — merged into the v2.2.0 line (PR #42)
+
+Landed on `main` after the v2.2.0 tag; no separate release was cut. Five
+commits from the 2026-08-30 maintenance session (the `test-gateway.sh` fix is
+dated 2026-07-30).
+
+#### Added
+
+- **AppArmor nginx profile, complain-first (ADR 0006).** Debian ships no
+  nginx profile, so `setup_apparmor()`'s enforce-if-present branch never
+  fired and the documented AppArmor layer did not exist (0 processes
+  confined). `apparmor/usr.sbin.nginx` is authored for exactly the gateway's
+  surface (proxy `:1080`, ACME `:80`, AppSec `auth_request` to
+  `127.0.0.1:7422`, USR1 log reopen, read-only `/etc/loxprox/tls/`,
+  `/var/lib/nginx` temp dirs, dynamic modules): a compromised nginx cannot
+  read `/etc/loxprox/` outside `tls/`, touch `/opt/loxprox/` or execute
+  anything. Every deploy loads it in **complain** mode; enforce happens only
+  behind `APPARMOR_NGINX_MODE="enforce"` in `deploy.conf`, after a soak that
+  covers an acme.sh renewal, a logrotate cycle and a full deploy. The old
+  unconditional `aa-enforce` of any existing profile is gone, so a soaking
+  profile cannot flip to enforce as a side effect.
+- **On-box version marker.** `write_runtime_config()` writes
+  `/etc/loxprox/VERSION` on every deploy — `version=`/`commit=` from the
+  release tarball's `VERSION` file, else `git describe`, else `unknown`, plus
+  `deployed=` — and `test-gateway.sh` asserts it.
+- **ADR 0005** records the provenance check and retirement of the
+  2026-05-18 on-box backup directory under `/opt` (every file byte-identical
+  to git history; the old monolith deliberately not re-committed).
+
+#### Fixed
+
+- **`test-gateway.sh` read `ENABLE_TLS` from `config.env`, which never
+  carries it.** The TLS-mode proxy branch fell back to plain HTTP (a false
+  301 failure), and `test_tls()` had been skipped on every TLS-mode gateway
+  since v2.0.1. It now reads `deploy.conf`.
+
+#### Security
+
+- **CI supply chain:** third-party actions are SHA-pinned
+  (`ludeeus/action-shellcheck` from a floating `@master` to `2.0.0`,
+  `lycheeverse/lychee-action` to `v2.9.0`) and the workflow runs with
+  `permissions: contents: read`.
+
 ### 2026-10-05 follow-up — merged into the v2.2.0 line (PR #43)
 
 Lands on `main` without a new tag (merges ride the last release line). A
@@ -260,6 +303,102 @@ and an existing install upgrades in place with a normal `deploy.sh` run.
   targets on touch screens, reflow at 320 px, labelled fields with
   associated errors, and polite live-region announcements for status
   changes and results.
+
+### 2026-10-05 follow-up — merged into the v2.2.0 line (PR #44)
+
+Fixes for the findings of the 2026-10-05 live health audit of a production
+gateway. No release was cut; every install upgrades in place — the upgrade
+notes at the end list what changes on the box.
+
+#### Fixed
+
+- **HIGH — cron ignored `/etc/cron.d/loxprox` entirely.** The file carried a
+  bare `MAILTO=` since commit `9bc2fe3` (2026-05-18, the v1.3.0 sweep; first
+  tagged in v1.3.1). Debian's cron does not read an empty unquoted
+  assignment as an environment line: it parses it as a job, fails with
+  "bad minute" and drops the **whole file** ("Syntax error, this crontab
+  file will be ignored"). Progressive-ban escalation, the daily config
+  backup and the daily GeoIP refresh never ran from cron. The line is now
+  `MAILTO=""`. New guard: `deploy.sh` restarts cron after writing its cron
+  files, lints them, and its health check — like `test-gateway.sh` — fails
+  when cron has logged a rejection of the file since it was last written
+  (`journalctl -u cron --since @<mtime>`, so an old rejection never fails a
+  fixed file).
+- **MED — the Panel's Apply and Renew-TLS buttons refused after a reboot.**
+  `config.env` recorded wherever `deploy.sh` had been run from — typically
+  under `/tmp`, which the tmpfs `/tmp` loses on reboot and which the Panel
+  (`PrivateTmp`) never saw anyway. `deploy.sh` now persists exactly the
+  files it reads at run time to `/opt/loxprox/deploy/` (root:root, `0750`,
+  nothing accessible to other users), swaps a new copy in by rename so a
+  running copy is never overwritten in place, and records
+  `/opt/loxprox/deploy/deploy.sh` in `config.env`. A re-run from that copy —
+  the Panel's apply — leaves it as is. The SOFT-SSH login banner now names
+  this path instead of a `/opt/loxprox/deploy.sh` that never existed.
+- **MED — the AppArmor profile was not enforce-ready.** In complain mode,
+  nginx-extras logged ~58 `ALLOWED` events on every start/reload, each of
+  them a denial in enforce mode: lua-resty-core under `/usr/share/lua/`, the
+  perl module's pragmas under `/usr/share/perl/<version>/`, a NUMA probe in
+  `/sys/devices/system/node/`, and the binary upgrade
+  (`/run/nginx.pid.oldbin`, re-exec of `/usr/sbin/nginx` under the same
+  profile). All are allowed now, read-only except the pid file. The
+  complain/enforce default is unchanged; the soak restarts with this deploy.
+- **LOW — duplicate, conflicting security headers on proxied responses.**
+  The Miniserver's own `X-Frame-Options: deny` and `X-XSS-Protection`
+  passed through next to the gateway's headers. The site template (now v4 —
+  existing sites regenerate on the next deploy, TLS block re-applied) hides
+  the upstream copy of every header the gateway sets, plus
+  `X-XSS-Protection`. `test-gateway.sh` checks an HTTPS-proxied response, not
+  just the 301, for exactly one of each.
+- **LOW — LoxProx's own logs were never rotated** (`loxprox-monitor.log` had
+  reached 41 MB, `loxprox-network-watchdog.log` 25 MB). New
+  `/etc/logrotate.d/loxprox` covers `/var/log/loxprox-*.log`: weekly or at
+  10 MB, 8 compressed generations, `copytruncate` (the Panel's unit holds
+  its log open).
+- **The 2026-08-30 logrotate collision is fixed for good.** Debian's stock
+  `/etc/logrotate.d/nginx` (`/var/log/nginx/*.log`) also matches the
+  `loxone-*.log`/`appsec-detections.log` stanza; logrotate skipped the stock
+  file and the nightly run failed. `deploy.sh` now narrows the untouched
+  stock glob to `access.log` + `error.log` (in place, backed up first) — the
+  same yield that was applied by hand on the production gateway — so fresh
+  installs and a restored stock conffile no longer collide.
+- **LOW — journald could take 10 % of the disk.** New drop-in
+  `/etc/systemd/journald.conf.d/50-loxprox.conf` sets `SystemMaxUse=300M`;
+  journald is restarted only when the drop-in changes.
+- **LOW — auditd now watches `/etc/loxprox`, `/etc/apparmor.d` and
+  `/opt/loxprox`** (keys `loxprox_config`, `apparmor_config`,
+  `loxprox_scripts`). Deploys, Panel config saves and acme.sh renewals write
+  there, so expect events in those windows.
+- **Docs:** SECURITY, README and ABOUT (EN + DE) no longer claim the AppArmor
+  profile is enforced — it runs in complain mode until the operator opts in.
+
+#### Added
+
+- `test-gateway.sh`: a *Scheduled Jobs, Log Retention, Audit Coverage*
+  section — cron running and not rejecting the LoxProx files, `logrotate -d`
+  clean, journald cap, audit watches loaded, the Panel's deploy copy
+  root-only, and the AppArmor `ALLOWED` count since nginx started.
+- CI now runs `deploy.sh`'s own functions against real services on
+  throwaway runners: cron (a `MAILTO=` file is rejected and its job never
+  runs; `MAILTO=""` runs), journald (reports the 300M ceiling), auditd
+  (watches load and fire), Debian 12 logrotate with the stock nginx stanza
+  present, Debian 12's `apparmor_parser` on the profile, and Debian 12
+  nginx-extras under the profile in complain and enforce mode (start,
+  reload, USR1, USR2 binary upgrade, TLS proxy request), plus the proxied
+  headers through the generated site.
+
+#### Upgrade notes — what the next `sudo bash deploy.sh` changes
+
+- The nginx site is regenerated (template v3 → v4): backed up first, TLS
+  block re-applied, nginx reloaded.
+- cron is restarted once; `/etc/cron.d/loxprox` takes effect — progressive
+  ban every 15 min, backup at 02:00, GeoIP refresh at 03:00.
+- journald is restarted once and trims the persistent journal to 300 MB.
+- auditd rules are reloaded (`augenrules --load`) with three more watches.
+- `/etc/logrotate.d/loxprox` is new; the first nightly run rotates the
+  oversized LoxProx logs right away (`maxsize`).
+- `/opt/loxprox/deploy/` is created and `config.env` points the Panel at it.
+- The AppArmor profile is reloaded, still in complain mode — restart the
+  soak clock.
 
 > **v1.3.0 was withdrawn on 2026-05-18 — do not use.** The systemd unit change in v1.3.0 (moving `StartLimit*` from `[Service]` to `[Unit]`) activated a previously-silent `StartLimitBurst=3` that, combined with the watchdog's 60-second timer and `FailureAction=reboot`, caused an unbounded reboot loop on the 4th start. **v1.3.1 supersedes v1.3.0** and contains the same fixes plus the burst-value correction. Install v1.3.1 or later.
 
