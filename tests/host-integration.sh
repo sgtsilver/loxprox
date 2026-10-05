@@ -181,7 +181,14 @@ t_auditd() {
             note "ausearch -k $key: $(tail -5 <<<"$events" | tr '\n' ' ')"
         fi
     done
-    [[ $FAILED -eq 0 ]] || note "audit.log tail: $(tail -5 /var/log/audit/audit.log 2>&1 | cut -c1-300 | tr '\n' ' ')"
+    if [[ $FAILED -ne 0 ]]; then
+        local serial
+        serial=$(grep -m1 'ci-audit-probe' /var/log/audit/audit.log | grep -oE 'msg=audit\([0-9.]+:[0-9]+\)' | head -1)
+        note "records of the first probe event (${serial:-none}):"
+        [[ -n "$serial" ]] && grep -F "$serial" /var/log/audit/audit.log | cut -c1-500 | sed 's/^/      /'
+        note "ausearch --raw -k loxprox_config: $(ausearch --raw -k loxprox_config 2>&1 | head -3 | cut -c1-300 | tr '\n' ' ')"
+        note "ausearch -f /etc/loxprox/ci-audit-probe: $(ausearch -f /etc/loxprox/ci-audit-probe 2>&1 | grep -oE 'key=[^ ]+' | sort -u | tr '\n' ' ')"
+    fi
 }
 
 # ── panel jobs: a deploy started by the panel outlives the panel's unit ──────
@@ -461,9 +468,24 @@ t_nginx_apparmor() {
     grep -vE '^[[:space:]]*(/usr/share/lua/\*\* r,|/usr/share/perl/\*\* r,|/sys/devices/system/node/|/run/nginx\.pid\.oldbin rw,)' "$new_profile" \
         | sed 's#^\([[:space:]]*\)/usr/sbin/nginx mrix,#\1/usr/sbin/nginx mr,#' > "$old_profile"
 
+    # Compile against Debian 12's own tunables/abstractions — the production
+    # gateway's — not the runner's (Ubuntu, newer AppArmor), which may grant
+    # different paths and hide or add events.
+    local deb_aa=/var/tmp/debian12-apparmor.d
+    local -a aa_base=()
+    rm -rf "$deb_aa"
+    if docker exec "$CTR" sh -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y -qq apparmor >/dev/null 2>&1' \
+        && docker cp "$CTR:/etc/apparmor.d" "$deb_aa" \
+        && apparmor_parser -QTK --base "$deb_aa" "$new_profile"; then
+        aa_base=(--base "$deb_aa")
+        note "runtime profiles compiled against Debian 12's abstractions ($deb_aa)"
+    else
+        note "could not use Debian 12's abstractions — falling back to the runner's own"
+    fi
+
     local label rc events
     # (a) control: pre-fix profile, complain mode → the audit's ALLOWED events
-    apparmor_parser -r -T -C "$old_profile" || { fail "could not load the pre-fix profile"; return; }
+    apparmor_parser -r -T "${aa_base[@]}" -C "$old_profile" || { fail "could not load the pre-fix profile"; return; }
     dmesg -C
     label=$(ngx_lifecycle); rc=$?
     events=$(aa_events)
@@ -481,7 +503,7 @@ t_nginx_apparmor() {
     fi
 
     # (b) fixed profile, complain mode → zero ALLOWED
-    apparmor_parser -r -T -C "$new_profile" || { fail "could not load the fixed profile"; return; }
+    apparmor_parser -r -T "${aa_base[@]}" -C "$new_profile" || { fail "could not load the fixed profile"; return; }
     dmesg -C
     label=$(ngx_lifecycle); rc=$?
     events=$(aa_events)
@@ -494,7 +516,7 @@ t_nginx_apparmor() {
     fi
 
     # (c) fixed profile, ENFORCE → nothing denied, every lifecycle step works
-    apparmor_parser -r -T "$new_profile" || { fail "could not load the fixed profile in enforce mode"; return; }
+    apparmor_parser -r -T "${aa_base[@]}" "$new_profile" || { fail "could not load the fixed profile in enforce mode"; return; }
     dmesg -C
     label=$(ngx_lifecycle); rc=$?
     events=$(aa_events)
