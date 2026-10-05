@@ -19,14 +19,17 @@ test_header() {
     echo "━━━ $1 ━━━"
 }
 
+# Counters use an assignment, not ((x++)): ((x++)) returns status 1 while x
+# is 0, so the first `check && pass ... || fail ...` of a run also recorded a
+# bogus failure.
 pass() {
     echo -e "  ${GREEN}✓${NC} $1"
-    ((TESTS_PASSED++))
+    TESTS_PASSED=$((TESTS_PASSED + 1))
 }
 
 fail() {
     echo -e "  ${RED}✗${NC} $1"
-    ((TESTS_FAILED++))
+    TESTS_FAILED=$((TESTS_FAILED + 1))
 }
 
 warn() {
@@ -185,6 +188,42 @@ test_proxy() {
         fail "Deprecated X-XSS-Protection header still present (should be removed)"
     else
         pass "X-XSS-Protection correctly removed"
+    fi
+
+    # 2026-10: in TLS mode the request above is answered by nginx's own 301 —
+    # the Miniserver never sees it, so it cannot show duplicates. Those only
+    # appear on a PROXIED response: nginx adds its header and, unless the site
+    # hides it (template v4+), passes the Miniserver's own copy through too
+    # (live: "X-Frame-Options: deny" next to "SAMEORIGIN"). Check one.
+    local proxied_url="http://127.0.0.1:1080/jdev/cfg/api" proxied_headers proxied_status
+    [[ "${enable_tls,,}" == "true" ]] && proxied_url="https://127.0.0.1:1080/jdev/cfg/api"
+    proxied_headers=$(curl -sk -D - -o /dev/null --connect-timeout 5 --max-time 10 "$proxied_url" 2>/dev/null | tr -d '\r')
+    proxied_status=$(awk 'NR == 1 {print $2}' <<<"$proxied_headers")
+    if [[ -z "$proxied_headers" ]]; then
+        fail "No response from $proxied_url — cannot check proxied security headers"
+    else
+        local hdr count
+        for hdr in X-Frame-Options X-Content-Type-Options Content-Security-Policy Permissions-Policy Referrer-Policy; do
+            count=$(grep -ci "^${hdr}:" <<<"$proxied_headers" || true)
+            if [[ "$count" == "1" ]]; then
+                pass "Proxied response (HTTP $proxied_status) carries exactly one $hdr"
+            else
+                fail "Proxied response (HTTP $proxied_status) carries $count $hdr header(s), expected 1 — upstream copy not hidden? (site template < v4)"
+            fi
+        done
+        if [[ "${enable_tls,,}" == "true" ]]; then
+            count=$(grep -ci '^Strict-Transport-Security:' <<<"$proxied_headers" || true)
+            if [[ "$count" == "1" ]]; then
+                pass "Proxied response carries exactly one Strict-Transport-Security"
+            else
+                fail "Proxied response carries $count Strict-Transport-Security header(s), expected 1"
+            fi
+        fi
+        if grep -qi '^X-XSS-Protection:' <<<"$proxied_headers"; then
+            fail "Proxied response still carries the Miniserver's X-XSS-Protection (should be hidden)"
+        else
+            pass "Proxied response carries no X-XSS-Protection"
+        fi
     fi
 
     # Test rate limiting (send 150 requests quickly)
@@ -664,6 +703,152 @@ test_version() {
     fi
 }
 
+# ── Operations (2026-10 health-audit fixes) ─────────────────────────────────
+
+# Prints one line per problem that makes Debian's cron ignore a whole
+# /etc/cron.d file: an assignment with an empty unquoted value (`MAILTO=`
+# instead of `MAILTO=""`), or a job line that is not 5 time fields + user +
+# command. Same rules as deploy.sh's _loxprox_cron_lint.
+_cron_file_problems() {
+    awk '
+        /^[[:space:]]*(#|$)/ { next }
+        match($0, /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=/) {
+            v = substr($0, RLENGTH + 1)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+            if (v == "") printf "line %d: bare assignment \"%s\" (needs a quoted empty value)\n", NR, $0
+            next
+        }
+        $1 ~ /^@/ { if (NF < 3) printf "line %d: @keyword job without user/command\n", NR; next }
+        NF < 7    { printf "line %d: needs 5 time fields + user + command\n", NR; next }
+        {
+            for (i = 1; i <= 5; i++) {
+                if ($i !~ /^[0-9A-Za-z*\/,-]+$/) { printf "line %d: bad time field \"%s\"\n", NR, $i; break }
+            }
+        }' "$1"
+}
+
+test_operations() {
+    test_header "Scheduled Jobs, Log Retention, Audit Coverage"
+
+    # cron: a rejected file is ignored as a whole and nothing else notices —
+    # progressive ban, backup and GeoIP refresh silently stopped for months.
+    if systemctl is-active --quiet cron 2>/dev/null; then
+        pass "cron is running"
+    else
+        fail "cron is NOT running — no LoxProx cron job (ban escalation, backup, GeoIP) runs"
+    fi
+    local cron_file name problems since rejected
+    for cron_file in /etc/cron.d/loxprox /etc/cron.d/loxprox-alert; do
+        if [[ ! -f "$cron_file" ]]; then
+            [[ "$cron_file" == /etc/cron.d/loxprox ]] && fail "$cron_file missing"
+            continue
+        fi
+        name=$(basename "$cron_file")
+        problems=$(_cron_file_problems "$cron_file")
+        if [[ -z "$problems" ]]; then
+            pass "$cron_file is well-formed"
+        else
+            fail "$cron_file is malformed (cron ignores the whole file): ${problems//$'\n'/; }"
+        fi
+        # Only errors logged after the file's mtime count: cron re-reads a file
+        # when its mtime changes, so these are about the content on disk now.
+        since=$(stat -c %Y "$cron_file")
+        rejected=$(journalctl -u cron --since "@${since}" -o cat --no-pager -q 2>/dev/null \
+                   | grep -E -e "\(\*system\*${name}\) ERROR" -e "while reading /etc/cron[.]d/${name}\$" || true)
+        if [[ -z "$rejected" ]]; then
+            pass "cron has not rejected $cron_file since it was written"
+        else
+            fail "cron rejected $cron_file: ${rejected//$'\n'/; }"
+        fi
+    done
+
+    # logrotate: LoxProx logs covered, and no duplicate stanza anywhere (one
+    # duplicate path makes logrotate skip a whole file and fail every night).
+    if [[ -f /etc/logrotate.d/loxprox ]] && grep -q '^/var/log/loxprox-\*\.log' /etc/logrotate.d/loxprox; then
+        pass "logrotate covers /var/log/loxprox-*.log"
+    else
+        fail "/etc/logrotate.d/loxprox missing — LoxProx logs grow without bound"
+    fi
+    if command -v logrotate >/dev/null 2>&1; then
+        local lr_errors
+        lr_errors=$(logrotate -d /etc/logrotate.conf 2>&1 | grep -iE '^error:|duplicate log entry' || true)
+        if [[ -z "$lr_errors" ]]; then
+            pass "logrotate -d /etc/logrotate.conf reports no errors / duplicate entries"
+        else
+            fail "logrotate config errors (nightly rotation fails): ${lr_errors//$'\n'/; }"
+        fi
+    else
+        fail "logrotate not installed"
+    fi
+
+    # journald: capped instead of 10% of the disk.
+    if grep -qs '^SystemMaxUse=' /etc/systemd/journald.conf.d/50-loxprox.conf; then
+        pass "journald capped ($(grep '^SystemMaxUse=' /etc/systemd/journald.conf.d/50-loxprox.conf)); $(journalctl --disk-usage 2>/dev/null)"
+    else
+        fail "journald size cap drop-in missing (/etc/systemd/journald.conf.d/50-loxprox.conf)"
+    fi
+
+    # auditd: LoxProx config, AppArmor policy and the root-run scripts watched.
+    local key audit_rules
+    audit_rules=$(auditctl -l 2>/dev/null || true)
+    for key in loxprox_config apparmor_config loxprox_scripts; do
+        if grep -q -- "-k ${key}\$\|key=${key}\$" <<<"$audit_rules"; then
+            pass "audit watch loaded: $key"
+        else
+            fail "audit watch NOT loaded: $key (augenrules --load?)"
+        fi
+    done
+
+    # Panel apply/renew: config.env must point at a persisted, root-only copy.
+    local deploy_sh=""
+    [[ -f /etc/loxprox/config.env ]] && deploy_sh=$(awk -F'"' '/^LOXPROX_DEPLOY_SH=/{print $2}' /etc/loxprox/config.env)
+    if [[ -n "$deploy_sh" && -f "$deploy_sh" ]]; then
+        local owner mode
+        owner=$(stat -c '%U' "$(dirname "$deploy_sh")")
+        mode=$(stat -c '%a' "$(dirname "$deploy_sh")")
+        if [[ "$owner" == "root" && "$mode" =~ ^[0-7]+$ ]] && (( (8#$mode & 8#022) == 0 )); then
+            pass "Panel deploy source present and root-only ($deploy_sh, mode $mode)"
+        else
+            fail "Panel deploy source $deploy_sh is owned by $owner / mode $mode (must be root, not group/world-writable)"
+        fi
+    else
+        fail "LOXPROX_DEPLOY_SH in config.env missing or not a file ('$deploy_sh') — panel apply/renew will refuse"
+    fi
+
+    # AppArmor complain soak: ALLOWED events since the nginx master started
+    # (reloads included) are the accesses enforce mode would deny — zero is
+    # the soak's exit criterion (docs/adr/0006). With auditd running the
+    # kernel hands AVC records to auditd, so ask ausearch first and the kernel
+    # log second. Informational (warn), not a failure: complain mode is
+    # exactly where these are supposed to surface.
+    if command -v aa-status >/dev/null 2>&1 && aa-status 2>/dev/null | grep -q '/usr/sbin/nginx'; then
+        pass "AppArmor nginx profile loaded"
+        local pid elapsed start_epoch allowed=0 n
+        pid=$(systemctl show -p MainPID --value nginx 2>/dev/null)
+        elapsed=$(ps -o etimes= -p "${pid:-0}" 2>/dev/null | tr -d ' ')
+        if [[ "$elapsed" =~ ^[0-9]+$ ]]; then
+            start_epoch=$(( $(date +%s) - elapsed ))
+            if command -v ausearch >/dev/null 2>&1; then
+                n=$(LC_ALL=C ausearch -m AVC -ts "$(LC_ALL=C date -d "@$start_epoch" '+%x %T')" 2>/dev/null \
+                    | grep 'apparmor="ALLOWED"' | grep -c 'profile="/usr/sbin/nginx"' || true)
+                (( ${n:-0} > allowed )) && allowed=$n
+            fi
+            n=$(journalctl -k --since "@$start_epoch" -o cat --no-pager -q 2>/dev/null \
+                | grep 'apparmor="ALLOWED"' | grep -c 'profile="/usr/sbin/nginx"' || true)
+            (( ${n:-0} > allowed )) && allowed=$n
+            if (( allowed == 0 )); then
+                pass "No AppArmor ALLOWED events for nginx since its master started"
+            else
+                warn "$allowed AppArmor ALLOWED event(s) for nginx since its master started — each would be a denial in enforce mode (ausearch -m AVC -ts recent)"
+            fi
+        else
+            warn "Could not determine the nginx master's start time — ALLOWED-event count skipped"
+        fi
+    else
+        warn "AppArmor nginx profile not loaded (aa-status)"
+    fi
+}
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 main() {
@@ -686,6 +871,7 @@ main() {
     test_tls
     test_gui
     test_version
+    test_operations
 
     echo ""
     echo "═══════════════════════════════════════════════════════════════════════════════"
@@ -695,4 +881,8 @@ main() {
     [[ $TESTS_FAILED -eq 0 ]] && exit 0 || exit 1
 }
 
-main "$@"
+# Only run when executed, not when sourced — tests/ source this file to
+# exercise individual checks (e.g. _cron_file_problems) in isolation.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

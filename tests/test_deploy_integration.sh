@@ -65,8 +65,16 @@ export GATEWAY_CONFIG_FILE="$GATEWAY_CONFIG_DIR/config.env"
 export LOXPROX_DEPLOY_CONF="$MOCK_ROOT/etc/loxprox/deploy.conf"
 export GUI_UNIT="$MOCK_ROOT/etc/systemd/system/loxprox-gui.service"
 export GUI_APP="$MOCK_ROOT/opt/loxprox/loxprox-gui.py"
+# 2026-10 health-audit fixes
+export LOXPROX_LOGROTATE_CONF="$MOCK_ROOT/etc/logrotate.d/loxprox"
+export NGINX_STOCK_LOGROTATE="$MOCK_ROOT/etc/logrotate.d/nginx"
+export JOURNALD_DROPIN="$MOCK_ROOT/etc/systemd/journald.conf.d/50-loxprox.conf"
+export AUDIT_RULES_FILE="$MOCK_ROOT/etc/audit/rules.d/99-gateway.rules"
+export LOXPROX_CRON_FILE="$MOCK_ROOT/etc/cron.d/loxprox"
+export LOXPROX_ALERT_CRON_FILE="$MOCK_ROOT/etc/cron.d/loxprox-alert"
+export LOXPROX_DEPLOY_DIR="$MOCK_ROOT/opt/loxprox/deploy"
 
-mkdir -p "$MOCK_ROOT"/{etc/nginx/sites-available,etc/nginx/sites-enabled,etc/nginx/conf.d,etc/crowdsec/acquis.d,etc/crowdsec/parsers/s02-enrich,etc/sysctl.d,etc/logrotate.d,etc/loxprox,etc/systemd/system,opt/loxprox,var/log,root}
+mkdir -p "$MOCK_ROOT"/{etc/nginx/sites-available,etc/nginx/sites-enabled,etc/nginx/conf.d,etc/crowdsec/acquis.d,etc/crowdsec/parsers/s02-enrich,etc/sysctl.d,etc/logrotate.d,etc/loxprox,etc/systemd/system,etc/cron.d,opt/loxprox,var/log,root}
 
 # Mock system commands
 systemctl() { true; }
@@ -119,6 +127,13 @@ GATEWAY_CONFIG_FILE="$GATEWAY_CONFIG_DIR/config.env"
 LOXPROX_DEPLOY_CONF="$MOCK_ROOT/etc/loxprox/deploy.conf"
 GUI_UNIT="$MOCK_ROOT/etc/systemd/system/loxprox-gui.service"
 GUI_APP="$MOCK_ROOT/opt/loxprox/loxprox-gui.py"
+LOXPROX_LOGROTATE_CONF="$MOCK_ROOT/etc/logrotate.d/loxprox"
+NGINX_STOCK_LOGROTATE="$MOCK_ROOT/etc/logrotate.d/nginx"
+JOURNALD_DROPIN="$MOCK_ROOT/etc/systemd/journald.conf.d/50-loxprox.conf"
+AUDIT_RULES_FILE="$MOCK_ROOT/etc/audit/rules.d/99-gateway.rules"
+LOXPROX_CRON_FILE="$MOCK_ROOT/etc/cron.d/loxprox"
+LOXPROX_ALERT_CRON_FILE="$MOCK_ROOT/etc/cron.d/loxprox-alert"
+LOXPROX_DEPLOY_DIR="$MOCK_ROOT/opt/loxprox/deploy"
 
 # ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -227,11 +242,39 @@ test_configure_nginx() {
     # HIGH-002: CSP and Permissions-Policy
     if grep -q "Content-Security-Policy" "$NGINX_SITE"; then pass "CSP header present"; else fail "CSP header missing"; fi
     if grep -q "Permissions-Policy" "$NGINX_SITE"; then pass "Permissions-Policy header present"; else fail "Permissions-Policy header missing"; fi
-    if grep -q "X-XSS-Protection" "$NGINX_SITE"; then fail "X-XSS-Protection still present (should be removed)"; else pass "X-XSS-Protection correctly removed"; fi
+    # The gateway must not SEND X-XSS-Protection; since template v4 the name
+    # legitimately appears once more, in proxy_hide_header (dropping the
+    # Miniserver's own copy).
+    if grep -qE '^[[:space:]]*add_header[[:space:]]+X-XSS-Protection' "$NGINX_SITE"; then fail "X-XSS-Protection still added (should be removed)"; else pass "X-XSS-Protection correctly not added"; fi
 
     # LOW-007: proxy_hide_header
     if grep -q "proxy_hide_header Server" "$NGINX_SITE"; then pass "proxy_hide_header Server present"; else fail "proxy_hide_header Server missing"; fi
     if grep -q "proxy_hide_header X-Powered-By" "$NGINX_SITE"; then pass "proxy_hide_header X-Powered-By present"; else fail "proxy_hide_header X-Powered-By missing"; fi
+
+    # 2026-10 (template v4): every security header nginx adds itself — and the
+    # TLS block's HSTS, and the deprecated X-XSS-Protection — is hidden from
+    # the upstream response, so the Miniserver's copy is never sent alongside.
+    local hdr added
+    for hdr in X-Frame-Options X-Content-Type-Options Referrer-Policy Content-Security-Policy Permissions-Policy Strict-Transport-Security X-XSS-Protection; do
+        if grep -qE "^[[:space:]]*proxy_hide_header[[:space:]]+${hdr};" "$NGINX_SITE"; then
+            pass "proxy_hide_header $hdr present"
+        else
+            fail "proxy_hide_header $hdr missing (upstream copy would be duplicated)"
+        fi
+    done
+    # Derived check: no add_header in the template without a matching hide.
+    while read -r added; do
+        grep -qE "^[[:space:]]*proxy_hide_header[[:space:]]+${added};" "$NGINX_SITE" \
+            || fail "add_header $added has no proxy_hide_header counterpart"
+    done < <(awk '$1 == "add_header" {print $2}' "$NGINX_SITE")
+    # proxy_hide_header is only inherited by locations that define none of
+    # their own — the template's locations must not declare any.
+    if awk '/^[[:space:]]*location /{inloc=1} inloc && /proxy_hide_header/{found=1} /^[[:space:]]*}/{inloc=0} END{exit !found}' "$NGINX_SITE"; then
+        fail "a location block declares proxy_hide_header — it would drop the server-level hides"
+    else
+        pass "server-level proxy_hide_header is inherited (no location overrides it)"
+    fi
+    grep -q "^# LOXPROX-SITE-TEMPLATE-VERSION: 4$" "$NGINX_SITE" && pass "site template stamped v4" || fail "site template not stamped v4"
 
     # AppSec placeholder
     if [[ -f "$MOCK_ROOT/etc/nginx/crowdsec-appsec.conf" ]]; then pass "AppSec placeholder created"; else fail "AppSec placeholder missing"; fi
@@ -1019,6 +1062,413 @@ test_restore_refuses_missing_archive() {
     grep -q 'nginx -t fails with the restored site' "$PROJECT_DIR/deploy.sh" && pass "nginx revert-on-failure path present" || fail "nginx revert path missing"
 }
 
+# ── 2026-10 health-audit fixes ───────────────────────────────────────────────
+
+# Fix 1 (HIGH): the generated cron file must be one cron accepts.
+test_cron_file_generation() {
+    echo ""
+    echo "━━━ /etc/cron.d/loxprox — generation + lint (2026-10, HIGH) ━━━"
+
+    rm -f "$LOXPROX_CRON_FILE"
+    _loxprox_write_security_cron
+    [[ -f "$LOXPROX_CRON_FILE" ]] && pass "cron file written" || fail "cron file missing"
+    grep -qx 'MAILTO=""' "$LOXPROX_CRON_FILE" && pass 'MAILTO="" (quoted empty value)' || fail 'MAILTO="" missing'
+    if grep -qE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=[[:space:]]*$' "$LOXPROX_CRON_FILE"; then
+        fail "generated cron file still has a bare NAME= line"
+    else
+        pass "no bare NAME= assignment"
+    fi
+    local out
+    if out=$(_loxprox_cron_lint "$LOXPROX_CRON_FILE"); then
+        pass "generated cron file passes _loxprox_cron_lint"
+    else
+        fail "generated cron file fails lint: $out"
+    fi
+    local jobs
+    jobs=$(grep -cE '^[0-9*]' "$LOXPROX_CRON_FILE" || true)
+    [[ "$jobs" -eq 3 ]] && pass "3 job lines (ban / backup / GeoIP)" || fail "expected 3 job lines, got $jobs"
+
+    # Regression: the shipped v1.3.0–2026-09 content must be rejected.
+    local bad="$MOCK_ROOT/cron-fixture-bad"
+    printf '%s\n' '# old' 'SHELL=/bin/bash' 'MAILTO=' '' \
+        '*/15 * * * * root /opt/loxprox/progressive-ban.py' > "$bad"
+    if out=$(_loxprox_cron_lint "$bad"); then
+        fail "lint accepted the pre-fix file with a bare MAILTO="
+    else
+        grep -q ':3: bare MAILTO=' <<<"$out" && pass "lint rejects the pre-fix 'MAILTO=' and names line 3" \
+                                            || fail "lint output does not name the bare MAILTO= line: $out"
+    fi
+    printf '%s\n' 'MAILTO=   ' > "$bad"
+    _loxprox_cron_lint "$bad" >/dev/null && fail "whitespace-only value accepted" || pass "whitespace-only value rejected"
+    printf '%s\n' '0 2 * * root /opt/x.sh' > "$bad"
+    _loxprox_cron_lint "$bad" >/dev/null && fail "4-time-field job accepted" || pass "job line with 4 time fields rejected"
+    printf '%s\n' 'x 2 * * * root /opt/x.sh' > "$bad"
+    _loxprox_cron_lint "$bad" >/dev/null && fail "non-numeric minute accepted" || pass "non-numeric minute rejected"
+
+    local good="$MOCK_ROOT/cron-fixture-good"
+    printf '%s\n' 'MAILTO=""' "MAILTO=''" 'PATH = /usr/bin:/bin' '@daily root /opt/x.sh' \
+        '0 3 1 jan mon root /opt/y.sh >> /var/log/y.log 2>&1' '*/5 0-6 * * 1,3,5 root /opt/z.sh' > "$good"
+    if out=$(_loxprox_cron_lint "$good"); then
+        pass 'lint accepts quoted-empty values, "NAME = v", @keywords and month/day names'
+    else
+        fail "lint rejects valid cron syntax: $out"
+    fi
+
+    # test-gateway.sh carries its own (awk) copy of the rules — same verdicts.
+    local tg_bad tg_good
+    tg_bad=$( (source "$PROJECT_DIR/test-gateway.sh"; printf '%s\n' 'MAILTO=' '0 2 * * * root /x' > "$bad"; _cron_file_problems "$bad") 2>&1)
+    tg_good=$( (source "$PROJECT_DIR/test-gateway.sh"; _cron_file_problems "$good") 2>&1)
+    grep -q 'line 1: bare assignment' <<<"$tg_bad" && pass "test-gateway.sh lint flags a bare MAILTO=" || fail "test-gateway.sh lint missed bare MAILTO=: $tg_bad"
+    [[ -z "$tg_good" ]] && pass "test-gateway.sh lint accepts the valid fixture" || fail "test-gateway.sh lint rejects valid syntax: $tg_good"
+    tg_good=$( (source "$PROJECT_DIR/test-gateway.sh"; _cron_file_problems "$LOXPROX_CRON_FILE") 2>&1)
+    [[ -z "$tg_good" ]] && pass "test-gateway.sh lint accepts the generated cron file" || fail "test-gateway.sh lint rejects the generated file: $tg_good"
+}
+
+# Fix 1: the health check consults cron's own journal, scoped to the file's
+# mtime. journalctl is mocked with a timestamped fixture journal that honours
+# --since @EPOCH the way the real one does.
+test_cron_health_check() {
+    echo ""
+    echo "━━━ _loxprox_check_cron_files() — journal guard (2026-10) ━━━"
+
+    local journal="$MOCK_ROOT/journal.fixture" args="$MOCK_ROOT/journalctl.args"
+    : > "$journal"; : > "$args"
+    journalctl() {
+        local a prev="" since="" unit=""
+        for a in "$@"; do
+            [[ "$prev" == "--since" ]] && since="${a#@}"
+            [[ "$prev" == "-u" ]] && unit="$a"
+            prev="$a"
+        done
+        printf '%s\n' "$*" >> "$MOCK_ROOT/journalctl.args"
+        [[ "$unit" == "cron" ]] || return 0
+        local ts msg
+        while IFS='|' read -r ts msg; do
+            [[ -n "$ts" ]] || continue
+            if [[ -z "$since" ]] || (( ts >= since )); then printf '%s\n' "$msg"; fi
+        done < "$MOCK_ROOT/journal.fixture"
+    }
+
+    rm -f "$LOXPROX_ALERT_CRON_FILE"
+    _loxprox_write_security_cron
+    local mtime=1790000000
+    touch -d "@$mtime" "$LOXPROX_CRON_FILE"
+
+    # (a) clean journal → pass
+    _loxprox_check_cron_files >/dev/null 2>&1 && pass "clean file + clean journal → check passes" || fail "clean state reported as failing"
+    grep -q -- "--since @$mtime" "$args" && pass "journal queried with --since @<file mtime>" || fail "journal not scoped to the file mtime: $(cat "$args")"
+
+    # (b) an error about the PREVIOUS content (before the rewrite) is ignored
+    printf '%s\n' \
+        "$((mtime - 120))|Error: bad minute; while reading /etc/cron.d/loxprox" \
+        "$((mtime - 120))|(*system*loxprox) ERROR (Syntax error, this crontab file will be ignored)" > "$journal"
+    _loxprox_check_cron_files >/dev/null 2>&1 && pass "error logged before the file was rewritten is ignored" || fail "stale pre-mtime error fails a fixed file"
+
+    # (c) an error AFTER the rewrite fails the check, and is reported
+    printf '%s\n' "$((mtime + 30))|(*system*loxprox) ERROR (Syntax error, this crontab file will be ignored)" >> "$journal"
+    local out
+    if out=$(_loxprox_check_cron_files 2>&1); then
+        fail "cron rejection after the rewrite NOT detected"
+    else
+        pass "cron rejection logged after the rewrite fails the check"
+        grep -q 'Syntax error' <<<"$out" && pass "the failure quotes cron's own message" || fail "failure message does not quote cron"
+    fi
+    printf '%s\n' "$((mtime + 30))|Error: bad minute; while reading /etc/cron.d/loxprox" > "$journal"
+    _loxprox_check_cron_files >/dev/null 2>&1 && fail "'while reading' form not detected" || pass "'Error: bad minute; while reading …' form detected"
+
+    # (d) another file's rejection must not be attributed to loxprox
+    printf '%s\n' \
+        "$((mtime + 30))|(*system*loxprox-alert) ERROR (Syntax error, this crontab file will be ignored)" \
+        "$((mtime + 30))|Error: bad minute; while reading /etc/cron.d/loxprox-alert" > "$journal"
+    _loxprox_check_cron_files >/dev/null 2>&1 && pass "loxprox-alert's errors are not attributed to loxprox (alert file absent)" || fail "name match is not exact"
+
+    # (e) …but they count once that file exists (mtime before the error)
+    printf '%s\n' '*/15 * * * * root true' > "$LOXPROX_ALERT_CRON_FILE"
+    touch -d "@$mtime" "$LOXPROX_ALERT_CRON_FILE"
+    _loxprox_check_cron_files >/dev/null 2>&1 && fail "loxprox-alert rejection not detected" || pass "loxprox-alert rejection detected for its own file"
+    rm -f "$LOXPROX_ALERT_CRON_FILE"
+
+    # (f) a malformed file fails even before cron got to it (static lint)
+    : > "$journal"
+    printf '%s\n' 'MAILTO=' '*/15 * * * * root true' > "$LOXPROX_CRON_FILE"
+    _loxprox_check_cron_files >/dev/null 2>&1 && fail "bare MAILTO= passed the health check" || pass "bare MAILTO= fails the health check before cron re-reads"
+
+    # (g) missing file fails
+    rm -f "$LOXPROX_CRON_FILE"
+    _loxprox_check_cron_files >/dev/null 2>&1 && fail "missing cron file passed" || pass "missing cron file fails the health check"
+
+    # health_check wires it in
+    grep -qE '^[[:space:]]*_loxprox_check_cron_files \|\| failures=' "$PROJECT_DIR/deploy.sh" \
+        && pass "health_check counts a cron failure" || fail "health_check does not call _loxprox_check_cron_files"
+
+    unset -f journalctl
+    _loxprox_write_security_cron
+}
+
+# Fix 3: LoxProx logs rotated; the stock nginx catch-all yields.
+test_logrotate_loxprox() {
+    echo ""
+    echo "━━━ setup_logrotate() — /var/log/loxprox-*.log + stock nginx yield (2026-10) ━━━"
+
+    local stock="$NGINX_STOCK_LOGROTATE"
+    # Debian 12 nginx-common's /etc/logrotate.d/nginx, verbatim shape.
+    cat > "$stock" <<'EOF'
+/var/log/nginx/*.log {
+	daily
+	missingok
+	rotate 14
+	compress
+	delaycompress
+	notifempty
+	create 0640 www-data adm
+	sharedscripts
+	prerotate
+		if [ -d /etc/logrotate.d/httpd-prerotate ]; then \
+			run-parts /etc/logrotate.d/httpd-prerotate; \
+		fi \
+	endscript
+	postrotate
+		invoke-rc.d nginx rotate >/dev/null 2>&1
+	endscript
+}
+EOF
+    local inode_before inode_after
+    inode_before=$(stat -c %i "$stock")
+    rm -rf "$BACKUP_DIR/files$stock"
+
+    setup_logrotate >/dev/null 2>&1
+
+    local lr="$LOXPROX_LOGROTATE_CONF"
+    [[ -f "$lr" ]] && pass "LoxProx logrotate file written" || fail "LoxProx logrotate file missing"
+    grep -qx '/var/log/loxprox-\*\.log {' "$lr" && pass "covers /var/log/loxprox-*.log" || fail "glob /var/log/loxprox-*.log missing"
+    local d
+    for d in copytruncate missingok notifempty compress weekly 'maxsize 10M' 'rotate 8'; do
+        grep -qE "^[[:space:]]+${d}\$" "$lr" && pass "directive: $d" || fail "directive missing: $d"
+    done
+    grep -qE '^[[:space:]]+create' "$lr" && fail "create used together with copytruncate" || pass "no create (copytruncate keeps the writer's fd valid)"
+
+    head -1 "$stock" | grep -qx '/var/log/nginx/access.log /var/log/nginx/error.log {' \
+        && pass "stock nginx stanza narrowed to access.log + error.log" || fail "stock nginx glob not narrowed: $(head -1 "$stock")"
+    grep -q 'invoke-rc.d nginx rotate' "$stock" && pass "rest of the stock stanza untouched" || fail "stock stanza body damaged"
+    inode_after=$(stat -c %i "$stock")
+    [[ "$inode_before" == "$inode_after" ]] && pass "stock conffile rewritten in place (inode kept)" || fail "stock conffile replaced (inode changed)"
+    [[ -f "$BACKUP_DIR/files$stock" ]] && grep -q '^/var/log/nginx/\*\.log' "$BACKUP_DIR/files$stock" \
+        && pass "original stock file backed up under BACKUP_DIR" || fail "original stock file not backed up"
+    local extra
+    extra=$(find "$(dirname "$stock")" -type f ! -name nginx ! -name loxprox ! -name loxone-nginx)
+    [[ -z "$extra" ]] && pass "no scratch/backup files left in the logrotate.d dir" || fail "stray files in logrotate.d (logrotate parses them all): $extra"
+
+    local before after
+    before=$(sha256sum "$stock" "$lr" | awk '{print $1}')
+    setup_logrotate >/dev/null 2>&1
+    after=$(sha256sum "$stock" "$lr" | awk '{print $1}')
+    [[ "$before" == "$after" ]] && pass "re-run is idempotent" || fail "re-run changed the logrotate files"
+
+    # An operator-edited stock file (no catch-all glob) is left alone.
+    printf '%s\n' '/var/log/nginx/access.log {' '    weekly' '}' > "$stock"
+    before=$(sha256sum "$stock" | awk '{print $1}')
+    setup_logrotate >/dev/null 2>&1
+    after=$(sha256sum "$stock" | awk '{print $1}')
+    [[ "$before" == "$after" ]] && pass "non-stock nginx stanza left untouched" || fail "non-stock nginx stanza was rewritten"
+
+    rm -f "$stock"
+    setup_logrotate >/dev/null 2>&1 && pass "absent stock nginx file is fine" || fail "setup_logrotate failed without a stock nginx file"
+}
+
+# Fix 4: journald drop-in, restart only on change, failure surfaces.
+test_setup_journald() {
+    echo ""
+    echo "━━━ setup_journald() (2026-10) ━━━"
+
+    local calls="$MOCK_ROOT/systemctl.calls"
+    : > "$calls"
+    systemctl() { printf '%s\n' "$*" >> "$MOCK_ROOT/systemctl.calls"; return "${MOCK_SYSTEMCTL_RC:-0}"; }
+
+    rm -f "$JOURNALD_DROPIN"
+    setup_journald >/dev/null 2>&1 && pass "first run returns 0" || fail "first run failed"
+    [[ -f "$JOURNALD_DROPIN" ]] && pass "drop-in written" || fail "drop-in missing"
+    grep -qx '\[Journal\]' "$JOURNALD_DROPIN" && pass "[Journal] section" || fail "[Journal] section missing"
+    grep -qx 'SystemMaxUse=300M' "$JOURNALD_DROPIN" && pass "SystemMaxUse=300M" || fail "SystemMaxUse=300M missing"
+    [[ "$(grep -c 'restart systemd-journald' "$calls")" -eq 1 ]] && pass "journald restarted once" || fail "journald restart count: $(cat "$calls")"
+
+    : > "$calls"
+    setup_journald >/dev/null 2>&1
+    grep -q 'restart' "$calls" && fail "unchanged drop-in restarted journald again" || pass "unchanged drop-in → no restart"
+
+    printf '[Journal]\nSystemMaxUse=2G\n' > "$JOURNALD_DROPIN"
+    : > "$calls"
+    setup_journald >/dev/null 2>&1
+    grep -qx 'SystemMaxUse=300M' "$JOURNALD_DROPIN" && grep -q 'restart systemd-journald' "$calls" \
+        && pass "drifted drop-in rewritten + journald restarted" || fail "drifted drop-in not corrected"
+
+    rm -f "$JOURNALD_DROPIN"
+    MOCK_SYSTEMCTL_RC=1 setup_journald >/dev/null 2>&1 && fail "failed journald restart reported success" || pass "failed journald restart returns non-zero (degraded step)"
+
+    systemctl() { true; }
+}
+
+# Fix 7: audit watches for /etc/loxprox, /etc/apparmor.d, /opt/loxprox.
+test_setup_auditd() {
+    echo ""
+    echo "━━━ setup_auditd() — LoxProx watches (2026-10) ━━━"
+
+    augenrules() { true; }
+    service() { true; }
+    setup_auditd >/dev/null 2>&1
+
+    local rf="$AUDIT_RULES_FILE"
+    [[ -f "$rf" ]] && pass "rules file written" || fail "rules file missing"
+    grep -qE '^-w /etc/loxprox/ +-p wa -k loxprox_config$' "$rf"   && pass "watch /etc/loxprox (loxprox_config)"    || fail "/etc/loxprox watch missing"
+    grep -qE '^-w /etc/apparmor.d/ +-p wa -k apparmor_config$' "$rf" && pass "watch /etc/apparmor.d (apparmor_config)" || fail "/etc/apparmor.d watch missing"
+    grep -qE '^-w /opt/loxprox/ +-p wa -k loxprox_scripts$' "$rf"   && pass "watch /opt/loxprox (loxprox_scripts)"   || fail "/opt/loxprox watch missing"
+    grep -qE '^-w /etc/nginx/ +-p wa -k nginx_config$' "$rf" && pass "existing watches kept" || fail "existing nginx watch lost"
+    local bad
+    bad=$(grep -vE '^(#|$)' "$rf" | grep -vE '^-w /[^ ]+ +-p [rwxa]+ +-k [a-z_]+$' || true)
+    [[ -z "$bad" ]] && pass "every rule is a well-formed '-w PATH -p PERMS -k key' line" || fail "malformed audit rule(s): $bad"
+    local dupes
+    dupes=$(grep -E '^-w ' "$rf" | awk '{print $2}' | sort | uniq -d)
+    [[ -z "$dupes" ]] && pass "no path watched twice" || fail "duplicate watches: $dupes"
+
+    unset -f augenrules service
+}
+
+# Fix 2: persisted deploy source under LOXPROX_DEPLOY_DIR.
+test_install_deploy_source() {
+    echo ""
+    echo "━━━ install_deploy_source() — panel apply/renew path (2026-10) ━━━"
+
+    local dest="$LOXPROX_DEPLOY_DIR" parent
+    parent=$(dirname "$dest")
+    rm -rf "$dest"
+    mkdir -p "$parent"; chmod 0755 "$parent"   # independent of the runner's umask
+    local saved_sh="$LOXPROX_DEPLOY_SH" saved_dir="$SCRIPT_DIR"
+
+    install_deploy_source >/dev/null 2>&1 && pass "install returns 0 from the repo tree" || fail "install failed from the repo tree"
+    [[ "$LOXPROX_DEPLOY_SH" == "$dest/deploy.sh" ]] && pass "LOXPROX_DEPLOY_SH now points at the persisted copy" || fail "LOXPROX_DEPLOY_SH not repointed: $LOXPROX_DEPLOY_SH"
+
+    local rel missing=""
+    for rel in "${_LOXPROX_DEPLOY_SOURCE_FILES[@]}"; do
+        cmp -s "$PROJECT_DIR/$rel" "$dest/$rel" || missing+=" $rel"
+    done
+    for rel in "${_LOXPROX_DEPLOY_SOURCE_DIRS[@]}"; do
+        diff -r "$PROJECT_DIR/$rel" "$dest/$rel" >/dev/null 2>&1 || missing+=" $rel/"
+    done
+    [[ -z "$missing" ]] && pass "manifest copied byte-identical" || fail "missing/different in copy:$missing"
+    grep -q '^version=' "$dest/VERSION" && pass "VERSION written into the copy ($(head -1 "$dest/VERSION"))" || fail "VERSION missing from the copy"
+    [[ "$(stat -c %a "$dest")" == "750" ]] && pass "copy root dir is 0750" || fail "copy root dir mode $(stat -c %a "$dest")"
+    local loose
+    loose=$(find "$dest" -perm /o=rwx -print -quit)
+    [[ -z "$loose" ]] && pass "nothing in the copy is accessible to 'other'" || fail "world-accessible path in copy: $loose"
+    [[ -z "$(find "$parent" -maxdepth 1 -name ".$(basename "$dest").*")" ]] && pass "no staging/old dirs left behind" || fail "staging leftovers in $parent"
+
+    write_runtime_config >/dev/null 2>&1
+    grep -qx "LOXPROX_DEPLOY_SH=\"$dest/deploy.sh\"" "$GATEWAY_CONFIG_FILE" \
+        && pass "config.env records the persisted deploy.sh" || fail "config.env: $(grep LOXPROX_DEPLOY_SH "$GATEWAY_CONFIG_FILE")"
+
+    # The copy is self-contained: SCRIPT_DIR resolves to it and every path
+    # deploy.sh reads relative to SCRIPT_DIR exists there.
+    local out rc
+    out=$(bash "$dest/deploy.sh" --help 2>&1); rc=$?
+    [[ $rc -eq 0 ]] && pass "persisted deploy.sh runs (--help exits 0)" || fail "persisted deploy.sh --help exited $rc"
+    local copy_script_dir
+    copy_script_dir=$( (source "$dest/deploy.sh" >/dev/null 2>&1; printf '%s' "$SCRIPT_DIR") )
+    [[ "$copy_script_dir" -ef "$dest" ]] && pass "SCRIPT_DIR resolves to the copy when run from it" || fail "SCRIPT_DIR from copy: $copy_script_dir"
+    local ref absent=""
+    while read -r ref; do
+        [[ "$ref" == VERSION ]] && continue
+        [[ -e "$dest/$ref" ]] || absent+=" $ref"
+    done < <(grep -oE '(\$\{SCRIPT_DIR:-\.\}|\$src_dir)/[A-Za-z0-9_./-]+' "$PROJECT_DIR/deploy.sh" | sed -E 's#^[^/]+/##' | sort -u)
+    [[ -z "$absent" ]] && pass "every SCRIPT_DIR-relative path deploy.sh reads exists in the copy" || fail "absent from copy:$absent"
+
+    # Re-run FROM the copy (the panel's apply): no rewrite of the running tree.
+    local inode_before inode_after
+    inode_before=$(stat -c %i "$dest")
+    out=$( (source "$dest/deploy.sh" >/dev/null 2>&1; set +e
+            LOXPROX_DEPLOY_DIR="$dest"; LOG_FILE="$MOCK_ROOT/var/log/loxprox-deploy.log"
+            install_deploy_source >/dev/null 2>&1; printf '%s|%s' "$?" "$LOXPROX_DEPLOY_SH") )
+    inode_after=$(stat -c %i "$dest")
+    [[ "$out" == "0|$dest/deploy.sh" ]] && pass "re-run from the copy returns 0 and keeps the path" || fail "re-run from copy: $out"
+    [[ "$inode_before" == "$inode_after" ]] && pass "re-run from the copy leaves the tree in place" || fail "re-run from the copy swapped the tree it runs from"
+
+    # A fresh deploy replaces a stale copy by rename: stale files vanish, and a
+    # reader holding the old deploy.sh open keeps reading the complete old file.
+    echo "stale" > "$dest/stale-from-old-version.txt"
+    printf '\n# old-copy-marker\n' >> "$dest/deploy.sh"
+    local old_sum
+    old_sum=$(sha256sum "$dest/deploy.sh" | awk '{print $1}')
+    exec 9<"$dest/deploy.sh"
+    install_deploy_source >/dev/null 2>&1 && pass "re-install over an existing copy returns 0" || fail "re-install failed"
+    [[ ! -e "$dest/stale-from-old-version.txt" ]] && pass "stale file from the previous copy is gone" || fail "stale file survived"
+    cmp -s "$PROJECT_DIR/deploy.sh" "$dest/deploy.sh" && pass "deploy.sh replaced with the current source" || fail "deploy.sh not refreshed"
+    [[ "$(sha256sum <&9 | awk '{print $1}')" == "$old_sum" ]] && pass "an fd open on the old deploy.sh still reads it intact (swap, not overwrite)" || fail "old deploy.sh was modified in place"
+    exec 9<&-
+
+    # Failure paths: an incomplete tree, an unsafe parent, an unreadable file —
+    # each must leave the previous copy and config.env's path untouched.
+    local tree_sum tree_sum_after
+    tree_sum=$(cd "$dest" && find . -type f -exec sha256sum {} + | sort | sha256sum)
+    local src="$MOCK_ROOT/src-incomplete"
+    rm -rf "$src"; mkdir -p "$src"
+    cp -R "$PROJECT_DIR/." "$src/" 2>/dev/null
+    rm -f "$src/apparmor/usr.sbin.nginx"
+    SCRIPT_DIR="$src"; LOXPROX_DEPLOY_SH="$src/deploy.sh"
+    install_deploy_source >/dev/null 2>&1 && fail "incomplete source tree accepted" || pass "incomplete source tree refused"
+    [[ "$LOXPROX_DEPLOY_SH" == "$src/deploy.sh" ]] && pass "refusal keeps the fallback LOXPROX_DEPLOY_SH" || fail "refusal changed LOXPROX_DEPLOY_SH"
+    tree_sum_after=$(cd "$dest" && find . -type f -exec sha256sum {} + | sort | sha256sum)
+    [[ "$tree_sum" == "$tree_sum_after" ]] && pass "previous copy untouched after the refusal" || fail "previous copy modified by a refused install"
+
+    cp "$PROJECT_DIR/apparmor/usr.sbin.nginx" "$src/apparmor/usr.sbin.nginx"
+    chmod 0777 "$parent"
+    install_deploy_source >/dev/null 2>&1 && fail "group/world-writable parent accepted" || pass "group/world-writable parent refused"
+    chmod 0755 "$parent"
+
+    if [[ $EUID -ne 0 ]]; then
+        chmod 000 "$src/progressive-ban.py"
+        install_deploy_source >/dev/null 2>&1 && fail "unreadable source file accepted" || pass "copy failure mid-way refused"
+        chmod 0644 "$src/progressive-ban.py"
+        tree_sum_after=$(cd "$dest" && find . -type f -exec sha256sum {} + | sort | sha256sum)
+        [[ "$tree_sum" == "$tree_sum_after" ]] && pass "previous copy untouched after a failed copy" || fail "failed copy damaged the previous copy"
+        [[ -z "$(find "$parent" -maxdepth 1 -name ".$(basename "$dest").*")" ]] && pass "failed copy cleaned its staging dir" || fail "staging dir left after a failed copy"
+    else
+        pass "(running as root — unreadable-file case not reproducible, skipped)"
+    fi
+
+    SCRIPT_DIR="$saved_dir"; LOXPROX_DEPLOY_SH="$saved_sh"
+    rm -rf "$src"
+
+    # The SOFT-SSH login nag points at the persisted copy, not a path that
+    # never existed (/opt/loxprox/deploy.sh).
+    grep -q 'sudo bash /opt/loxprox/deploy/deploy.sh --finalize-ssh' "$PROJECT_DIR/deploy.sh" \
+        && pass "SSH MOTD nag names /opt/loxprox/deploy/deploy.sh" || fail "SSH MOTD nag path stale"
+    grep -qE '^[[:space:]]*run_optional_step "persistent deploy source"[[:space:]]+install_deploy_source$' "$PROJECT_DIR/deploy.sh" \
+        && pass "main() runs install_deploy_source" || fail "install_deploy_source not wired into main()"
+}
+
+# Fix 5: an existing v3 site — including a TLS one, as in production — is
+# regenerated to v4 and keeps its TLS block.
+test_site_template_v3_upgrade() {
+    echo ""
+    echo "━━━ configure_nginx() — v3 → v4 regeneration keeps TLS (2026-10) ━━━"
+
+    local backup_path="$BACKUP_DIR/files$NGINX_SITE"
+    rm -f "$NGINX_SITE" "$backup_path"
+    configure_nginx >/dev/null 2>&1
+    _loxprox_site_enable_tls >/dev/null 2>&1
+    # Turn it into what a v3 install has on disk: same params, older stamp, no hides.
+    sed -i -e 's/^# LOXPROX-SITE-TEMPLATE-VERSION: 4$/# LOXPROX-SITE-TEMPLATE-VERSION: 3/' \
+           -e '/proxy_hide_header \(X-Frame-Options\|X-Content-Type-Options\|Referrer-Policy\|Content-Security-Policy\|Permissions-Policy\|Strict-Transport-Security\|X-XSS-Protection\);/d' "$NGINX_SITE"
+    rm -f "$backup_path"
+    grep -q 'proxy_hide_header X-Frame-Options' "$NGINX_SITE" && fail "fixture still has the v4 hides" || pass "fixture is a v3 TLS site"
+
+    configure_nginx >/dev/null 2>&1
+    grep -q '^# LOXPROX-SITE-TEMPLATE-VERSION: 4$' "$NGINX_SITE" && pass "v3 site regenerated to v4" || fail "v3 site not regenerated"
+    grep -q 'proxy_hide_header X-Frame-Options;' "$NGINX_SITE" && pass "regenerated site hides the upstream X-Frame-Options" || fail "hides missing after regeneration"
+    grep -q '^[[:space:]]*listen 1080 ssl;' "$NGINX_SITE" && grep -q '# LOXPROX-TLS-BEGIN' "$NGINX_SITE" \
+        && pass "TLS block re-applied after regeneration" || fail "regeneration dropped the TLS listener"
+    [[ -f "$backup_path" ]] && grep -q 'TEMPLATE-VERSION: 3' "$backup_path" && pass "v3 site backed up first" || fail "v3 site not backed up"
+    rm -f "$NGINX_SITE" "$backup_path"
+}
+
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 
 cleanup() {
@@ -1070,6 +1520,15 @@ test_gui_setup
 test_gui_firewall_rule
 test_cli_help_and_unknown_flag
 test_restore_refuses_missing_archive
+
+# 2026-10 health-audit fixes
+test_cron_file_generation
+test_cron_health_check
+test_logrotate_loxprox
+test_setup_journald
+test_setup_auditd
+test_install_deploy_source
+test_site_template_v3_upgrade
 
 echo ""
 echo "═══════════════════════════════════════════════════════════════════════════════"

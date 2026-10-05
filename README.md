@@ -17,7 +17,7 @@ Internet ──► Router:1080 ──► LoxProx-Gateway:1080 ──► Loxone:8
                                    ├── nginx (Proxy, Rate Limits, Header)
                                    ├── CrowdSec (IDS, CAPI-Blocks, AppSec WAF)
                                    ├── nftables (Input DROP, erlaubt :1080 + SSH)
-                                   ├── AppArmor (nginx-Profil aktiv)
+                                   ├── AppArmor (nginx-Profil: Complain → Enforce per Opt-in)
                                    ├── auditd (Config-Änderungs-Überwachung)
                                    └── Discord-Alerts (Echtzeit)
 
@@ -131,12 +131,12 @@ gateway-eigene **LoxProx Panel** zur Verfügung — eine LAN-only Web-UI unter
 | 3 | **CrowdSec** | IDS, parst nginx- und SSH-Logs; CAPI-Community-Feed (~26k bekannte Bad IPs) |
 | 4 | **Firewall Bouncer** | Holt CrowdSec-Entscheidungen ab → setzt sie dynamisch in nftables durch |
 | 5 | **AppSec WAF** | Virtual Patching (200+ CVE-spezifische Regeln); prüft jeden Request vor dem Weiterreichen |
-| 6 | **AppArmor** | nginx-Profil aktiv |
-| 7 | **auditd** | Überwacht Config-Änderungen an nginx, crowdsec, nftables, ssh, sudoers |
+| 6 | **AppArmor** | nginx-Profil — läuft im Complain-Modus (protokolliert, blockiert nicht), bis du nach dem Soak mit `APPARMOR_NGINX_MODE="enforce"` auf Enforce umschaltest ([ADR 0006](docs/adr/0006-apparmor-nginx-profile-complain-first.md)) |
+| 7 | **auditd** | Überwacht Config-Änderungen an nginx, crowdsec, nftables, ssh, sudoers, an der LoxProx-Config, der AppArmor-Policy und den Scripts unter `/opt/loxprox` |
 | 8 | **unattended-upgrades** | Auto-Reboot um 03:00 für Kernel-Patches |
 | 9 | **Security-Monitor** | 60-Sek-Zyklus: CrowdSec-Blocks, nginx-Fehler, Auth-Versuche, Resource-Alarme → Discord |
 | 10 | **Network Watchdog** | Selbstheilend: erkennt Netzwerk-Ausfälle (dhclient-Death-Spiral, Routing-Korruption) und repariert per Service-Restart oder Reboot |
-| 11 | **Log-Rotation** | 14 Tage nginx-Log-Aufbewahrung |
+| 11 | **Log-Rotation** | 14 Tage nginx-Log-Aufbewahrung; LoxProx-eigene Logs wöchentlich bzw. ab 10 MB (8 Generationen); Journal auf 300 MB begrenzt |
 | 12 | **Config-Backup** | Tägliche automatische Backups nach `/root/loxprox-backups/` — enthält `deploy.conf`, TLS-Cert+Key, Tunnel-Config und das SSH-Drop-in; Restore via `deploy.sh --restore <tarball>` |
 
 ---
@@ -216,7 +216,7 @@ Typischer Fußabdruck auf dem Pi: nginx ~5–10 MB · CrowdSec-Agent ~30–50 MB
 | Ausnutzung von Loxone-CVEs | AppSec WAF (200+ Virtual Patches) |
 | SSH-Brute-Force | CrowdSec `ssh-bf` + nftables-Source-Beschränkung |
 | Slowloris / Slow-Read | aggressive nginx-Timeouts (10–15 s) |
-| Config-Manipulation | auditd + AppArmor |
+| Config-Manipulation | auditd (+ AppArmor, sobald enforced) |
 
 **Nicht abgedeckt:** volumetrischer DDoS (Leitungssättigung). Ein 1–2-GB-Gateway kann eine pipe-füllende Attacke nicht abfangen — dafür brauchst du ISP-Scrubbing oder einen Cloud-Service.
 

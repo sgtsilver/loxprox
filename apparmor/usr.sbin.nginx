@@ -14,7 +14,15 @@
 #
 # Containment intent: a compromised nginx must NOT read /etc/loxprox/
 # outside tls/ (deploy.conf holds the Discord webhook + panel password),
-# must not touch /opt/loxprox/, and must not execute anything.
+# must not touch /opt/loxprox/, and must not execute anything other than
+# re-executing its own binary (the in-place binary upgrade), which stays
+# inside this profile (ix).
+#
+# 2026-10: the complain soak logged ~58 ALLOWED events per nginx start/reload
+# on a Debian 12 nginx-extras box, all from paths below that the original
+# profile missed — the dynamic lua and perl modules initialising, a NUMA
+# memory probe, and the binary-upgrade pid/exec dance. They are allowed now;
+# each would have been a denial in enforce mode.
 
 #include <tunables/global>
 
@@ -42,9 +50,27 @@
   network unix stream,
   network netlink raw,
 
-  /usr/sbin/nginx mr,
+  # ix: binary upgrade (USR2 / Debian's package-upgrade "upgrade" action)
+  # makes the master execve() /usr/sbin/nginx; the new master inherits this
+  # profile instead of escaping it.
+  /usr/sbin/nginx mrix,
   /usr/lib/nginx/modules/ r,
   /usr/lib/nginx/modules/*.so mr,
+
+  # nginx-extras loads libnginx-mod-http-lua, which pulls lua-resty-core
+  # (resty/core.lua, resty/core/*.lua, resty/lrucache.lua) at init even with
+  # no lua directive configured. Read-only distro library code.
+  /usr/share/lua/** r,
+
+  # ...and libnginx-mod-http-perl, whose embedded interpreter loads nginx.pm,
+  # which pulls its pragmas (strict, warnings, warnings/register, constant,
+  # Exporter, XSLoader) from /usr/share/perl/<version>/. Version-agnostic
+  # glob: survives a Debian release bump of the perl version. Read-only.
+  /usr/share/perl/** r,
+
+  # NUMA topology probe at start (node list + per-node meminfo).
+  /sys/devices/system/node/ r,
+  /sys/devices/system/node/node[0-9]*/meminfo r,
 
   # configuration (read-only)
   /etc/nginx/ r,
@@ -70,6 +96,9 @@
 
   # runtime state
   /run/nginx.pid rw,
+  # Binary upgrade: the old master renames nginx.pid to nginx.pid.oldbin and
+  # unlinks it when it exits (rename back on a rolled-back upgrade).
+  /run/nginx.pid.oldbin rw,
   /var/lib/nginx/ r,
   /var/lib/nginx/** rw,
 }

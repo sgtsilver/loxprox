@@ -105,10 +105,16 @@ LOXPROX_DEPLOY_CONF="${LOXPROX_DEPLOY_CONF:-/etc/loxprox/deploy.conf}"
 LOG_FILE="${LOG_FILE:-/var/log/loxprox-deploy.log}"
 BACKUP_DIR="${BACKUP_DIR:-/root/loxprox-backup-$(date +%Y%m%d-%H%M%S)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Absolute path of the running deploy.sh. Recorded into config.env so the
-# LoxProx Panel can re-run it for its apply / renew jobs — the source tree
-# lives wherever the operator unpacked it, there is no fixed location.
+# Absolute path of the running deploy.sh. install_deploy_source() repoints it
+# at the persisted copy under $LOXPROX_DEPLOY_DIR before config.env records it
+# for the LoxProx Panel's apply / renew jobs; this value is only the fallback
+# when that copy could not be installed.
 LOXPROX_DEPLOY_SH="${LOXPROX_DEPLOY_SH:-$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")}"
+# 2026-10: persistent, root-only copy of the deploy source. The operator's
+# unpack location is usually /tmp/loxprox-src-<ver>, which the /tmp tmpfs
+# (setup_tmp_mount) loses on the next reboot — and the panel runs with
+# PrivateTmp, so it never saw that directory in the first place.
+LOXPROX_DEPLOY_DIR="${LOXPROX_DEPLOY_DIR:-/opt/loxprox/deploy}"
 NGINX_SITE="${NGINX_SITE:-/etc/nginx/sites-available/loxone}"
 NGINX_ENABLED="${NGINX_ENABLED:-/etc/nginx/sites-enabled/loxone}"
 CROWDSEC_NGINX_ACQUIS="${CROWDSEC_NGINX_ACQUIS:-/etc/crowdsec/acquis.d/nginx.yaml}"
@@ -164,6 +170,17 @@ GUI_APP="${GUI_APP:-/opt/loxprox/loxprox-gui.py}"
 SYSCTL_CONF="${SYSCTL_CONF:-/etc/sysctl.d/99-security-gateway.conf}"
 NFTABLES_CONF="${NFTABLES_CONF:-/etc/nftables.conf}"
 LOGROTATE_CONF="${LOGROTATE_CONF:-/etc/logrotate.d/loxone-nginx}"
+# 2026-10: rotation for LoxProx's own /var/log/loxprox-*.log files, and the
+# stock Debian nginx stanza whose catch-all glob collides with LOGROTATE_CONF.
+LOXPROX_LOGROTATE_CONF="${LOXPROX_LOGROTATE_CONF:-/etc/logrotate.d/loxprox}"
+NGINX_STOCK_LOGROTATE="${NGINX_STOCK_LOGROTATE:-/etc/logrotate.d/nginx}"
+# 2026-10: journald size cap drop-in.
+JOURNALD_DROPIN="${JOURNALD_DROPIN:-/etc/systemd/journald.conf.d/50-loxprox.conf}"
+JOURNALD_SYSTEM_MAX_USE="${JOURNALD_SYSTEM_MAX_USE:-300M}"
+AUDIT_RULES_FILE="${AUDIT_RULES_FILE:-/etc/audit/rules.d/99-gateway.rules}"
+# The two cron files deploy.sh owns (security monitoring + optional mail alert).
+LOXPROX_CRON_FILE="${LOXPROX_CRON_FILE:-/etc/cron.d/loxprox}"
+LOXPROX_ALERT_CRON_FILE="${LOXPROX_ALERT_CRON_FILE:-/etc/cron.d/loxprox-alert}"
 GATEWAY_CONFIG_DIR="${GATEWAY_CONFIG_DIR:-/etc/loxprox}"
 GATEWAY_CONFIG_FILE="${GATEWAY_CONFIG_FILE:-$GATEWAY_CONFIG_DIR/config.env}"
 
@@ -1171,7 +1188,9 @@ install_nginx() {
 # missing or lower. BUMP IT in the same commit as any change to the template
 # below — otherwise upgraded installs silently keep the old file, which is
 # exactly the bug this versioning replaces.
-_LOXPROX_SITE_TEMPLATE_VERSION=3
+#   v4 (2026-10): proxy_hide_header for every security header nginx sets
+#                 itself, so the Miniserver's own copies stop being duplicated.
+_LOXPROX_SITE_TEMPLATE_VERSION=4
 _LOXPROX_SITE_VERSION_MARKER="# LOXPROX-SITE-TEMPLATE-VERSION:"
 _LOXPROX_SITE_PARAMS_MARKER="# LOXPROX-SITE-PARAMS:"
 
@@ -1419,6 +1438,21 @@ ${appsec_access_log}
     # Hide backend version leakage
     proxy_hide_header Server;
     proxy_hide_header X-Powered-By;
+
+    # The gateway owns the security headers above. nginx does not merge
+    # add_header with an upstream header of the same name — it sends both, and
+    # the Miniserver's own "X-Frame-Options: deny" next to ours is a conflicting
+    # pair that browsers may resolve either way. Drop the upstream copies of
+    # every header added here (and the TLS block's HSTS), plus the deprecated
+    # X-XSS-Protection the gateway deliberately no longer sends. Server-level,
+    # so / and /ws/ both inherit it (neither sets proxy_hide_header itself).
+    proxy_hide_header X-Frame-Options;
+    proxy_hide_header X-Content-Type-Options;
+    proxy_hide_header Referrer-Policy;
+    proxy_hide_header Content-Security-Policy;
+    proxy_hide_header Permissions-Policy;
+    proxy_hide_header Strict-Transport-Security;
+    proxy_hide_header X-XSS-Protection;
 
     # Slowloris / slow-read mitigations
     proxy_connect_timeout ${PROXY_CONNECT_TIMEOUT}s;
@@ -3107,7 +3141,7 @@ printf '%s\n' ""
 printf '%s\n' "  No authorized_keys was present when deploy ran. Fix it NOW:"
 printf '%s\n' "    1. On your workstation:  ssh-keygen -t ed25519"
 printf '%s\n' "    2.                       ssh-copy-id root@${IP:-this-gateway}"
-printf '%s\n' "    3. On this gateway:      sudo bash /opt/loxprox/deploy.sh --finalize-ssh"
+printf '%s\n' "    3. On this gateway:      sudo bash /opt/loxprox/deploy/deploy.sh --finalize-ssh"
 printf '%s\n' "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 MOTD
     chmod 0755 /etc/update-motd.d/99-loxprox-ssh-warn
@@ -3214,7 +3248,8 @@ setup_auditd() {
 
     dpkg -l | grep -q "^ii  auditd " || apt-get install -y auditd audispd-plugins
 
-    cat > /etc/audit/rules.d/99-gateway.rules <<EOF
+    mkdir -p "$(dirname "$AUDIT_RULES_FILE")"
+    cat > "$AUDIT_RULES_FILE" <<EOF
 # LoxProx — audit rules
 # Generated by deploy.sh on $(date -Iseconds)
 
@@ -3223,6 +3258,15 @@ setup_auditd() {
 -w /etc/crowdsec/        -p wa -k crowdsec_config
 -w /etc/nftables.conf    -p wa -k firewall_config
 -w /etc/ssh/sshd_config  -p wa -k sshd_config
+
+# LoxProx's own state (2026-10). Expected noise: every deploy rewrites
+# config.env/VERSION and the scripts under /opt/loxprox (incl. the persisted
+# deploy source), the panel writes deploy.conf (+ .bak copies), and acme.sh
+# renewals rewrite /etc/loxprox/tls/ — an event outside those windows is the
+# signal. /opt/loxprox holds root-run cron/timer scripts (persistence vector).
+-w /etc/loxprox/         -p wa -k loxprox_config
+-w /etc/apparmor.d/      -p wa -k apparmor_config
+-w /opt/loxprox/         -p wa -k loxprox_scripts
 
 # Auth-related files
 -w /etc/passwd           -p wa -k auth
@@ -3272,7 +3316,7 @@ EOF
     # Append per-user .ssh watches for non-root accounts present on the box.
     # Done dynamically so freshly created accounts get covered on subsequent
     # deploys (idempotent — augenrules dedupes identical -w lines).
-    local rules_file=/etc/audit/rules.d/99-gateway.rules
+    local rules_file="$AUDIT_RULES_FILE"
     while IFS=: read -r user _ uid _ _ home _; do
         [[ "$uid" -ge 1000 ]] || continue
         [[ -d "$home" ]] || continue
@@ -3294,6 +3338,7 @@ EOF
 setup_logrotate() {
     banner "Log Rotation"
     backup_file "$LOGROTATE_CONF"
+    mkdir -p "$(dirname "$LOGROTATE_CONF")"
 
     cat > "$LOGROTATE_CONF" <<EOF
 /var/log/nginx/loxone-*.log
@@ -3311,7 +3356,101 @@ setup_logrotate() {
     endscript
 }
 EOF
-    ok "Logrotate: 14-day retention."
+
+    # 2026-10: LoxProx's own logs were never rotated (the monitor and network
+    # watchdog logs reached tens of MB). One glob covers every writer:
+    #   loxprox-monitor / -network-watchdog / -tunnel-watchdog  systemd append:
+    #   loxprox-gui      systemd append: on a long-running service (fd held open)
+    #   loxprox-cron     cron >>          loxprox-deploy   deploy.sh tee -a / >>
+    # All of them write with O_APPEND, and the GUI never reopens its fd, so
+    # copytruncate is the one strategy that is correct for every writer — the
+    # rotated copy is taken, the live file truncated in place, and the next
+    # append lands at offset 0. Nothing else on Debian matches
+    # /var/log/loxprox-*.log, so this cannot collide with another stanza.
+    backup_file "$LOXPROX_LOGROTATE_CONF"
+    mkdir -p "$(dirname "$LOXPROX_LOGROTATE_CONF")"
+    cat > "$LOXPROX_LOGROTATE_CONF" <<'EOF'
+# LoxProx — rotation for /var/log/loxprox-*.log (generated by deploy.sh)
+/var/log/loxprox-*.log {
+    weekly
+    maxsize 10M
+    rotate 8
+    missingok
+    notifempty
+    compress
+    copytruncate
+}
+EOF
+    chmod 0644 "$LOGROTATE_CONF" "$LOXPROX_LOGROTATE_CONF" 2>/dev/null || true
+
+    _loxprox_yield_stock_nginx_logrotate
+    ok "Logrotate: nginx logs 14 days; LoxProx logs weekly (or at 10 MB), 8 generations."
+}
+
+# 2026-10: the stock Debian /etc/logrotate.d/nginx rotates /var/log/nginx/*.log,
+# which also matches the loxone-*.log and appsec-detections.log paths owned by
+# LOGROTATE_CONF above. logrotate refuses a path claimed by two stanzas
+# ("duplicate log entry … skipping"), skips the second file it parses, and the
+# nightly logrotate.service fails — on the production gateway that froze
+# /var/log/nginx/error.log for three months until it was narrowed by hand on
+# 2026-08-30. Make that yield durable: the stock stanza keeps exactly the two
+# files nothing else rotates. Only the untouched stock glob is rewritten; an
+# already-narrowed or operator-edited file is left alone.
+_loxprox_yield_stock_nginx_logrotate() {
+    local stock="$NGINX_STOCK_LOGROTATE"
+    [[ -f "$stock" ]] || return 0
+    if ! grep -qE '^[[:space:]]*/var/log/nginx/\*\.log([[:space:]{]|$)' "$stock"; then
+        return 0
+    fi
+    backup_file "$stock"
+    # The scratch file must NOT live in /etc/logrotate.d: logrotate parses every
+    # file there, so a leftover copy would itself be the duplicate stanza.
+    local tmp
+    tmp=$(mktemp -t loxprox-nginx-logrotate.XXXXXX) || return 1
+    sed -E 's#^([[:space:]]*)/var/log/nginx/\*\.log([[:space:]{]|$)#\1/var/log/nginx/access.log /var/log/nginx/error.log\2#' \
+        "$stock" > "$tmp"
+    # Rewrite in place (cat >, not mv) so the conffile keeps its inode, mode and
+    # owner — dpkg then treats it as a locally modified conffile on upgrades.
+    if [[ -s "$tmp" ]] && cat "$tmp" > "$stock"; then
+        rm -f "$tmp"
+        info "Narrowed $stock to access.log + error.log (its catch-all glob collided with $LOGROTATE_CONF)."
+        return 0
+    fi
+    rm -f "$tmp"
+    warn "Could not narrow $stock — logrotate may report duplicate nginx log entries."
+    return 1
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# journald size cap (2026-10)
+# ═══════════════════════════════════════════════════════════════════════════════
+# journald's default ceiling is 10% of the filesystem (up to 4 GB) — 1.3 GB of
+# a 14 GB gateway disk in practice. The drop-in caps the persistent journal;
+# journald enforces the cap (vacuums archived files) when it starts. The
+# restart happens only when the drop-in content changed, so a re-deploy does
+# not bounce journald for nothing. Restarting systemd-journald is safe: stdout
+# streams of running services are kept in systemd's fd store.
+
+setup_journald() {
+    banner "journald size cap"
+    local desired
+    desired="# LoxProx — persistent journal size cap (generated by deploy.sh)
+[Journal]
+SystemMaxUse=${JOURNALD_SYSTEM_MAX_USE}
+"
+    if [[ -f "$JOURNALD_DROPIN" ]] && [[ "$(cat "$JOURNALD_DROPIN")"$'\n' == "$desired" ]]; then
+        ok "journald cap already SystemMaxUse=${JOURNALD_SYSTEM_MAX_USE} ($JOURNALD_DROPIN) — no restart."
+        return 0
+    fi
+    backup_file "$JOURNALD_DROPIN"
+    mkdir -p "$(dirname "$JOURNALD_DROPIN")"
+    printf '%s' "$desired" > "$JOURNALD_DROPIN"
+    chmod 0644 "$JOURNALD_DROPIN"
+    if ! systemctl restart systemd-journald; then
+        error "systemd-journald did not restart with $JOURNALD_DROPIN — the cap is not active yet."
+        return 1
+    fi
+    ok "journald capped at SystemMaxUse=${JOURNALD_SYSTEM_MAX_USE} ($JOURNALD_DROPIN); journald restarted."
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3332,7 +3471,7 @@ setup_alerting() {
     mkdir -p /var/lib/loxprox
     chmod 0750 /var/lib/loxprox
 
-    cat > /etc/cron.d/loxprox-alert <<EOF
+    cat > "$LOXPROX_ALERT_CRON_FILE" <<EOF
 */15 * * * * root prev=\$(cat /var/lib/loxprox/last-error-count 2>/dev/null || echo 0); curr=\$(wc -l < /var/log/nginx/loxone-error.log 2>/dev/null || echo 0); echo "\$curr" > /var/lib/loxprox/last-error-count; [ \$((curr - prev)) -gt 100 ] && echo "High error rate: \$((curr - prev)) new errors in 15 min" | mail -s "Loxone Gateway Alert" "$ALERT_EMAIL"
 EOF
     ok "Alerting → $ALERT_EMAIL"
@@ -3402,12 +3541,39 @@ EOF
     systemctl daemon-reload
     systemctl enable --now loxprox-monitor.timer
 
-    # Single cron file for all periodic jobs
-    cat > /etc/cron.d/loxprox <<'EOF'
+    _loxprox_write_security_cron
+    # Make cron re-read /etc/cron.d now instead of within the next minute, so
+    # a file it rejects is in the journal before health_check looks for it.
+    _loxprox_cron_reload
+
+    local cron_file cron_bad=0
+    for cron_file in "$LOXPROX_CRON_FILE" "$LOXPROX_ALERT_CRON_FILE"; do
+        [[ -f "$cron_file" ]] || continue
+        if ! _loxprox_cron_lint "$cron_file" >> "$LOG_FILE"; then
+            error "$cron_file would be rejected by cron (details in $LOG_FILE)."
+            cron_bad=1
+        fi
+    done
+    (( cron_bad == 0 )) || return 1
+
+    ok "Security monitor (60s), daily backup, daily GeoIP, progressive ban (15min) installed."
+}
+
+# Single cron file for all periodic jobs.
+#
+# 2026-10 (HIGH): this file carried a bare `MAILTO=` from v1.3.0 (commit
+# 9bc2fe3, 2026-05-18) on. Debian's cron does not read an assignment with an
+# empty value as an environment line; it parses it as a job, fails with
+# "bad minute", and IGNORES THE WHOLE FILE ("Syntax error, this crontab file
+# will be ignored"). Progressive ban, the daily backup and the GeoIP refresh
+# silently never ran. An empty value must be quoted: MAILTO="".
+_loxprox_write_security_cron() {
+    mkdir -p "$(dirname "$LOXPROX_CRON_FILE")"
+    cat > "$LOXPROX_CRON_FILE" <<'EOF'
 # LoxProx security automation
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
-MAILTO=
+MAILTO=""
 
 # Progressive ban escalation — extend repeat offenders every 15 min
 */15 * * * * root /opt/loxprox/progressive-ban.py >> /var/log/loxprox-cron.log 2>&1
@@ -3418,9 +3584,121 @@ MAILTO=
 # Daily GeoIP blocklist refresh
 0 3 * * * root /opt/loxprox/geoip-block.sh >> /var/log/loxprox-cron.log 2>&1
 EOF
-    chmod 644 /etc/cron.d/loxprox
+    chmod 644 "$LOXPROX_CRON_FILE"
+}
 
-    ok "Security monitor (60s), daily backup, daily GeoIP, progressive ban (15min) installed."
+# Restart cron so it parses /etc/cron.d immediately (cron.service runs with
+# KillMode=process on Debian — jobs already running are not killed). Without
+# it, cron picks the change up on its next minute tick, which can be after
+# health_check has already looked.
+_loxprox_cron_reload() {
+    systemctl restart cron 2>>"$LOG_FILE" \
+        || warn "Could not restart cron — it re-reads /etc/cron.d within a minute anyway."
+}
+
+# Static check of a system crontab (/etc/cron.d format) for the two mistakes
+# that make Debian's cron drop the entire file: an environment assignment with
+# an empty unquoted value, and a job line that is not "5 time fields + user +
+# command" (or "@keyword user command"). Prints one line per problem; returns
+# 1 if there was any.
+_loxprox_cron_lint() {
+    local file="$1" n=0 bad=0 line trimmed name value i
+    local -a fields=()
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        n=$((n + 1))
+        trimmed="${line#"${line%%[![:space:]]*}"}"
+        [[ -z "$trimmed" || "$trimmed" == \#* ]] && continue
+        if [[ "$trimmed" =~ ^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]]; then
+            name="${BASH_REMATCH[1]}"
+            value="${BASH_REMATCH[2]}"
+            value="${value#"${value%%[![:space:]]*}"}"
+            if [[ -z "$value" ]]; then
+                printf '%s:%d: bare %s= — cron reads it as a job line and ignores the file; write %s=""\n' \
+                    "$file" "$n" "$name" "$name"
+                bad=1
+            fi
+            continue
+        fi
+        read -r -a fields <<<"$trimmed"
+        if [[ "${fields[0]}" == @* ]]; then
+            if (( ${#fields[@]} < 3 )); then
+                printf '%s:%d: @keyword job needs a user and a command\n' "$file" "$n"
+                bad=1
+            fi
+            continue
+        fi
+        if (( ${#fields[@]} < 7 )); then
+            printf '%s:%d: job line needs 5 time fields + user + command (has %d fields)\n' \
+                "$file" "$n" "${#fields[@]}"
+            bad=1
+            continue
+        fi
+        for i in 0 1 2 3 4; do
+            # minute/hour/day-of-month: numeric specs only; month/day-of-week
+            # may also use names (jan, mon, ...).
+            if { (( i < 3 )) && [[ ! "${fields[$i]}" =~ ^[0-9*/,-]+$ ]]; } \
+                || [[ ! "${fields[$i]}" =~ ^[0-9A-Za-z*/,-]+$ ]]; then
+                printf '%s:%d: time field %d (%s) is not a cron time spec\n' \
+                    "$file" "$n" "$((i + 1))" "${fields[$i]}"
+                bad=1
+                break
+            fi
+        done
+    done < "$file"
+    return "$bad"
+}
+
+# Echoes the syntax errors cron itself has logged for $1 since the file was
+# last modified — cron only re-reads a file after its mtime changes (or on a
+# restart, which is also after the mtime), so anything in that window is about
+# the content on disk now, and a stale error about an older version can never
+# fail a fixed file. Debian's cron logs a rejected /etc/cron.d/<name> as
+#     Error: bad minute; while reading /etc/cron.d/<name>
+#     (*system*<name>) ERROR (Syntax error, this crontab file will be ignored)
+# Returns 0 when it found any, 1 when there are none (or no journal to ask).
+_loxprox_cron_journal_errors() {
+    local file="$1" name name_re since out
+    [[ -f "$file" ]] || return 1
+    command -v journalctl >/dev/null 2>&1 || return 1
+    name=$(basename "$file")
+    name_re="${name//./[.]}"
+    since=$(stat -c %Y "$file" 2>/dev/null) || return 1
+    # || true: no match is the healthy case and must not trip pipefail.
+    out=$(journalctl -u cron --since "@${since}" -o cat --no-pager -q 2>/dev/null \
+          | grep -E -e "\(\*system\*${name_re}\) ERROR" \
+                    -e "while reading /etc/cron[.]d/${name_re}\$") || true
+    [[ -n "$out" ]] || return 1
+    printf '%s\n' "$out"
+}
+
+# health_check / test hook: both LoxProx cron files must lint clean and must
+# not have been rejected by cron since they were last written.
+_loxprox_check_cron_files() {
+    local file rc=0 file_rc problems
+    for file in "$LOXPROX_CRON_FILE" "$LOXPROX_ALERT_CRON_FILE"; do
+        [[ -f "$file" ]] || continue
+        file_rc=0
+        if ! problems=$(_loxprox_cron_lint "$file"); then
+            error "$file is malformed — cron ignores the WHOLE file:"
+            error "  ${problems//$'\n'/$'\n'  }"
+            file_rc=1
+        fi
+        if problems=$(_loxprox_cron_journal_errors "$file"); then
+            error "cron rejected $file since it was last written (journalctl -u cron):"
+            error "  ${problems//$'\n'/$'\n'  }"
+            file_rc=1
+        fi
+        if (( file_rc == 0 )); then
+            ok "cron accepts $file"
+        else
+            rc=1
+        fi
+    done
+    if [[ ! -f "$LOXPROX_CRON_FILE" ]]; then
+        error "$LOXPROX_CRON_FILE missing — progressive ban, backup and GeoIP refresh are not scheduled."
+        rc=1
+    fi
+    return "$rc"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3476,6 +3754,160 @@ setup_network_watchdog() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Persistent deploy source (2026-10)
+# ═══════════════════════════════════════════════════════════════════════════════
+# config.env used to record wherever the operator happened to run deploy.sh
+# from — in practice /tmp/loxprox-src-<ver>, gone after the next reboot (/tmp
+# is a tmpfs here) and invisible to the panel anyway (PrivateTmp). The panel's
+# apply / renew-TLS buttons then refused with "deploy.sh path unknown".
+#
+# install_deploy_source() copies exactly what deploy.sh reads at run time into
+# $LOXPROX_DEPLOY_DIR (root:root, 0750 dirs / no world access) and config.env
+# records $LOXPROX_DEPLOY_DIR/deploy.sh. The copy is self-contained: SCRIPT_DIR
+# resolves to it, so a re-run from there finds every file it needs.
+#
+# The set below is every SCRIPT_DIR-relative path deploy.sh opens (or names in
+# an operator-facing message: set-static-ip.sh, deploy.conf.example).
+# tests/test_ops_configs.py fails if deploy.sh starts reading a path that is
+# not covered here.
+_LOXPROX_DEPLOY_SOURCE_FILES=(
+    deploy.sh
+    progressive-ban.py
+    apparmor/usr.sbin.nginx
+    deploy.conf.example
+    set-static-ip.sh
+)
+# Copied as whole trees: setup_gui installs gui/loxprox-gui.py + gui/static/,
+# and every file under security-monitoring/ is installed by one module or
+# another (monitor, backup, GeoIP, Discord, network + tunnel watchdogs).
+_LOXPROX_DEPLOY_SOURCE_DIRS=(
+    gui
+    security-monitoring
+)
+
+# version= / commit= lines for the source tree deploy.sh runs from: the
+# VERSION file the release tarball carries, else `git describe`, else unknown.
+_loxprox_source_version() {
+    local src="${SCRIPT_DIR:-.}"
+    if [[ -f "$src/VERSION" ]]; then
+        cat "$src/VERSION"
+    elif command -v git >/dev/null 2>&1 \
+            && git -C "$src" rev-parse --git-dir >/dev/null 2>&1; then
+        echo "version=$(git -C "$src" describe --tags --always --dirty 2>/dev/null || echo unknown)"
+        echo "commit=$(git -C "$src" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    else
+        echo "version=unknown"
+    fi
+}
+
+install_deploy_source() {
+    banner "Deploy source — persistent copy"
+    local dest="$LOXPROX_DEPLOY_DIR"
+
+    # A re-run from the persisted copy (the panel's apply / renew) already IS
+    # the current source. Never rewrite the tree the running bash reads from.
+    if [[ -d "$dest" && "$SCRIPT_DIR" -ef "$dest" ]]; then
+        LOXPROX_DEPLOY_SH="$dest/deploy.sh"
+        ok "Running from the persisted copy ($dest) — left as is."
+        return 0
+    fi
+
+    local rel missing=()
+    for rel in "${_LOXPROX_DEPLOY_SOURCE_FILES[@]}"; do
+        [[ -f "$SCRIPT_DIR/$rel" ]] || missing+=("$rel")
+    done
+    for rel in "${_LOXPROX_DEPLOY_SOURCE_DIRS[@]}"; do
+        [[ -d "$SCRIPT_DIR/$rel" ]] || missing+=("$rel/")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        error "Source tree $SCRIPT_DIR is incomplete (missing: ${missing[*]}) — not persisting it."
+        error "  config.env keeps pointing the panel at $LOXPROX_DEPLOY_SH"
+        return 1
+    fi
+
+    local parent base
+    parent=$(dirname "$dest")
+    base=$(basename "$dest")
+    mkdir -p "$parent"
+    # The panel runs this copy as root: its parent must not be writable by
+    # anyone else, or the whole tree could be swapped underneath it.
+    local parent_mode parent_uid
+    parent_mode=$(stat -c '%a' "$parent" 2>/dev/null) || parent_mode=""
+    parent_uid=$(stat -c '%u' "$parent" 2>/dev/null) || parent_uid=""
+    if [[ ! "$parent_mode" =~ ^[0-7]+$ ]]; then
+        error "Cannot read the mode of $parent — not persisting the deploy source."
+        return 1
+    fi
+    if (( 8#$parent_mode & 8#022 )); then
+        error "$parent is group/world-writable (mode $parent_mode) — refusing to place root-run code there."
+        return 1
+    fi
+    if [[ $EUID -eq 0 && "$parent_uid" != "0" ]]; then
+        error "$parent is not owned by root (uid $parent_uid) — refusing to place root-run code there."
+        return 1
+    fi
+
+    # Leftovers of an interrupted earlier run.
+    rm -rf -- "$parent/.${base}.new."* "$parent/.${base}.old."* 2>/dev/null || true
+
+    local stage
+    stage=$(mktemp -d "$parent/.${base}.new.XXXXXX") || { error "Cannot create a staging directory in $parent."; return 1; }
+    for rel in "${_LOXPROX_DEPLOY_SOURCE_FILES[@]}"; do
+        mkdir -p "$stage/$(dirname "$rel")"
+        if ! cp -p "$SCRIPT_DIR/$rel" "$stage/$rel"; then
+            rm -rf -- "$stage"
+            error "Copying $rel failed — the previous copy (if any) is unchanged."
+            return 1
+        fi
+    done
+    for rel in "${_LOXPROX_DEPLOY_SOURCE_DIRS[@]}"; do
+        mkdir -p "$stage/$(dirname "$rel")"
+        if ! cp -Rp "$SCRIPT_DIR/$rel" "$stage/$rel"; then
+            rm -rf -- "$stage"
+            error "Copying $rel/ failed — the previous copy (if any) is unchanged."
+            return 1
+        fi
+    done
+    # Keep the version readable from the copy, which has no .git: a later
+    # re-run from it writes the same /etc/loxprox/VERSION as this run.
+    _loxprox_source_version > "$stage/VERSION"
+
+    chmod -R u=rwX,g=rX,o= "$stage"
+    if [[ $EUID -eq 0 ]] && ! chown -R root:root "$stage"; then
+        rm -rf -- "$stage"
+        error "chown root:root failed on the staged copy — not installing it."
+        return 1
+    fi
+
+    # Swap by rename, never by copying over the live tree: a deploy.sh that is
+    # executing from the old copy keeps reading its (now unlinked) file, and
+    # the panel only ever sees a complete old tree or a complete new one.
+    local old=""
+    if [[ -e "$dest" || -L "$dest" ]]; then
+        old="$parent/.${base}.old.$$"
+        if ! mv -T -- "$dest" "$old"; then
+            rm -rf -- "$stage"
+            error "Could not move the previous copy aside — left unchanged."
+            return 1
+        fi
+    fi
+    if ! mv -T -- "$stage" "$dest"; then
+        error "Could not move the new copy into place at $dest."
+        if [[ -n "$old" ]]; then
+            mv -T -- "$old" "$dest" && warn "Previous copy restored at $dest."
+        fi
+        rm -rf -- "$stage"
+        return 1
+    fi
+    if [[ -n "$old" ]]; then
+        rm -rf -- "$old"
+    fi
+
+    LOXPROX_DEPLOY_SH="$dest/deploy.sh"
+    ok "Deploy source persisted to $dest (root-only); the panel's apply/renew run $LOXPROX_DEPLOY_SH."
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Runtime config file (for scripts that need env vars after deploy)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -3506,8 +3938,8 @@ WATCHDOG_EXPECTED_IP="$GATEWAY_IP"
 ENABLE_TUNNEL="$ENABLE_TUNNEL"
 TUNNEL_PUBLIC_HOST="${TUNNEL_PUBLIC_HOST:-}"
 # v2.1 — LoxProx Panel. test-gateway.sh gates its panel checks on these two;
-# LOXPROX_DEPLOY_SH is the absolute path of the deploy.sh that last ran here,
-# which the panel invokes for its apply / renew jobs.
+# LOXPROX_DEPLOY_SH is the deploy.sh the panel invokes for its apply / renew
+# jobs — the persisted copy under ${LOXPROX_DEPLOY_DIR} (2026-10).
 ENABLE_GUI="$ENABLE_GUI"
 GUI_PORT="$GUI_PORT"
 LOXPROX_DEPLOY_SH="$LOXPROX_DEPLOY_SH"
@@ -3522,18 +3954,9 @@ EOF
     # tarball (version= / commit= / packaged=); a git checkout falls back to
     # `git describe`; anything else is marked unknown. Always written, so
     # test-gateway.sh can assert its presence unconditionally.
-    local version_src="${SCRIPT_DIR:-.}/VERSION"
     local version_out="$GATEWAY_CONFIG_DIR/VERSION"
     {
-        if [[ -f "$version_src" ]]; then
-            cat "$version_src"
-        elif command -v git >/dev/null 2>&1 \
-                && git -C "${SCRIPT_DIR:-.}" rev-parse --git-dir >/dev/null 2>&1; then
-            echo "version=$(git -C "${SCRIPT_DIR:-.}" describe --tags --always --dirty 2>/dev/null || echo unknown)"
-            echo "commit=$(git -C "${SCRIPT_DIR:-.}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-        else
-            echo "version=unknown"
-        fi
+        _loxprox_source_version
         echo "deployed=$(date -Iseconds)"
     } > "$version_out"
     chmod 644 "$version_out"
@@ -3573,6 +3996,11 @@ health_check() {
         error "jq MISSING — Discord + monitor alerts are silently disabled. Fix: apt-get install -y jq"
         failures=$((failures + 1))
     fi
+
+    # 2026-10 (HIGH): a cron file Debian's cron rejects is ignored as a whole
+    # and nothing else notices — progressive ban, backup and GeoIP refresh
+    # stopped for months. Lint the files and ask cron's own journal.
+    _loxprox_check_cron_files || failures=$((failures + 1))
 
     info "Firewall input policy:"
     nft list chain inet filter input 2>/dev/null | grep policy || warn "Could not read nftables input chain"
@@ -4143,9 +4571,11 @@ main() {
     run_optional_step "unattended-upgrades"     setup_unattended_upgrades
     run_optional_step "auditd"                  setup_auditd
     run_optional_step "logrotate"               setup_logrotate
+    run_optional_step "journald size cap"       setup_journald
     run_optional_step "alerting"                setup_alerting
     run_optional_step "security monitoring"     setup_security_monitoring
     run_optional_step "network watchdog"        setup_network_watchdog
+    run_optional_step "persistent deploy source" install_deploy_source
     write_runtime_config
     run_optional_step "LoxProx Panel"           setup_gui
     health_check

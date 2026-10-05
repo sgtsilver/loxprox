@@ -94,7 +94,7 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
                     │              ├── nginx (proxy, rate limits, headers)
                     │              ├── CrowdSec (IDS, CAPI blocks, AppSec WAF)
                     │              ├── nftables (input DROP, allow :1080 + SSH)
-                    │              ├── AppArmor (nginx profile enforced)
+                    │              ├── AppArmor (nginx profile: complain → opt-in enforce)
                     │              ├── auditd (config change monitoring)
                     │              ├── Discord alerts (real-time notifications)
                     │              └── Network watchdog (self-healing monitor)
@@ -121,6 +121,7 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 - Slowloris protection: aggressive timeouts (10-15s)
 - Security headers: X-Frame-Options, X-Content-Type-Options, Referrer-Policy, **Content-Security-Policy**, **Permissions-Policy**
 - `server_tokens off`; `proxy_hide_header Server` and `proxy_hide_header X-Powered-By` to prevent backend version leakage
+- The Miniserver's own copies of the headers the gateway sets (`X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, CSP, `Permissions-Policy`, HSTS) and its deprecated `X-XSS-Protection` are dropped with `proxy_hide_header`, so every security header reaches the client exactly once — the Miniserver's `X-Frame-Options: deny` next to the gateway's `SAMEORIGIN` was a conflicting pair
 - Buffer limits to prevent memory exhaustion
 - AppSec subrequest: every request evaluated by CrowdSec WAF before proxying
 
@@ -147,10 +148,10 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 
 ### Layer 5: System Hardening
 
-- AppArmor: nginx profile enforced
+- AppArmor: nginx profile (`apparmor/usr.sbin.nginx`), loaded in **complain mode** on every deploy — violations are logged, not blocked — until the operator sets `APPARMOR_NGINX_MODE="enforce"` in `deploy.conf` after the soak described in [ADR 0006](docs/adr/0006-apparmor-nginx-profile-complain-first.md)
 - systemd: PrivateTmp, NoNewPrivileges, ProtectKernelTunables, etc.
 - Kernel: syncookies, rp_filter, dmesg_restrict, kptr_restrict, ASLR
-- auditd: monitors nginx/crowdsec/nftables config changes, auth files, sudo
+- auditd: monitors nginx/crowdsec/nftables config changes, auth files, sudo, and LoxProx's own state — `/etc/loxprox` (config, TLS), `/etc/apparmor.d` (policy) and the root-run scripts under `/opt/loxprox`
 - unattended-upgrades: auto-reboot at 03:00 for kernel patches
 
 ### Layer 6: Monitoring & Alerting
@@ -158,7 +159,8 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 - **Discord webhook**: real-time alerts for blocks, anomalies, service failures
 - **Security monitor** (60s cycle): CrowdSec decisions, nginx errors, auth attempts, AppSec detections, system resources
 - **Network watchdog** (60s cycle): Detects network-layer failures (dhclient death-spiral, kernel routing corruption, interface desync) that process-level checks miss. Self-heals by restarting services; reboots as last resort with pre/post-reboot Discord reporting and anti-loop protection. A `502`/`504` from the local nginx proves the **listener is alive** (only the Miniserver behind it isn't answering), so it counts as healthy and never triggers a heal or reboot — a Miniserver outage instead raises its own alert-only "Miniserver Unreachable" notice, with a recovery notice once it answers again.
-- **Log rotation**: 14-day retention for nginx logs
+- **Log rotation**: 14-day retention for nginx logs; LoxProx's own `/var/log/loxprox-*.log` weekly or at 10 MB, 8 compressed generations; the systemd journal is capped at 300 MB
+- **Scheduled-job guard**: `deploy.sh`'s health check and `test-gateway.sh` fail when cron has rejected `/etc/cron.d/loxprox` since it was last written — cron ignores a rejected file as a whole, so progressive ban, the daily backup and the GeoIP refresh would otherwise stop silently
 - **Config backup**: daily automated backup to `/root/loxprox-backups/`
 - **Test suite**: `sudo ./test-gateway.sh` validates all components post-deploy
 

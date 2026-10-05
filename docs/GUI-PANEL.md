@@ -103,9 +103,13 @@ of every view: running time, a live log tail, and the outcome. The job
 status follows `deploy.sh`'s exit code: `0` → **ok**, `3` → **finished with
 warnings** (the deploy went through but one or more *optional* steps — TLS,
 tunnel, CrowdSec — didn't; the gateway still proxies, those features just
-aren't active), anything else → **failed**. If the panel itself is
-restarted while the job runs (the apply re-installs the panel), the job
-shows as "result unknown" and points to the deploy log rather than guessing.
+aren't active), anything else → **failed**. The job runs as its own
+systemd unit (`loxprox-job-<id>`), so it keeps going when the apply
+re-installs and restarts the panel; the restarted panel picks it up again
+and shows its real outcome. A job that ended without leaving an exit code
+(e.g. the gateway rebooted mid-run) shows as **failed**. Only if the panel
+cannot be reached for a long time, or the job is no longer known, does it
+show "result unknown" and point to the deploy log rather than guessing.
 
 **Logs.** Read-only tail view of the nginx error/access logs, AppSec hits,
 the network and tunnel watchdogs, the monitor, the deploy log and the panel

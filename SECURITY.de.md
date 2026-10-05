@@ -94,7 +94,7 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
                     │              ├── nginx (proxy, rate limits, headers)
                     │              ├── CrowdSec (IDS, CAPI blocks, AppSec WAF)
                     │              ├── nftables (input DROP, allow :1080 + SSH)
-                    │              ├── AppArmor (nginx profile enforced)
+                    │              ├── AppArmor (nginx-Profil: Complain → Enforce per Opt-in)
                     │              ├── auditd (config change monitoring)
                     │              ├── Discord alerts (real-time notifications)
                     │              └── Network watchdog (self-healing monitor)
@@ -121,6 +121,7 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 - Slowloris-Schutz: aggressive Timeouts (10–15 s)
 - Security Headers: X-Frame-Options, X-Content-Type-Options, Referrer-Policy, **Content-Security-Policy**, **Permissions-Policy**
 - `server_tokens off`; `proxy_hide_header Server` und `proxy_hide_header X-Powered-By`, damit keine Backend-Versionen leaken
+- Die eigenen Kopien des Miniservers von den Headern, die das Gateway selbst setzt (`X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, CSP, `Permissions-Policy`, HSTS), und sein veraltetes `X-XSS-Protection` werden per `proxy_hide_header` verworfen — jeder Security-Header kommt genau einmal beim Client an. Das `X-Frame-Options: deny` des Miniservers neben dem `SAMEORIGIN` des Gateways war ein widersprüchliches Paar
 - Buffer-Limits gegen Memory Exhaustion
 - AppSec-Subrequest: jeder Request wird von der CrowdSec WAF geprüft, bevor er weitergeproxyt wird
 
@@ -147,10 +148,10 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 
 ### Layer 5: System Hardening
 
-- AppArmor: nginx-Profil aktiv
+- AppArmor: nginx-Profil (`apparmor/usr.sbin.nginx`), bei jedem Deploy im **Complain-Modus** geladen — Verstöße werden protokolliert, nicht blockiert —, bis du nach dem Soak aus [ADR 0006](docs/adr/0006-apparmor-nginx-profile-complain-first.md) `APPARMOR_NGINX_MODE="enforce"` in `deploy.conf` setzt
 - systemd: PrivateTmp, NoNewPrivileges, ProtectKernelTunables etc.
 - Kernel: syncookies, rp_filter, dmesg_restrict, kptr_restrict, ASLR
-- auditd: überwacht Config-Änderungen an nginx/crowdsec/nftables, Auth-Dateien, sudo
+- auditd: überwacht Config-Änderungen an nginx/crowdsec/nftables, Auth-Dateien, sudo und den eigenen Zustand von LoxProx — `/etc/loxprox` (Config, TLS), `/etc/apparmor.d` (Policy) und die als root laufenden Scripts unter `/opt/loxprox`
 - unattended-upgrades: Auto-Reboot um 03:00 für Kernel-Patches
 
 ### Layer 6: Monitoring & Alerting
@@ -158,7 +159,8 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 - **Discord-Webhook**: Echtzeit-Alerts für Blocks, Anomalien, Service-Failures
 - **Security Monitor** (60-Sek-Zyklus): CrowdSec-Decisions, nginx-Fehler, Auth-Versuche, AppSec-Detections, System-Ressourcen
 - **Network Watchdog** (60-Sek-Zyklus): erkennt Netzwerk-Layer-Ausfälle (dhclient-Death-Spiral, Kernel-Routing-Korruption, Interface-Desync), die Prozess-Level-Checks nicht sehen. Selbstheilung per Service-Restart; Reboot als letzte Maßnahme mit Pre-/Post-Reboot-Discord-Reporting und Anti-Loop-Schutz. Ein `502`/`504` vom lokalen nginx beweist, dass **der Listener lebt** (nur der Miniserver dahinter antwortet nicht) — das zählt daher als gesund und löst nie Heal oder Reboot aus. Ein Miniserver-Ausfall löst stattdessen einen eigenen, nur alarmierenden "Miniserver nicht erreichbar"-Hinweis aus, mit Recovery-Meldung, sobald er wieder antwortet.
-- **Log-Rotation**: 14 Tage Aufbewahrung für nginx-Logs
+- **Log-Rotation**: 14 Tage Aufbewahrung für nginx-Logs; die LoxProx-eigenen `/var/log/loxprox-*.log` wöchentlich bzw. ab 10 MB, 8 komprimierte Generationen; das systemd-Journal ist auf 300 MB begrenzt
+- **Wächter für geplante Jobs**: Der Health Check von `deploy.sh` und `test-gateway.sh` schlagen fehl, wenn cron `/etc/cron.d/loxprox` seit dem letzten Schreiben abgelehnt hat — cron ignoriert eine abgelehnte Datei komplett, Progressive Ban, das tägliche Backup und das GeoIP-Refresh würden sonst still stehenbleiben
 - **Config-Backup**: tägliches automatisches Backup nach `/root/loxprox-backups/`
 - **Test-Suite**: `sudo ./test-gateway.sh` validiert alle Komponenten nach dem Deploy
 
