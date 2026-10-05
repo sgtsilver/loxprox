@@ -170,25 +170,26 @@ t_auditd() {
         touch "$probe"; rm -f "$probe"
     done
     sleep 3
-    local pair events
+    local pair dir events serials log=/var/log/audit/audit.log
     for pair in loxprox_config:/etc/loxprox/ apparmor_config:/etc/apparmor.d/ loxprox_scripts:/opt/loxprox/; do
-        key="${pair%%:*}"
-        events=$(ausearch -i -k "$key" 2>&1)
-        if grep -q "ci-audit-probe" <<<"$events"; then
-            pass "write under ${pair#*:} produced an audit event (key $key)"
+        key="${pair%%:*}"; dir="${pair#*:}"
+        events=$(ausearch -if "$log" -k "$key" 2>&1)
+        if grep -q "name=\"${dir}ci-audit-probe\"" <<<"$events"; then
+            pass "write under $dir produced an audit event with key $key (ausearch -k $key)"
+            continue
+        fi
+        # ausearch on some hosts returns nothing although the records are
+        # there — match them directly: a SYSCALL record carrying the key, and
+        # a PATH record of the same event naming the probe file.
+        serials=$(grep -F "key=\"$key\"" "$log" | grep -oE 'audit\([0-9.]+:[0-9]+\)' | sort -u)
+        if [[ -n "$serials" ]] \
+            && grep -F -f <(printf '%s\n' "$serials") "$log" | grep -q "name=\"${dir}ci-audit-probe\""; then
+            pass "write under $dir produced an audit event with key $key (raw audit.log; ausearch returned: $(tail -1 <<<"$events"))"
         else
-            fail "no audit event for ${pair#*:}ci-audit-probe under key $key"
-            note "ausearch -k $key: $(tail -5 <<<"$events" | tr '\n' ' ')"
+            fail "no audit event for ${dir}ci-audit-probe under key $key"
+            grep -F 'ci-audit-probe' "$log" | head -3 | cut -c1-300 | sed 's/^/      /'
         fi
     done
-    if [[ $FAILED -ne 0 ]]; then
-        local serial
-        serial=$(grep -m1 'ci-audit-probe' /var/log/audit/audit.log | grep -oE 'msg=audit\([0-9.]+:[0-9]+\)' | head -1)
-        note "records of the first probe event (${serial:-none}):"
-        [[ -n "$serial" ]] && grep -F "$serial" /var/log/audit/audit.log | cut -c1-500 | sed 's/^/      /'
-        note "ausearch --raw -k loxprox_config: $(ausearch --raw -k loxprox_config 2>&1 | head -3 | cut -c1-300 | tr '\n' ' ')"
-        note "ausearch -f /etc/loxprox/ci-audit-probe: $(ausearch -f /etc/loxprox/ci-audit-probe 2>&1 | grep -oE 'key=[^ ]+' | sort -u | tr '\n' ' ')"
-    fi
 }
 
 # ── panel jobs: a deploy started by the panel outlives the panel's unit ──────
@@ -501,6 +502,21 @@ t_nginx_apparmor() {
     else
         fail "pre-fix profile produced no ALLOWED events — the control cannot show the fix"
     fi
+
+    # (a2) control: pre-fix profile ENFORCED — what opting into enforce would
+    #      have done to a nginx-extras gateway before this fix.
+    apparmor_parser -r -T "${aa_base[@]}" "$old_profile" || { fail "could not enforce the pre-fix profile"; return; }
+    dmesg -C
+    label=$(ngx_lifecycle 2>&1); rc=$?
+    events=$(aa_events)
+    note "pre-fix profile, enforce: ${label//$'\n'/ } (lifecycle rc=$rc)"
+    if grep -q 'apparmor="DENIED"' <<<"$events" || (( rc != 0 )); then
+        pass "control: the pre-fix profile in enforce mode denies nginx-extras (lifecycle rc=$rc):"
+        aa_summary <<<"$events"
+    else
+        fail "control: the pre-fix profile in enforce mode denied nothing"
+    fi
+    docker exec "$CTR" sh -c 'pkill -x nginx; true'
 
     # (b) fixed profile, complain mode → zero ALLOWED
     apparmor_parser -r -T "${aa_base[@]}" -C "$new_profile" || { fail "could not load the fixed profile"; return; }
