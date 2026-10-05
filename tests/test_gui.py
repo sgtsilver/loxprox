@@ -353,11 +353,16 @@ def test_front_end_config_editor_covers_every_editable_key():
         js = fh.read()
     with open(os.path.join(STATIC, "i18n.js"), encoding="utf-8") as fh:
         i18n = fh.read()
+    import re
+
+    def defined(key):     # whole-key match: "h_ip" must not count "dec_th_ip"
+        return len(re.findall(rf"^ {{8}}{re.escape(key)}:", i18n, re.MULTILINE))
+
     for key, kind in gui.EDITABLE_KEYS.items():
         assert f'"{key}"' in js, f"{key} is not placed in a config group"
-        assert i18n.count(f"f_{key}:") == 2, f"{key} lacks a DE/EN label"
-        if kind != "bool" and kind not in ("appsec_mode", "tunnel_proto"):
-            assert i18n.count(f"h_{kind}:") == 2, f"no DE/EN hint for kind {kind}"
+        assert defined(f"f_{key}") == 2, f"{key} lacks a DE/EN label"
+        if kind != "bool":
+            assert defined(f"h_{kind}") == 2, f"no DE/EN hint for kind {kind}"
 
 
 # ------------------------------------------------------------- server output
