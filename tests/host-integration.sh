@@ -180,6 +180,85 @@ t_auditd() {
     done
 }
 
+# ── panel jobs: a deploy started by the panel outlives the panel's unit ──────
+
+# A stand-in panel: a transient service (PrivateTmp, like loxprox-gui.service)
+# that loads the real gui/loxprox-gui.py JobRunner, starts an "apply" and
+# idles. The test then stops that unit — exactly what deploy.sh's
+# `systemctl restart loxprox-gui.service` does to the real panel mid-apply.
+t_panel_job() {
+    section "panel jobs — apply survives a stop of the panel's own unit (systemd-run)"
+    command -v systemd-run >/dev/null || { fail "systemd-run missing"; return; }
+    local base=/var/lib/loxprox-ci-jobs deploy=/usr/local/sbin/loxprox-ci-fake-deploy.sh
+    local panel_py=/usr/local/sbin/loxprox-ci-panel.py marker=/tmp/loxprox-ci-job-saw-host-tmp
+    rm -rf "$base" "$marker"
+    mkdir -p "$base"
+    cat > "$deploy" <<'EOF'
+#!/bin/bash
+echo "deploy: started"
+sleep 6
+echo "deploy: still alive after the panel unit was stopped"
+touch /tmp/loxprox-ci-job-saw-host-tmp
+exit 3
+EOF
+    chmod 0755 "$deploy"
+    cat > "$panel_py" <<EOF
+import importlib.util, sys, time
+spec = importlib.util.spec_from_file_location("panel", "$REPO/gui/loxprox-gui.py")
+panel = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(panel)
+mode = sys.argv[1]
+runner = panel.JobRunner(job_dir="$base/" + mode, systemd_run=None if mode == "systemd" else "")
+print(runner.start("apply", ["bash", "$deploy"]), flush=True)
+time.sleep(600)
+EOF
+    local mode
+    for mode in systemd child; do
+        systemctl stop "loxprox-ci-panel-$mode" 2>/dev/null
+        systemd-run --quiet --unit "loxprox-ci-panel-$mode" --property=PrivateTmp=yes \
+            /usr/bin/python3 "$panel_py" "$mode"
+    done
+    sleep 2
+    systemctl stop loxprox-ci-panel-systemd loxprox-ci-panel-child   # = the panel restart
+    sleep 8
+
+    local summary
+    summary=$(python3 - "$REPO/gui/loxprox-gui.py" "$base" <<'PY'
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("panel", sys.argv[1])
+panel = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(panel)
+out = {}
+for mode in ("systemd", "child"):
+    r = panel.JobRunner(job_dir=f"{sys.argv[2]}/{mode}", systemd_run=None if mode == "systemd" else "")
+    s = r.current_summary()
+    out[mode] = {"summary": s, "log": r.log_tail(s["id"]) if s else None}
+print(json.dumps(out))
+PY
+)
+    note "$summary"
+    local st log
+    st=$(jq -r '.systemd.summary | "\(.status) \(.rc) \(.running)"' <<<"$summary")
+    log=$(jq -r '.systemd.log' <<<"$summary")
+    [[ "$st" == "degraded 3 false" ]] \
+        && pass "systemd-run job finished with its real result after the panel unit stopped (status degraded, rc 3)" \
+        || fail "systemd-run job state after the panel stop: $st"
+    grep -q 'still alive after the panel unit was stopped' <<<"$log" \
+        && pass "the deploy kept running past the panel stop (full log)" || fail "deploy log incomplete: $log"
+    [[ -e "$marker" ]] && pass "the job wrote to the host /tmp, not the panel's PrivateTmp" \
+                       || fail "job did not see the host /tmp"
+    # Control — the pre-fix launch (a child process of the panel): killed with
+    # the panel's cgroup, never finishes, no exit code.
+    st=$(jq -r '.child.summary | "\(.status) \(.rc) \(.running)"' <<<"$summary")
+    log=$(jq -r '.child.log' <<<"$summary")
+    if [[ "$st" == "failed null false" ]] && ! grep -q 'still alive' <<<"$log"; then
+        pass "control: a job launched as the panel's child dies with the panel unit (the reported bug)"
+    else
+        fail "control did not reproduce the kill: $st"
+    fi
+    rm -rf "$base" "$deploy" "$panel_py" "$marker"
+}
+
 # ── logrotate: Debian 12's logrotate with the stock nginx stanza present ─────
 
 t_logrotate() {
@@ -428,6 +507,7 @@ for s in "$@"; do
         cron)                      t_cron ;;
         journald)                  t_journald ;;
         auditd)                    t_auditd ;;
+        panel-job)                 t_panel_job ;;
         logrotate)                 t_logrotate ;;
         nginx-apparmor)            t_nginx_apparmor ;;
         nginx-container-setup)     t_nginx_container_setup; exit $? ;;

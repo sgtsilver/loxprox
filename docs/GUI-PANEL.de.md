@@ -115,9 +115,14 @@ und das Ergebnis. Der Status folgt dem Exit-Code von `deploy.sh`: `0` →
 **ok**, `3` → **fertig, mit Einschränkungen** (das Deploy ist
 durchgelaufen, aber ein oder mehrere *optionale* Schritte — TLS, Tunnel,
 CrowdSec — nicht; das Gateway proxied trotzdem weiter, nur diese Features
-sind nicht aktiv), alles andere → **fehlgeschlagen**. Wird das Panel selbst
-während des Vorgangs neu gestartet (das Anwenden installiert das Panel neu),
-zeigt es „Ergebnis unbekannt“ und verweist aufs Deploy-Log, statt zu raten.
+sind nicht aktiv), alles andere → **fehlgeschlagen**. Der Job läuft als
+eigene systemd-Unit (`loxprox-job-<id>`) und läuft deshalb weiter, wenn das
+Anwenden das Panel neu installiert und neu startet; das neu gestartete Panel
+übernimmt ihn und zeigt sein echtes Ergebnis. Ein Job, der ohne Exit-Code
+endet (z. B. weil das Gateway mitten im Lauf neu gebootet hat), gilt als
+**fehlgeschlagen**. Nur wenn das Panel lange nicht erreichbar ist oder den
+Job nicht mehr kennt, zeigt es „Ergebnis unbekannt“ und verweist aufs
+Deploy-Log, statt zu raten.
 
 **Logs.** Read-only-Ansicht der nginx-Fehler- und Zugriffs-Logs, der
 AppSec-Treffer, des Netzwerk- und Tunnel-Watchdogs, der Überwachung, des

@@ -559,44 +559,199 @@ def save_settings(settings):
 
 
 # ---------------------------------------------------------------- job runner
+#
+# 2026-10: jobs used to be children of this process — inside the cgroup of
+# loxprox-gui.service. An apply runs deploy.sh, whose setup_gui restarts that
+# very unit, and systemd's default KillMode=control-group then killed the
+# deploy halfway through (everything after setup_gui, health_check included,
+# never ran) while the restarted panel had forgotten the job.
+#
+# A job now runs as its own transient unit — `systemd-run --unit
+# loxprox-job-<id> --collect` — so restarting the panel no longer touches it
+# (it also escapes the panel's PrivateTmp). A small wrapper appends all output
+# to the job log and writes the exit code next to it; the job's metadata is
+# persisted in JOB_DIR. A restarted panel reloads the newest job and reports
+# it as still running (its unit is active) or finished with its real exit
+# code. Only a job that ended without leaving an exit code — killed, or the
+# box rebooted mid-run — reports "failed" with rc null. The /api/job/<id> and
+# /api/status "job" JSON shape is unchanged.
+
+# Positional arguments only — nothing from the job is spliced into the script.
+JOB_WRAPPER = (
+    'log="$1"; rcf="$2"; shift 2; '
+    '"$@" >>"$log" 2>&1 </dev/null; rc=$?; '
+    'printf "%s\\n" "$rc" >"$rcf.tmp" && mv -f "$rcf.tmp" "$rcf"; '
+    'exit "$rc"'
+)
+JOB_KEEP = 20                       # newest jobs whose files stay in JOB_DIR
+_JOB_ID_RE = re.compile(r"^(\d{8}-\d{6})-")
+# A --collect'ed unit that has ended reads "inactive". Anything that is not
+# a definite "it ended" (incl. a systemctl timeout) counts as still running —
+# a hiccup must never turn a live deploy into a permanent "failed".
+_UNIT_ENDED = ("inactive", "failed")
+
 
 class JobRunner:
     """One background job at a time (deploy apply / TLS renew)."""
 
-    def __init__(self):
+    def __init__(self, job_dir=None, systemd_run=None, unit_state=None):
         self._lock = threading.Lock()
+        self._job_dir = job_dir or JOB_DIR
+        # None → find systemd-run; "" → none (non-systemd host or tests): the
+        # job is a detached child instead, with the same rc-file bookkeeping.
+        self._systemd_run = shutil.which("systemd-run") if systemd_run is None else systemd_run
+        self._unit_state = unit_state or systemctl_state
         self._proc = None
         self._meta = None
+        self._loaded = False
+        self._final = None          # (rc, end_time) once the job has finished
+
+    # ---- persistence ------------------------------------------------------
+
+    def _load_latest(self):
+        """Adopt the newest persisted job (e.g. after a panel restart)."""
+        if self._loaded:
+            return
+        self._loaded = True
+        try:
+            names = sorted(n for n in os.listdir(self._job_dir) if n.endswith(".json"))
+        except OSError:
+            return
+        for name in reversed(names):
+            try:
+                with open(os.path.join(self._job_dir, name), encoding="utf-8") as fh:
+                    meta = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if (isinstance(meta, dict)
+                    and all(isinstance(meta.get(k), str) for k in ("id", "name", "log", "rc_file"))
+                    and isinstance(meta.get("started"), (int, float))
+                    and all(os.path.dirname(meta[k]) == self._job_dir for k in ("log", "rc_file"))):
+                self._meta = meta
+                return
+
+    def _write_meta(self, meta):
+        path = os.path.join(self._job_dir, f"{meta['id']}-{meta['name']}.json")
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(meta, fh)
+        os.replace(tmp, path)
+        return path
+
+    def _prune(self):
+        """Keep the files of the newest JOB_KEEP jobs; job logs used to pile up."""
+        try:
+            names = os.listdir(self._job_dir)
+        except OSError:
+            return
+        ids = sorted({m.group(1) for m in map(_JOB_ID_RE.match, names) if m})
+        old = set(ids[:-JOB_KEEP])
+        if self._meta is not None:
+            old.discard(self._meta["id"])
+        for name in names:
+            m = _JOB_ID_RE.match(name)
+            if m and m.group(1) in old:
+                try:
+                    os.unlink(os.path.join(self._job_dir, name))
+                except OSError:
+                    pass
+
+    # ---- state ------------------------------------------------------------
+
+    def _read_rc(self):
+        try:
+            with open(self._meta["rc_file"], encoding="utf-8") as fh:
+                return int(fh.read().strip())
+        except (OSError, ValueError):
+            return None
+
+    def _alive(self):
+        if self._proc is not None:
+            return self._proc.poll() is None
+        if self._meta.get("unit"):
+            return self._unit_state(self._meta["unit"]) not in _UNIT_ENDED
+        pid = self._meta.get("pid")
+        if isinstance(pid, int) and pid > 0:      # detached child of an earlier panel
+            try:
+                os.kill(pid, 0)
+                return True
+            except OSError:
+                return False
+        return False
+
+    def _status(self):
+        """(running, rc, end_time). Finished results are cached."""
+        if self._final is not None:
+            return False, self._final[0], self._final[1]
+        rc = self._read_rc()
+        if rc is None and self._alive():
+            return True, None, None
+        if rc is None:
+            # The process may have written the file between the two checks.
+            rc = self._read_rc()
+        try:
+            end = os.path.getmtime(self._meta["rc_file"])
+        except OSError:
+            end = time.time()
+        self._final = (rc, end)
+        return False, rc, end
+
+    # ---- API --------------------------------------------------------------
 
     def start(self, name, cmd):
         with self._lock:
-            if self._proc is not None and self._proc.poll() is None:
+            self._load_latest()
+            if self._meta is not None and self._status()[0]:
                 return None, "a job is already running"
-            os.makedirs(JOB_DIR, exist_ok=True)
+            os.makedirs(self._job_dir, exist_ok=True)
             job_id = datetime.now().strftime("%Y%m%d-%H%M%S")
-            log_path = os.path.join(JOB_DIR, f"{job_id}-{name}.log")
-            log_fh = open(log_path, "w", encoding="utf-8")
-            try:
-                self._proc = subprocess.Popen(
-                    cmd, stdout=log_fh, stderr=subprocess.STDOUT,
-                    stdin=subprocess.DEVNULL, start_new_session=True)
-            except OSError as exc:
-                log_fh.close()
-                return None, str(exc)
-            self._meta = {"id": job_id, "name": name, "log": log_path,
-                          "started": time.time()}
+            base = os.path.join(self._job_dir, f"{job_id}-{name}")
+            log_path, rc_path = base + ".log", base + ".rc"
+            for stale in (rc_path, rc_path + ".tmp"):
+                try:
+                    os.unlink(stale)
+                except FileNotFoundError:
+                    pass
+            with open(log_path, "w", encoding="utf-8"):
+                pass
+            unit = f"loxprox-job-{job_id}" if self._systemd_run else None
+            meta = {"id": job_id, "name": name, "log": log_path, "rc_file": rc_path,
+                    "started": time.time(), "unit": unit, "pid": None}
+            meta_path = self._write_meta(meta)   # before launch: never an untracked job
+            argv = ["/bin/bash", "-c", JOB_WRAPPER, "loxprox-job", log_path, rc_path] + list(cmd)
+            proc = None
+            if unit:
+                rc, out = run([self._systemd_run, "--unit", unit, "--collect", "--quiet",
+                               "--description", f"LoxProx Panel job {job_id} ({name})"] + argv,
+                              timeout=30)
+                if rc != 0:
+                    os.unlink(meta_path)
+                    return None, f"systemd-run failed (rc={rc}): {out}"
+            else:
+                try:
+                    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                            start_new_session=True)
+                except OSError as exc:
+                    os.unlink(meta_path)
+                    return None, str(exc)
+                meta["pid"] = proc.pid
+                self._write_meta(meta)
+            self._proc, self._meta, self._final = proc, meta, None
+            self._prune()
             return job_id, None
 
     def current_summary(self):
         with self._lock:
+            self._load_latest()
             if self._meta is None:
                 return None
-            rc = self._proc.poll()
+            running, rc, end = self._status()
             # deploy.sh exit codes: 0 all good, 1 failed, 2 bad option,
             # 3 deployed but one or more OPTIONAL steps degraded (health_check
             # still lists them in the job log). "status" is additive — existing
             # consumers of "running"/"rc" are unaffected.
-            if rc is None:
+            if running:
                 status = "running"
             elif rc == 0:
                 status = "ok"
@@ -604,12 +759,14 @@ class JobRunner:
                 status = "degraded"
             else:
                 status = "failed"
+            elapsed = (time.time() if running else end) - self._meta["started"]
             return {"id": self._meta["id"], "name": self._meta["name"],
-                    "running": rc is None, "rc": rc, "status": status,
-                    "elapsed": int(time.time() - self._meta["started"])}
+                    "running": running, "rc": rc, "status": status,
+                    "elapsed": int(max(0, elapsed))}
 
     def log_tail(self, job_id):
         with self._lock:
+            self._load_latest()
             if self._meta is None or self._meta["id"] != job_id:
                 return None
             return tail_file(self._meta["log"], lines=120)

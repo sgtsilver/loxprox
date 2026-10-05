@@ -334,6 +334,17 @@ notes at the end list what changes on the box.
   `/opt/loxprox/deploy/deploy.sh` in `config.env`. A re-run from that copy —
   the Panel's apply — leaves it as is. The SOFT-SSH login banner now names
   this path instead of a `/opt/loxprox/deploy.sh` that never existed.
+- **HIGH (latent) — the Panel's Apply killed its own `deploy.sh`.** The job
+  was a child process of the Panel, i.e. inside `loxprox-gui.service`'s
+  cgroup; `deploy.sh`'s `setup_gui` restarts that unit, and systemd's default
+  `KillMode=control-group` killed the deploy halfway (everything after the
+  Panel step, the health check included, never ran) while the restarted
+  Panel had forgotten the job. Apply and Renew-TLS now run as their own
+  transient unit (`systemd-run --unit loxprox-job-<id> --collect`), outside
+  the Panel's cgroup and its `PrivateTmp`; a wrapper records the exit code
+  next to the job log and the job's metadata is persisted, so the restarted
+  Panel reports the job as still running or finished with its real result.
+  `/api/job/<id>` keeps its JSON shape; job files are pruned to the newest 20.
 - **MED — the AppArmor profile was not enforce-ready.** In complain mode,
   nginx-extras logged ~58 `ALLOWED` events on every start/reload, each of
   them a denial in enforce mode: lua-resty-core under `/usr/share/lua/`, the
@@ -380,7 +391,9 @@ notes at the end list what changes on the box.
 - CI now runs `deploy.sh`'s own functions against real services on
   throwaway runners: cron (a `MAILTO=` file is rejected and its job never
   runs; `MAILTO=""` runs), journald (reports the 300M ceiling), auditd
-  (watches load and fire), Debian 12 logrotate with the stock nginx stanza
+  (watches load and fire), a Panel apply job outliving a stop of the Panel's
+  own unit (and, as control, the old child-process launch dying with it),
+  Debian 12 logrotate with the stock nginx stanza
   present, Debian 12's `apparmor_parser` on the profile, and Debian 12
   nginx-extras under the profile in complain and enforce mode (start,
   reload, USR1, USR2 binary upgrade, TLS proxy request), plus the proxied
@@ -388,6 +401,9 @@ notes at the end list what changes on the box.
 
 #### Upgrade notes — what the next `sudo bash deploy.sh` changes
 
+- Run this upgrade over SSH, not with the Panel's Apply button: the Panel
+  that is installed *before* the upgrade still launches deploy.sh as its own
+  child and would kill it when the deploy restarts the Panel.
 - The nginx site is regenerated (template v3 → v4): backed up first, TLS
   block re-applied, nginx reloaded.
 - cron is restarted once; `/etc/cron.d/loxprox` takes effect — progressive
