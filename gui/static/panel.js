@@ -35,6 +35,12 @@ function tn(key, n, vars) {
     return t(key + (n === 1 ? "_one" : "_other"), Object.assign({ n }, vars));
 }
 
+/* Join translated sentences: "a" + "b." -> "a. b." (no doubled periods). */
+function sentences(...parts) {
+    const kept = parts.filter(Boolean);
+    return kept.map((p, i) => (i < kept.length - 1 ? p.replace(/[.\s]+$/, "") : p)).join(". ");
+}
+
 const locale = () => (lang === "de" ? "de-DE" : "en-GB");
 const nfCache = new Map();
 function num(value, decimals = 0) {
@@ -505,7 +511,7 @@ function renderStatus() {
     // Announce real changes of the overall state (not every poll).
     const spoken = s ? (failing ? "offline" : evaluation.level) : (failing ? "offline" : null);
     if (spoken && lastLevel !== null && spoken !== lastLevel) {
-        announce(t("chip_label", { state: chipText }) + " — " + (s && failing ? stale.textContent : title));
+        announce(sentences(t("chip_label", { state: chipText }), s && failing ? stale.textContent : title));
     }
     if (spoken) lastLevel = spoken;
 
@@ -702,8 +708,8 @@ function renderDecisions(s) {
         return;
     }
     const items = dec.items || [];
-    $("decCount").textContent = tn("dec_count", dec.count || 0) +
-        ((dec.count || 0) > items.length ? " " + t("dec_showing", { k: items.length }) : "");
+    $("decCount").textContent = sentences(tn("dec_count", dec.count || 0),
+        (dec.count || 0) > items.length ? t("dec_showing", { k: items.length }) : "");
     if (!items.length) {
         stateMsg.hidden = false;
         stateMsg.dataset.state = "";
@@ -984,7 +990,7 @@ function finishJob(state) {
     job.waiting = false;
     window.clearTimeout(jobTimer);
     renderJob();
-    if (wasRunning) announce(jobTitle() + ". " + $("jobMeta").textContent);
+    if (wasRunning) announce(sentences(jobTitle(), $("jobMeta").textContent));
     refreshStatus();
     if (job.name === "apply") loadConfig();
 }
@@ -1183,8 +1189,19 @@ function displayValue(kind, value) {
     return v;
 }
 
-function hintKey(key, kind) {
-    return KEY_HINTS[key] || "h_" + kind;
+/* Hint under a config field: masked note, the format rule for its kind,
+   and an extra note for a few keys — joined as sentences. */
+function fieldHint(key, kind, masked) {
+    const rule = "h_" + kind;
+    return sentences(masked ? t("masked_hint") : "",
+        rule in I18N.de ? t(rule) : "",
+        KEY_HINTS[key] ? t(KEY_HINTS[key]) : "");
+}
+
+/* Validation message: always names the format rule, never the extra note. */
+function fieldErrorText(kind) {
+    const rule = "h_" + kind;
+    return t("err_field", { hint: rule in I18N.de ? t(rule) : t("h_secret") });
 }
 
 function buildField(key, kind, value) {
@@ -1203,13 +1220,7 @@ function buildField(key, kind, value) {
 
     const hint = el("p", "hint");
     hint.id = id + "-hint";
-    const hk = hintKey(key, kind);
-    if (masked) {
-        hint.textContent = t("masked_hint") + (hk in I18N.de && kind !== "bool" ? " " + t(hk) : "");
-    } else if (hk in I18N.de) {
-        hint.textContent = t(hk);
-        hint.dataset.i18n = hk;
-    }
+    hint.textContent = fieldHint(key, kind, masked);
     const err = el("p", "field-error");
     err.id = id + "-err";
     err.hidden = true;
@@ -1388,7 +1399,7 @@ function showErrors(errors) {
     $("cfgErrorsList").replaceChildren(...keys.map((k) => {
         const li = el("li");
         const f = fields.get(k);
-        const a = el("a", "", (f ? f.labelText.textContent : k) + ": " + errors[k]);
+        const a = el("a", "", (f ? f.labelText.textContent : k) + " — " + errors[k]);
         a.href = "#cfg-" + k;
         a.addEventListener("click", (e) => { e.preventDefault(); if (f) f.input.focus(); });
         li.append(a);
@@ -1405,7 +1416,7 @@ function collectChanges() {
         if (!fieldChanged(f)) return;
         const v = currentValue(f);
         const check = VALIDATORS[f.kind] || VALIDATORS.secret;
-        if (!check(v)) errors[key] = t("err_field", { hint: t(hintKey(key, f.kind)) });
+        if (!check(v)) errors[key] = fieldErrorText(f.kind);
         else changes[key] = v;
     });
     return { changes, errors };
@@ -1435,8 +1446,7 @@ async function saveConfig() {
             const mapped = {};
             for (const [k, msg] of Object.entries(r.data.errors)) {
                 const f = fields.get(k);
-                mapped[k] = msg === "not editable" ? t("err_not_editable")
-                    : t("err_field", { hint: t(hintKey(k, f ? f.kind : "secret")) });
+                mapped[k] = msg === "not editable" ? t("err_not_editable") : fieldErrorText(f ? f.kind : "secret");
             }
             setResult(result, "", "");
             showErrors(mapped);
@@ -1661,9 +1671,8 @@ $("langBtn").addEventListener("click", () => {
     applyLang();
     buildRestartList();
     fields.forEach((f, key) => {
-        const hk = hintKey(key, f.kind);
         const hint = $("cfg-" + key + "-hint");
-        if (hint && f.masked) hint.textContent = t("masked_hint") + (hk in I18N.de && f.kind !== "bool" ? " " + t(hk) : "");
+        if (hint) hint.textContent = fieldHint(key, f.kind, f.masked);
         if (f.kind === "bool") f.input.dispatchEvent(new Event("change"));
     });
     updateDirty();
