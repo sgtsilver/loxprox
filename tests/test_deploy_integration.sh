@@ -882,9 +882,23 @@ test_gui_setup() {
 
     rm -f "$GUI_UNIT" "$GUI_APP"
 
+    # Simulate an upgrade from a v2.2 install that still has the vendored
+    # three.js/anime.js bundles next to the panel.
+    local gui_static
+    gui_static="$(dirname "$GUI_APP")/static"
+    mkdir -p "$gui_static/vendor"
+    echo "stale" > "$gui_static/vendor/three.core.min.js"
+    echo "stale" > "$gui_static/vendor/anime.esm.min.js"
+
     ENABLE_GUI="true" setup_gui >/dev/null 2>&1
     if [[ -f "$GUI_UNIT" ]]; then pass "unit written"; else fail "unit missing"; fi
     if [[ -f "$GUI_APP" ]]; then pass "panel script installed"; else fail "panel script not installed"; fi
+    if [[ ! -e "$gui_static/vendor" ]]; then pass "upgrade removes stale static/vendor/ bundles"; else fail "stale static/vendor/ survived the upgrade"; fi
+    if [[ -f "$gui_static/panel.html" && -f "$gui_static/panel.js" && -f "$gui_static/i18n.js" && -f "$gui_static/charts.js" ]]; then
+        pass "panel assets installed next to the script"
+    else
+        fail "panel assets missing after install"
+    fi
     grep -q '^Description=LoxProx Panel (LAN-only GUI)$' "$GUI_UNIT" && pass "Description present" || fail "Description wrong"
     grep -qE "^ExecStart=/usr/bin/python3 .*/loxprox-gui\.py$" "$GUI_UNIT" && pass "ExecStart runs python3 + panel" || fail "ExecStart wrong"
     grep -q '^Restart=always$' "$GUI_UNIT" && pass "Restart=always" || fail "Restart=always missing"
@@ -906,6 +920,7 @@ test_gui_setup() {
     ENABLE_GUI="false" setup_gui >/dev/null 2>&1
     [[ ! -f "$GUI_UNIT" ]] && pass "ENABLE_GUI=false removes the unit" || fail "unit survived disable"
     [[ ! -f "$GUI_APP" ]] && pass "ENABLE_GUI=false removes the panel script" || fail "panel script survived disable"
+    [[ ! -d "$gui_static" ]] && pass "ENABLE_GUI=false removes the panel assets" || fail "panel assets survived disable"
 
     # Disabling twice must stay quiet and succeed.
     ENABLE_GUI="false" setup_gui >/dev/null 2>&1

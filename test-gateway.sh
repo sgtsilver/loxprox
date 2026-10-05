@@ -633,6 +633,16 @@ test_gui() {
         fail "GUI dashboard assets missing (/static/panel.js returned HTTP $asset_status)"
     fi
 
+    # The calm-console panel ships no third-party bundles; a 200 here means a
+    # stale v2.2 static/vendor/ directory survived the upgrade.
+    local stale_status
+    stale_status=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "http://127.0.0.1:${gui_port}/static/vendor/three.core.min.js" 2>/dev/null)
+    if [[ "$stale_status" == "404" ]]; then
+        pass "No stale vendored bundles served (/static/vendor/ is gone)"
+    else
+        fail "Stale vendored bundle still served (/static/vendor/three.core.min.js returned HTTP $stale_status)"
+    fi
+
     if command -v qrencode >/dev/null 2>&1; then
         pass "qrencode is installed"
     else

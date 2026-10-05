@@ -2462,9 +2462,9 @@ _loxprox_tunnel_remove() {
 #
 # gui/loxprox-gui.py is a Python 3 stdlib server (no pip, no venv) installed
 # to $GUI_APP and run by $GUI_UNIT. It serves the family QR invitation, the
-# tabbed dashboard (status, 24h charts, config editor, logs) and, from the
-# gui/static/ directory installed next to it, the dashboard's assets —
-# vendored three.js, anime.js and fonts, so the panel works fully offline.
+# dashboard (status, 24h charts, config editor, logs) and, from the
+# gui/static/ directory installed next to it, the dashboard's assets — plain
+# HTML/CSS/JS plus vendored fonts, so the panel works fully offline.
 #
 # Toggle-friendly like setup_tls / setup_tunnel:
 #   ENABLE_GUI=true  → install qrencode + the panel script, (re)write the unit,
@@ -2535,13 +2535,15 @@ setup_gui() {
             info "Installed: $GUI_APP"
 
             # Dashboard assets live next to the script (v2.2). Replace, never
-            # merge — stale files from an older version must not survive.
+            # merge — stale files from an older version must not survive
+            # (e.g. the v2.2 static/vendor/ three.js/anime.js bundles, which
+            # the calm-console panel no longer ships).
             local static_dst
             static_dst="$(dirname "$GUI_APP")/static"
             rm -rf "$static_dst"
             cp -r "$static_src" "$static_dst"
             chmod -R a+rX "$static_dst"
-            info "Installed: $static_dst (vendored three.js / anime.js / fonts — offline)"
+            info "Installed: $static_dst (panel assets + fonts — offline)"
 
             _loxprox_write_gui_unit
             systemctl daemon-reload
