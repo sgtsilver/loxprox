@@ -3,205 +3,402 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0a0e12">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#111113" media="(prefers-color-scheme: dark)">
 <title>LoxProx Panel</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="preload" href="/static/fonts/inter-var.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/panel.css">
 <script src="/static/theme-boot.js"></script>
 <script type="module" src="/static/panel.js"></script>
 </head>
 <body>
+<a class="skip-link" href="#main" data-i18n="skip">Zum Inhalt springen</a>
 
-<canvas id="bg3d" aria-hidden="true"></canvas>
-<div class="aurora" aria-hidden="true"></div>
+<!-- Icon sprite: every icon in the panel is one of these symbols. -->
+<svg class="sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7.5 3v5.2c0 4.6-3.1 8.4-7.5 9.8-4.4-1.4-7.5-5.2-7.5-9.8V6z"/></symbol>
+  <symbol id="i-shield-check" viewBox="0 0 24 24"><path d="M12 3l7.5 3v5.2c0 4.6-3.1 8.4-7.5 9.8-4.4-1.4-7.5-5.2-7.5-9.8V6z"/><path d="M8.8 12.2l2.3 2.3 4.3-4.6"/></symbol>
+  <symbol id="i-ok" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8.2 12.4l2.6 2.6 5-5.2"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path d="M10.3 4.2L2.9 17.3a2 2 0 0 0 1.7 3h14.8a2 2 0 0 0 1.7-3L13.7 4.2a2 2 0 0 0-3.4 0z"/><path d="M12 9.5v4.2"/><path d="M12 17h.01"/></symbol>
+  <symbol id="i-bad" viewBox="0 0 24 24"><path d="M8.1 3h7.8L21 8.1v7.8L15.9 21H8.1L3 15.9V8.1z"/><path d="M9.5 9.5l5 5M14.5 9.5l-5 5"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5.5"/><path d="M12 7.6h.01"/></symbol>
+  <symbol id="i-neutral" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></symbol>
+  <symbol id="i-offline" viewBox="0 0 24 24"><path d="M3 3l18 18"/><path d="M8.5 16.4a5 5 0 0 1 6.9-.1"/><path d="M5 12.9a10 10 0 0 1 5.2-2.7"/><path d="M14.6 10.4a10 10 0 0 1 4.4 2.5"/><path d="M2 9.3a15 15 0 0 1 4.5-2.7"/><path d="M10.7 5.1A15 15 0 0 1 22 9.3"/><path d="M12 20h.01"/></symbol>
+  <symbol id="i-spinner" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9"/></symbol>
+  <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3"/><path d="M12.5 15H17"/></symbol>
+  <symbol id="i-qr" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="6" height="6" rx="1"/><rect x="14.5" y="3.5" width="6" height="6" rx="1"/><rect x="3.5" y="14.5" width="6" height="6" rx="1"/><path d="M6.5 6.5h.01M17.5 6.5h.01M6.5 17.5h.01" stroke-width="3"/><path d="M14 14h2.5v2.5M20.5 14v.01M14 20.5h.01M17.5 20.5h3v-3"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M4.6 4.6L6 6M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4L6 18M18 6l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z"/></symbol>
+  <symbol id="i-auto" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.3-4.9L4 8"/><path d="M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.3 4.9L20 16"/><path d="M20 20v-4h-4"/></symbol>
+  <symbol id="i-restart" viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 1 0 2.5-6"/><path d="M3.5 4v4.5H8"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="12" height="12" rx="2"/><path d="M15.5 8.5v-3a2 2 0 0 0-2-2h-8a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h3"/></symbol>
+  <symbol id="i-printer" viewBox="0 0 24 24"><path d="M7 9V3.5h10V9"/><rect x="3.5" y="9" width="17" height="8" rx="2"/><path d="M7 14h10v6.5H7z"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16v-5a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8.5 10.5v-3a3.5 3.5 0 0 1 7 0v3"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+</svg>
 
 <header class="topbar">
-  <div class="brand">
-    <svg class="brand-mark" width="26" height="26" viewBox="0 0 24 24" fill="none"
-         stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"
-         aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8.2-7 10-4-1.8-7-5.5-7-10V6l7-3z"/>
-      <path class="brand-pulse" d="M8.5 12l2.2 2.2L15.5 9.5"/></svg>
-    <span class="brand-name">LoxProx</span>
-    <span class="live-dot" id="liveDot" title="live"></span>
-  </div>
+  <div class="topbar-inner">
+    <div class="brand-group">
+      <a class="brand" href="#overview">
+        <svg class="icon brand-mark" aria-hidden="true"><use href="#i-shield-check"/></svg>
+        <span class="brand-name">LoxProx</span>
+      </a>
+      <a class="status-chip" id="statusChip" href="#overview" data-state="loading">
+        <svg class="icon" aria-hidden="true"><use id="statusChipIcon" href="#i-spinner"/></svg>
+        <span id="statusChipText">Lädt …</span>
+      </a>
+    </div>
 
-  <nav class="tabs" role="tablist" aria-label="Panel">
-    <button class="tab is-active" role="tab" aria-selected="true" data-tab="overview">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/>
-        <rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
-      <span data-i18n="tab_overview"></span></button>
-    <button class="tab" role="tab" aria-selected="false" data-tab="security">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M12 3l7 3v5c0 4.5-3 8.2-7 10-4-1.8-7-5.5-7-10V6l7-3z"/></svg>
-      <span data-i18n="tab_security"></span></button>
-    <button class="tab" role="tab" aria-selected="false" data-tab="config">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <line x1="4" y1="7" x2="20" y2="7"/><circle cx="9" cy="7" r="2.2"/>
-        <line x1="4" y1="17" x2="20" y2="17"/><circle cx="15" cy="17" r="2.2"/></svg>
-      <span data-i18n="tab_config"></span></button>
-    <button class="tab" role="tab" aria-selected="false" data-tab="logs">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
-           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <polyline points="4 6 8 10 4 14"/><line x1="11" y1="14" x2="20" y2="14"/>
-        <line x1="11" y1="18" x2="16" y2="18"/></svg>
-      <span data-i18n="tab_logs"></span></button>
-  </nav>
+    <nav class="nav" aria-label="Bereiche" data-i18n-aria="nav_label">
+      <ul class="nav-list">
+        <li><a class="nav-link" href="#overview" data-view="overview">
+          <svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg>
+          <span data-i18n="nav_overview">Übersicht</span></a></li>
+        <li><a class="nav-link" href="#security" data-view="security">
+          <svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>
+          <span data-i18n="nav_security">Sicherheit</span></a></li>
+        <li><a class="nav-link" href="#config" data-view="config">
+          <svg class="icon" aria-hidden="true"><use href="#i-sliders"/></svg>
+          <span data-i18n="nav_config">Konfiguration</span></a></li>
+        <li><a class="nav-link" href="#logs" data-view="logs">
+          <svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg>
+          <span data-i18n="nav_logs">Logs</span></a></li>
+      </ul>
+    </nav>
 
-  <div class="controls">
-    <button class="icon-btn" id="themeBtn" title="Theme">
-      <svg class="theme-ico theme-ico-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-           stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
-        <circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" stroke="none"/></svg>
-      <svg class="theme-ico theme-ico-light" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-           stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
-        <circle cx="12" cy="12" r="4.5"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg>
-      <svg class="theme-ico theme-ico-dark" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-           stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>
-    </button>
-    <button class="icon-btn" id="langBtn"></button>
-    <a href="/invite" target="_blank" class="invite-link"><button class="ghost" data-i18n="invite"></button></a>
+    <div class="tools">
+      <a class="btn btn-quiet tool-invite" id="inviteLink" href="/invite?lang=de" target="_blank" rel="noopener">
+        <svg class="icon" aria-hidden="true"><use href="#i-qr"/></svg>
+        <span class="tool-label" data-i18n="invite">Einladung</span>
+        <span class="sr-only" data-i18n="new_tab">(öffnet in neuem Tab)</span>
+      </a>
+      <button class="icon-btn" id="themeBtn" type="button">
+        <svg class="icon theme-ico theme-ico-auto" aria-hidden="true"><use href="#i-auto"/></svg>
+        <svg class="icon theme-ico theme-ico-light" aria-hidden="true"><use href="#i-sun"/></svg>
+        <svg class="icon theme-ico theme-ico-dark" aria-hidden="true"><use href="#i-moon"/></svg>
+        <span class="sr-only" id="themeBtnLabel">Design wechseln, aktuell: automatisch</span>
+      </button>
+      <button class="icon-btn lang-btn" id="langBtn" type="button" lang="en">
+        <span aria-hidden="true" id="langBtnShort">EN</span>
+        <span class="sr-only" id="langBtnLabel">Switch to English</span>
+      </button>
+    </div>
   </div>
 </header>
 
-<main>
+<main id="main" tabindex="-1">
 
-<!-- ══════════════ OVERVIEW ══════════════ -->
-<section id="tab-overview" class="panel-tab is-active" role="tabpanel">
-  <div class="hero">
-    <p class="hero-kicker" data-i18n="hero_kicker"></p>
-    <h1 class="hero-title" id="heroTitle">&nbsp;</h1>
-    <p class="hero-sub" id="heroSub"></p>
-    <div class="hero-stats">
-      <div class="hstat"><span class="hstat-num mono" id="hsReq">–</span><span class="hstat-label" data-i18n="hs_req"></span></div>
-      <div class="hstat"><span class="hstat-num mono" id="hsBans">–</span><span class="hstat-label" data-i18n="hs_bans"></span></div>
-      <div class="hstat"><span class="hstat-num mono" id="hsAppsec">–</span><span class="hstat-label" data-i18n="hs_appsec"></span></div>
-      <div class="hstat"><span class="hstat-num mono" id="hsCert">–</span><span class="hstat-label" data-i18n="hs_cert"></span></div>
-    </div>
-  </div>
-
-  <div class="grid tiles" id="tiles"></div>
-
-  <div class="charts-row">
-    <div class="card chart-card">
-      <div class="chart-head"><h3 data-i18n="ch_req"></h3><span class="chart-now mono" id="reqNow"></span></div>
-      <svg class="chart" id="reqChart" viewBox="0 0 600 150" preserveAspectRatio="none" aria-hidden="true"></svg>
-      <div class="chart-x"><span data-i18n="ch_24h"></span><span data-i18n="ch_now"></span></div>
-    </div>
-    <div class="card chart-card">
-      <div class="chart-head"><h3 data-i18n="ch_load"></h3><span class="chart-now mono" id="loadNow"></span></div>
-      <svg class="chart" id="loadChart" viewBox="0 0 600 150" preserveAspectRatio="none" aria-hidden="true"></svg>
-      <div class="chart-x"><span data-i18n="ch_24h"></span><span data-i18n="ch_now"></span></div>
-    </div>
-    <div class="card gauge-card">
-      <h3 data-i18n="ch_res"></h3>
-      <div class="gauges">
-        <div class="gauge"><svg viewBox="0 0 84 84" aria-hidden="true">
-          <circle class="gauge-track" cx="42" cy="42" r="36"/>
-          <circle class="gauge-val" id="gMem" cx="42" cy="42" r="36"/></svg>
-          <div class="gauge-text"><span class="mono" id="gMemPct">–</span><small>RAM</small></div></div>
-        <div class="gauge"><svg viewBox="0 0 84 84" aria-hidden="true">
-          <circle class="gauge-track" cx="42" cy="42" r="36"/>
-          <circle class="gauge-val" id="gDisk" cx="42" cy="42" r="36"/></svg>
-          <div class="gauge-text"><span class="mono" id="gDiskPct">–</span><small>Disk</small></div></div>
+  <!-- Background job (apply / renew-TLS): visible on every view while it matters. -->
+  <section class="job" id="jobPanel" hidden aria-labelledby="jobTitle" data-state="running">
+    <div class="job-head">
+      <svg class="icon job-icon" aria-hidden="true"><use id="jobIcon" href="#i-spinner"/></svg>
+      <div class="job-text">
+        <h2 class="job-title" id="jobTitle"></h2>
+        <p class="job-meta" id="jobMeta"></p>
       </div>
+      <button class="icon-btn" type="button" id="jobClose" hidden>
+        <svg class="icon" aria-hidden="true"><use href="#i-close"/></svg>
+        <span class="sr-only" data-i18n="job_close">Meldung schließen</span>
+      </button>
     </div>
-  </div>
+    <details class="job-details" id="jobDetails">
+      <summary><svg class="icon summary-chev" aria-hidden="true"><use href="#i-chevron"/></svg><span data-i18n="job_log">Protokoll</span></summary>
+      <pre class="log job-log" id="jobLog" tabindex="0" aria-labelledby="jobTitle"></pre>
+    </details>
+  </section>
 
-  <div class="card qrbox">
-    <div class="qr-holder" id="qrHolder"><span class="hint" data-i18n="qr_none"></span></div>
-    <div class="qr-side">
-      <h3 data-i18n="h_qr"></h3>
-      <div class="hint" id="qrModeLine"></div>
-      <label data-i18n="qr_host"></label>
-      <div class="row">
-        <input id="qrHost" class="qr-input">
-        <button id="qrSave" data-i18n="save"></button>
-        <button id="qrCopy" class="ghost" data-i18n="copy_link"></button>
+  <!-- ═══════════════ Overview ═══════════════ -->
+  <section class="view" id="view-overview" data-view="overview" aria-labelledby="h-overview">
+    <h1 class="view-title" id="h-overview" tabindex="-1" data-i18n="nav_overview">Übersicht</h1>
+
+    <section class="summary" id="summary" data-state="loading" aria-labelledby="summaryTitle">
+      <svg class="icon summary-icon" aria-hidden="true"><use id="summaryIcon" href="#i-spinner"/></svg>
+      <div class="summary-body">
+        <h2 class="summary-title" id="summaryTitle" tabindex="-1">Status wird geladen …</h2>
+        <p class="summary-text" id="summaryText"></p>
+        <p class="summary-stale" id="summaryStale" hidden></p>
+        <p class="summary-meta"><span id="summaryMode"></span><span class="meta-sep" id="summarySep" hidden aria-hidden="true"> · </span><span id="summaryUpdated"></span></p>
       </div>
-      <p class="hint" data-i18n="qr_note"></p>
-    </div>
-  </div>
-</section>
+      <button class="btn" type="button" id="retryBtn" hidden>
+        <svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>
+        <span data-i18n="retry">Erneut versuchen</span>
+      </button>
+    </section>
 
-<!-- ══════════════ SECURITY ══════════════ -->
-<section id="tab-security" class="panel-tab" role="tabpanel" hidden>
-  <div class="charts-row two">
-    <div class="card chart-card">
-      <div class="chart-head"><h3 data-i18n="ch_bans"></h3><span class="chart-now mono" id="bansNow"></span></div>
-      <svg class="chart" id="bansChart" viewBox="0 0 600 150" preserveAspectRatio="none" aria-hidden="true"></svg>
-      <div class="chart-x"><span data-i18n="ch_24h"></span><span data-i18n="ch_now"></span></div>
-    </div>
-    <div class="card chart-card">
-      <div class="chart-head"><h3 data-i18n="ch_appsec"></h3><span class="chart-now mono" id="appsecNow"></span></div>
-      <svg class="chart" id="appsecChart" viewBox="0 0 600 150" preserveAspectRatio="none" aria-hidden="true"></svg>
-      <div class="chart-x"><span data-i18n="ch_24h"></span><span data-i18n="ch_now"></span></div>
-    </div>
-  </div>
+    <p class="result" id="overviewResult" role="status"></p>
 
-  <div class="card">
-    <h3 data-i18n="h_bans"></h3>
-    <div class="table-wrap">
-      <table id="banTable">
-        <thead><tr><th>IP</th><th data-i18n="t_origin"></th>
-          <th data-i18n="t_scenario"></th><th data-i18n="t_duration"></th><th></th></tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
-    <div class="row unban-row">
-      <input id="unbanIp" class="mono" placeholder="1.2.3.4">
-      <button id="unbanBtn" class="danger" data-i18n="unban"></button>
-    </div>
-  </div>
+    <section class="attention" id="attention" aria-labelledby="attentionTitle" hidden>
+      <h2 class="section-title" id="attentionTitle" tabindex="-1" data-i18n="att_title">Was zu tun ist</h2>
+      <ul class="attention-list" id="attentionList"></ul>
+    </section>
 
-  <div class="card">
-    <h3 data-i18n="h_actions"></h3>
-    <div class="row" id="actionRow">
-      <button class="danger" data-restart="nginx">nginx</button>
-      <button class="danger" data-restart="crowdsec">CrowdSec</button>
-      <button class="danger" data-restart="crowdsec-firewall-bouncer">Bouncer</button>
-      <button class="danger" data-restart="frpc" id="frpcBtn" hidden>frpc</button>
-      <button id="alertBtn" data-i18n="test_alert"></button>
-    </div>
-    <p class="hint" data-i18n="actions_note"></p>
-  </div>
-</section>
+    <section class="block" aria-labelledby="tilesTitle">
+      <h2 class="section-title" id="tilesTitle" data-i18n="tiles_title">Zustand im Detail</h2>
+      <div class="tiles">
+        <article class="tile tile-wide" id="tile-services" data-state="neutral" aria-labelledby="tile-services-h">
+          <div class="tile-head"><h3 class="tile-label" id="tile-services-h" data-i18n="tile_services">Dienste</h3><span class="badge" data-badge></span></div>
+          <p class="tile-value" data-value>—</p>
+          <ul class="svc-list" id="svcList"></ul>
+        </article>
+        <article class="tile" id="tile-ms" data-state="neutral" aria-labelledby="tile-ms-h">
+          <div class="tile-head"><h3 class="tile-label" id="tile-ms-h" data-i18n="tile_ms">Miniserver</h3><span class="badge" data-badge></span></div>
+          <p class="tile-value" data-value>—</p>
+          <p class="tile-sub" data-sub></p>
+        </article>
+        <article class="tile" id="tile-cert" data-state="neutral" hidden aria-labelledby="tile-cert-h">
+          <div class="tile-head"><h3 class="tile-label" id="tile-cert-h" data-i18n="tile_cert">TLS-Zertifikat</h3><span class="badge" data-badge></span></div>
+          <p class="tile-value" data-value>—</p>
+          <p class="tile-sub" data-sub></p>
+        </article>
+        <article class="tile" id="tile-bans" data-state="neutral" aria-labelledby="tile-bans-h">
+          <div class="tile-head"><h3 class="tile-label" id="tile-bans-h" data-i18n="tile_bans">Gesperrte Adressen</h3><span class="badge" data-badge></span></div>
+          <p class="tile-value num" data-value>—</p>
+          <p class="tile-sub" data-sub></p>
+          <a class="tile-link" href="#security"><span data-i18n="bans_link">Liste ansehen</span><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+        </article>
+        <article class="tile" id="tile-appsec" data-state="neutral" aria-labelledby="tile-appsec-h">
+          <div class="tile-head"><h3 class="tile-label" id="tile-appsec-h" data-i18n="tile_appsec">Abgewehrte Angriffe heute</h3><span class="badge" data-badge></span></div>
+          <p class="tile-value num" data-value>—</p>
+          <p class="tile-sub" data-sub></p>
+        </article>
+        <article class="tile" id="tile-backup" data-state="neutral" aria-labelledby="tile-backup-h">
+          <div class="tile-head"><h3 class="tile-label" id="tile-backup-h" data-i18n="tile_backup">Letztes Backup</h3><span class="badge" data-badge></span></div>
+          <p class="tile-value" data-value>—</p>
+          <p class="tile-sub" data-sub></p>
+        </article>
+        <article class="tile" id="tile-system" data-state="neutral" aria-labelledby="tile-system-h">
+          <div class="tile-head"><h3 class="tile-label" id="tile-system-h" data-i18n="tile_system">System</h3><span class="badge" data-badge></span></div>
+          <dl class="meters">
+            <div class="meter" id="meter-disk"><dt data-i18n="sys_disk">Speicherplatz</dt><dd><span class="meter-val num" data-meter-val>—</span><span class="meter-track" aria-hidden="true"><span class="meter-fill" data-meter-fill></span></span></dd></div>
+            <div class="meter" id="meter-mem"><dt data-i18n="sys_mem">Arbeitsspeicher</dt><dd><span class="meter-val num" data-meter-val>—</span><span class="meter-track" aria-hidden="true"><span class="meter-fill" data-meter-fill></span></span></dd></div>
+            <div class="meter" id="meter-load"><dt data-i18n="sys_load">Auslastung</dt><dd><span class="meter-val num" data-meter-val>—</span><span class="meter-track" aria-hidden="true"><span class="meter-fill" data-meter-fill></span></span></dd></div>
+          </dl>
+        </article>
+        <article class="tile" id="tile-conn" data-state="neutral" hidden aria-labelledby="tile-conn-h">
+          <div class="tile-head"><h3 class="tile-label" id="tile-conn-h" data-i18n="tile_conn">Verbindungsart</h3><span class="badge" data-badge></span></div>
+          <p class="tile-value" data-value>—</p>
+          <p class="tile-sub" data-sub></p>
+        </article>
+      </div>
+    </section>
 
-<!-- ══════════════ CONFIG ══════════════ -->
-<section id="tab-config" class="panel-tab" role="tabpanel" hidden>
-  <div class="card">
-    <h3 data-i18n="h_config"></h3>
-    <div id="cfgForm"></div>
-    <div class="row cfg-actions">
-      <button id="cfgSave" data-i18n="save_cfg"></button>
-      <button id="applyBtn" class="primary" data-i18n="apply"></button>
-      <button id="renewBtn" class="ghost" data-i18n="renew"></button>
-    </div>
-    <p class="hint" data-i18n="cfg_note"></p>
-    <pre id="jobLog" class="mono" hidden></pre>
-  </div>
-</section>
+    <section class="block" aria-labelledby="trendsTitle">
+      <h2 class="section-title" id="trendsTitle" data-i18n="trends_title">Letzte 24 Stunden</h2>
+      <div class="charts">
+        <figure class="chart" id="chart-req" data-chart="req"></figure>
+        <figure class="chart" id="chart-load" data-chart="load"></figure>
+      </div>
+    </section>
+  </section>
 
-<!-- ══════════════ LOGS ══════════════ -->
-<section id="tab-logs" class="panel-tab" role="tabpanel" hidden>
-  <div class="card">
-    <h3 data-i18n="h_logs"></h3>
-    <div class="row log-controls">
-      <div class="chips" id="logChips"></div>
-      <label class="follow-toggle"><input type="checkbox" id="logFollow">
-        <span data-i18n="follow"></span></label>
-    </div>
-    <pre id="logView" class="mono" hidden></pre>
-  </div>
-</section>
+  <!-- ═══════════════ Security ═══════════════ -->
+  <section class="view" id="view-security" data-view="security" aria-labelledby="h-security" hidden>
+    <h1 class="view-title" id="h-security" tabindex="-1" data-i18n="sec_title">Sicherheit</h1>
 
+    <div class="charts">
+      <figure class="chart" id="chart-bans" data-chart="bans"></figure>
+      <figure class="chart" id="chart-appsec" data-chart="appsec"></figure>
+    </div>
+
+    <section class="card" aria-labelledby="decTitle">
+      <div class="card-head">
+        <h2 class="card-title" id="decTitle" tabindex="-1" data-i18n="dec_title">Gesperrte Adressen</h2>
+        <p class="card-sub" id="decCount"></p>
+      </div>
+      <p class="state-msg" id="decState">Wird geladen …</p>
+      <div class="table-wrap" id="decWrap" tabindex="0" role="region" aria-labelledby="decTitle" hidden>
+        <table class="table">
+          <thead><tr>
+            <th scope="col" data-i18n="dec_th_ip">IP-Adresse</th>
+            <th scope="col" data-i18n="dec_th_reason">Grund</th>
+            <th scope="col" data-i18n="dec_th_origin">Quelle</th>
+            <th scope="col" data-i18n="dec_th_duration">Restdauer</th>
+            <th scope="col"><span class="sr-only" data-i18n="dec_th_action">Aktion</span></th>
+          </tr></thead>
+          <tbody id="decBody"></tbody>
+        </table>
+      </div>
+      <form class="inline-form" id="unbanForm" novalidate>
+        <label class="field-label" for="unbanIp" data-i18n="unban_label">Andere IP-Adresse entsperren</label>
+        <p class="hint" id="unbanHint" data-i18n="unban_hint">IPv4 oder IPv6, z. B. 203.0.113.7</p>
+        <div class="field-row">
+          <input class="input mono" id="unbanIp" name="ip" type="text" inputmode="text" autocomplete="off"
+                 autocapitalize="off" spellcheck="false" aria-describedby="unbanHint unbanError">
+          <button class="btn" type="submit" data-i18n="unban">Entsperren</button>
+        </div>
+        <p class="field-error" id="unbanError" hidden></p>
+      </form>
+      <p class="result" id="decResult" role="status"></p>
+    </section>
+
+    <section class="card" aria-labelledby="svcTitle">
+      <div class="card-head">
+        <h2 class="card-title" id="svcTitle" data-i18n="svc_title">Dienste neu starten</h2>
+        <p class="card-sub" data-i18n="svc_sub">Ein Neustart unterbricht aktive Verbindungen für ein paar Sekunden.</p>
+      </div>
+      <ul class="action-list" id="restartList"></ul>
+      <p class="result" id="svcResult" role="status"></p>
+    </section>
+
+    <section class="card" aria-labelledby="maintTitle">
+      <div class="card-head"><h2 class="card-title" id="maintTitle" data-i18n="maint_title">Wartung</h2></div>
+      <div class="maint">
+        <div class="maint-item">
+          <h3 class="maint-title" data-i18n="alert_title">Testalarm</h3>
+          <p class="card-sub" data-i18n="alert_text">Schickt eine Testnachricht über den eingerichteten Discord-Webhook.</p>
+          <button class="btn" type="button" id="alertBtn">
+            <svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg>
+            <span data-i18n="alert_btn">Testalarm senden</span>
+          </button>
+          <p class="result" id="alertResult" role="status"></p>
+        </div>
+        <div class="maint-item" id="renewItem">
+          <h3 class="maint-title" data-i18n="renew_title">TLS-Zertifikat</h3>
+          <p class="card-sub" data-i18n="renew_text">Fordert sofort ein neues Zertifikat an.</p>
+          <button class="btn" type="button" id="renewBtn">
+            <svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>
+            <span data-i18n="renew_btn">Zertifikat jetzt erneuern</span>
+          </button>
+          <p class="result" id="renewResult" role="status"></p>
+        </div>
+      </div>
+      <p class="note" id="authNote" hidden>
+        <svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg>
+        <span id="authNoteText"></span>
+      </p>
+    </section>
+  </section>
+
+  <!-- ═══════════════ Configuration ═══════════════ -->
+  <section class="view" id="view-config" data-view="config" aria-labelledby="h-config" hidden>
+    <h1 class="view-title" id="h-config" tabindex="-1" data-i18n="cfg_view_title">Konfiguration</h1>
+
+    <section class="card invite-card" aria-labelledby="invTitle">
+      <div class="card-head">
+        <h2 class="card-title" id="invTitle" data-i18n="inv_title">Familien-Einladung</h2>
+        <p class="card-sub" data-i18n="inv_text">Der QR-Code enthält nur die Adresse deines Gateways — nie Zugangsdaten.</p>
+      </div>
+      <div class="invite-grid">
+        <div class="qr-box" id="qrBox"><p class="state-msg">Konfiguration wird geladen …</p></div>
+        <div class="invite-side">
+          <p class="kv-label" data-i18n="inv_host_label">Adresse im QR-Code</p>
+          <p class="kv-value mono" id="qrHostValue">—</p>
+          <p class="hint" id="qrSource"></p>
+          <label class="field-label" for="qrLink" data-i18n="inv_link_label">Link für die Loxone-App</label>
+          <div class="field-row">
+            <input class="input mono" id="qrLink" type="text" readonly>
+            <button class="btn" type="button" id="qrCopy">
+              <svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg>
+              <span data-i18n="inv_copy">Link kopieren</span>
+            </button>
+          </div>
+          <a class="btn btn-quiet invite-print" id="qrPrint" href="/invite?lang=de" target="_blank" rel="noopener">
+            <svg class="icon" aria-hidden="true"><use href="#i-printer"/></svg>
+            <span data-i18n="inv_print">Einladung öffnen und drucken</span>
+            <span class="sr-only" data-i18n="new_tab">(öffnet in neuem Tab)</span>
+          </a>
+          <form class="inline-form" id="qrForm" novalidate>
+            <label class="field-label" for="qrManual" data-i18n="inv_manual_label">Manuelle Adresse (Host[:Port])</label>
+            <p class="hint" id="qrManualHint" data-i18n="inv_manual_hint">Wird nur verwendet, wenn weder Tunnel noch TLS aktiv ist.</p>
+            <div class="field-row">
+              <input class="input mono" id="qrManual" type="text" autocomplete="off" autocapitalize="off"
+                     spellcheck="false" aria-describedby="qrManualHint qrManualError">
+              <button class="btn" type="submit" data-i18n="inv_save">Adresse speichern</button>
+            </div>
+            <p class="field-error" id="qrManualError" hidden></p>
+          </form>
+          <p class="result" id="qrResult" role="status"></p>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="cfgTitle">
+      <div class="card-head">
+        <h2 class="card-title" id="cfgTitle" data-i18n="cfg_title">Gateway-Einstellungen</h2>
+        <p class="card-sub" data-i18n="cfg_intro">„Speichern“ schreibt /etc/loxprox/deploy.conf und legt vorher ein Backup an.</p>
+      </div>
+      <div class="error-summary" id="cfgErrors" tabindex="-1" hidden>
+        <p class="error-summary-title" id="cfgErrorsTitle"></p>
+        <ul id="cfgErrorsList"></ul>
+      </div>
+      <p class="state-msg" id="cfgState">Konfiguration wird geladen …</p>
+      <form class="cfg-form" id="cfgForm" novalidate hidden></form>
+      <div class="form-actions" id="cfgActions" hidden>
+        <button class="btn" type="submit" form="cfgForm" id="cfgSave" data-i18n="cfg_save">Speichern</button>
+        <button class="btn btn-primary" type="button" id="applyBtn" data-i18n="cfg_apply">Anwenden …</button>
+        <button class="btn btn-quiet" type="button" id="cfgReset" data-i18n="cfg_reset" hidden>Änderungen verwerfen</button>
+        <span class="dirty-note" id="cfgDirty"></span>
+      </div>
+      <p class="result" id="cfgResult" role="status"></p>
+    </section>
+  </section>
+
+  <!-- ═══════════════ Logs ═══════════════ -->
+  <section class="view" id="view-logs" data-view="logs" aria-labelledby="h-logs" hidden>
+    <h1 class="view-title" id="h-logs" tabindex="-1" data-i18n="logs_title">Logs</h1>
+    <section class="card log-card" aria-labelledby="h-logs">
+      <fieldset class="segmented" id="logChoice">
+        <legend class="field-label" data-i18n="log_choose">Protokoll</legend>
+        <div class="seg-list" id="logChoiceList"></div>
+      </fieldset>
+      <div class="log-toolbar">
+        <div class="log-filter">
+          <label class="field-label" for="logFilter" data-i18n="log_filter">Zeilen filtern</label>
+          <input class="input" id="logFilter" type="search" autocomplete="off" spellcheck="false">
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="logFollow" role="switch">
+          <span class="switch-track" aria-hidden="true"></span>
+          <span data-i18n="log_follow">Live folgen (alle 5 s)</span>
+        </label>
+        <button class="btn" type="button" id="logReload">
+          <svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>
+          <span data-i18n="log_reload">Neu laden</span>
+        </button>
+      </div>
+      <p class="log-meta" id="logMeta"></p>
+      <pre class="log" id="logView" tabindex="0"></pre>
+    </section>
+  </section>
 </main>
 
-<footer class="foot"><span id="footLine"></span></footer>
-<div class="toast" id="toast" role="status"></div>
+<footer class="foot"><p id="footLine" data-i18n="foot">LoxProx Panel · nur im Heimnetz erreichbar</p></footer>
 
+<!-- Announcements for screen readers that have no visible home (theme, chart cursor). -->
+<div class="sr-only" id="srLive" aria-live="polite" aria-atomic="true"></div>
+
+<dialog class="dialog" id="confirmDlg" aria-labelledby="confirmTitle" aria-describedby="confirmText">
+  <h2 class="dialog-title" id="confirmTitle"></h2>
+  <p class="dialog-text" id="confirmText"></p>
+  <p class="dialog-text dialog-extra" id="confirmExtra" hidden></p>
+  <div class="dialog-actions">
+    <button class="btn" type="button" id="confirmCancel" data-i18n="cancel">Abbrechen</button>
+    <button class="btn btn-danger" type="button" id="confirmOk"></button>
+  </div>
+</dialog>
+
+<dialog class="dialog" id="authDlg" aria-labelledby="authTitle" aria-describedby="authText">
+  <form id="authForm" novalidate>
+    <h2 class="dialog-title" id="authTitle" data-i18n="auth_title">Passwort erforderlich</h2>
+    <p class="dialog-text" id="authText" data-i18n="auth_text">Für Änderungen verlangt das Panel das Passwort aus GUI_PASSWORD.</p>
+    <input class="sr-only" type="text" name="username" value="loxprox-panel" autocomplete="username" tabindex="-1" aria-hidden="true" readonly>
+    <label class="field-label" for="authPw" data-i18n="auth_label">Panel-Passwort</label>
+    <input class="input" id="authPw" name="password" type="password" autocomplete="current-password" aria-describedby="authError">
+    <p class="field-error" id="authError" hidden></p>
+    <div class="dialog-actions">
+      <button class="btn" type="button" id="authCancel" data-i18n="cancel">Abbrechen</button>
+      <button class="btn btn-primary" type="submit" data-i18n="auth_ok">Bestätigen</button>
+    </div>
+  </form>
+</dialog>
 </body>
 </html>

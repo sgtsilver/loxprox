@@ -4,8 +4,9 @@
 Serves the family QR invitation, live gateway status with 24h history charts,
 log viewing, a guarded deploy.conf editor with one-click apply, and support
 actions (unban, service restart, TLS renew, test alert). The dashboard itself
-(tabs, charts, three.js scene) lives in gui/static/ and is served from disk —
-all assets are vendored, nothing loads from the internet. Security model (see
+(a status-first "calm console": plain HTML/CSS/JS, no third-party libraries)
+lives in gui/static/ and is served from disk — fonts included, nothing loads
+from the internet. Security model (see
 docs/GUI-PANEL.md): reachable only from LAN_SUBNET / SSH_ALLOWED_SUBNETS via
 nftables, Host-header allowlist against DNS rebinding, X-LoxProx-Gui header on
 every mutation (CSRF), optional GUI_PASSWORD enforced on mutations, CSP with
@@ -29,7 +30,7 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 # Paths are env-overridable so the pytest suite can point them at fixtures.
 DEPLOY_CONF = os.environ.get("LOXPROX_DEPLOY_CONF", "/etc/loxprox/deploy.conf")
@@ -397,6 +398,12 @@ STATIC_TYPES = {".html": "text/html; charset=utf-8",
                 ".svg": "image/svg+xml"}
 
 
+def static_max_age(rel):
+    """Cache lifetime for a /static/ asset: fonts never change between
+    deploys; app files (html/css/js) may, so they revalidate quickly."""
+    return 86400 if rel.startswith("fonts/") else 300
+
+
 def safe_static_path(rel, base_dir=None):
     """Resolve a /static/ request path, or None if it escapes the asset dir
     or has a non-allowlisted extension."""
@@ -613,6 +620,15 @@ JOBS = JobRunner()
 
 # ------------------------------------------------------------- HTTP handler
 
+# No inline scripts anywhere — every script is a file under /static/.
+# style 'unsafe-inline' is kept for compatibility (e.g. presentation in the
+# qrencode SVG inlined into /invite); the panel's own markup uses none.
+CSP = ("default-src 'none'; script-src 'self'; "
+       "style-src 'self' 'unsafe-inline'; "
+       "img-src 'self' data:; connect-src 'self'; "
+       "font-src 'self'; base-uri 'none'; form-action 'none'")
+
+
 class PanelHandler(BaseHTTPRequestHandler):
     server_version = "LoxProxPanel/2.2"
     protocol_version = "HTTP/1.1"
@@ -627,13 +643,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
-        # No inline scripts anywhere (v2.2) — everything ships from /static/.
-        # style 'unsafe-inline' stays for style="" attributes in rendered HTML.
-        self.send_header("Content-Security-Policy",
-                         "default-src 'none'; script-src 'self'; "
-                         "style-src 'self' 'unsafe-inline'; "
-                         "img-src 'self' data:; connect-src 'self'; "
-                         "font-src 'self'; base-uri 'none'; form-action 'none'")
+        self.send_header("Content-Security-Policy", CSP)
 
     def _send(self, code, body, ctype="text/html; charset=utf-8"):
         data = body.encode("utf-8") if isinstance(body, str) else body
@@ -682,10 +692,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         self._security_headers()
         self.send_header("Content-Type", STATIC_TYPES[os.path.splitext(full)[1]])
         self.send_header("Content-Length", str(len(data)))
-        # Vendored libs/fonts never change between deploys of the same version;
-        # app files may. Both revalidate cheaply on a LAN.
-        cache = 86400 if ("vendor/" in rel or "fonts/" in rel) else 300
-        self.send_header("Cache-Control", f"max-age={cache}")
+        self.send_header("Cache-Control", f"max-age={static_max_age(rel)}")
         self.end_headers()
         self.wfile.write(data)
 
@@ -830,16 +837,17 @@ class PanelHandler(BaseHTTPRequestHandler):
 # ------------------------------------------------------------------ HTML UI
 #
 # The dashboard itself is a static app (gui/static/panel.html + panel.css +
-# panel.js, vendored three.js/anime.js/fonts) served by _serve_static. Only
-# the printable invitation is still rendered server-side, because it embeds
-# the QR SVG and language-picked steps directly.
+# panel.js + i18n.js + charts.js, vendored fonts) served by _serve_static.
+# Only the printable invitation is still rendered server-side, because it
+# embeds the QR SVG and language-picked steps directly. It shares panel.css.
 
 def render_invite(query):
     conf = load_conf(DEPLOY_CONF)
     host = query.get("host") or derive_host(conf, load_settings())[0]
     lang = "en" if query.get("lang") == "en" else "de"
     safe_host = html.escape(host) if host else ""
-    svg = qr_svg(f"loxone://ms?host={host}") if host and valid_host(host) else None
+    has_host = bool(host) and valid_host(host)
+    svg = qr_svg(f"loxone://ms?host={host}") if has_host else None
     if lang == "de":
         steps = ("<ol><li><strong>Loxone App</strong> installieren (App Store / "
                  "Play Store).</li><li>Diesen QR-Code mit der Handy-Kamera scannen "
@@ -850,6 +858,8 @@ def render_invite(query):
                  "&ouml;ffnet: erst die App installieren, dann erneut scannen. "
                  "Adresse zum Abtippen: <strong>%s</strong></p>" % safe_host)
         title, no_host = "Loxone einrichten", "Keine &ouml;ffentliche Adresse konfiguriert."
+        no_qr, qr_label, print_label = ("QR-Code konnte nicht erzeugt werden.",
+                                        "QR-Code f&uuml;r", "Drucken")
     else:
         steps = ("<ol><li>Install the <strong>Loxone app</strong> (App Store / "
                  "Play Store).</li><li>Scan this QR code with your phone camera "
@@ -860,26 +870,45 @@ def render_invite(query):
                  "app first, then rescan. Address for manual entry: "
                  "<strong>%s</strong></p>" % safe_host)
         title, no_host = "Set up Loxone", "No public host configured."
-    body = svg if svg else f"<p class='hint'>{no_host}</p>"
-    return (INVITE_HTML.replace("__TITLE__", title)
+        no_qr, qr_label, print_label = ("The QR code could not be generated.",
+                                        "QR code for", "Print")
+    if svg:
+        body = ("<div class='qr-img' role='img' aria-label='%s loxone://ms?host=%s'>%s</div>"
+                "<figcaption>%s</figcaption>" % (qr_label, safe_host, svg, safe_host))
+    elif has_host:
+        body = f"<p class='hint'>{no_qr}</p><figcaption>{safe_host}</figcaption>"
+    else:
+        body = f"<p class='hint'>{no_host}</p>"
+    host_q = ("&amp;host=" + html.escape(quote(host, safe=":"))) if query.get("host") and has_host else ""
+    current = {"de": " aria-current='true'" if lang == "de" else "",
+               "en": " aria-current='true'" if lang == "en" else ""}
+    return (INVITE_HTML.replace("__LANG__", lang)
+            .replace("__TITLE__", title)
             .replace("__QR__", body)
-            .replace("__STEPS__", steps))
+            .replace("__STEPS__", steps)
+            .replace("__PRINT__", print_label)
+            .replace("__HOSTQ__", host_q)
+            .replace("__CUR_DE__", current["de"])
+            .replace("__CUR_EN__", current["en"]))
 
 
 INVITE_HTML = """<!DOCTYPE html>
-<html lang="de"><head><meta charset="utf-8">
+<html lang="__LANG__"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>__TITLE__</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/panel.css">
+<script src="/static/theme-boot.js"></script>
 <script defer src="/static/invite.js"></script></head>
-<body class="invite-page"><main class="invite-main">
+<body class="invite-page"><main>
 <h1 class="invite-title">__TITLE__</h1>
-<div class="card invite-qr">__QR__</div>
-<div class="card invite-steps">__STEPS__</div>
-<div class="row noprint invite-actions">
-<button id="printBtn">Drucken / Print</button>
-<a href="/invite?lang=de"><button>DE</button></a>
-<a href="/invite?lang=en"><button>EN</button></a>
+<figure class="invite-qr">__QR__</figure>
+<div class="invite-steps">__STEPS__</div>
+<div class="invite-actions noprint">
+<button type="button" class="btn btn-primary" id="printBtn">__PRINT__</button>
+<a class="btn" href="/invite?lang=de__HOSTQ__" lang="de" hreflang="de"__CUR_DE__>Deutsch</a>
+<a class="btn" href="/invite?lang=en__HOSTQ__" lang="en" hreflang="en"__CUR_EN__>English</a>
 </div></main></body></html>
 """
 

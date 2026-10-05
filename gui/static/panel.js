@@ -1,534 +1,1145 @@
-/* LoxProx Panel v2.2 — dashboard app.
-   Vendored three.js (background scene) + anime.js (transitions, counters,
-   chart draw-ins). Talks only to the panel's own /api endpoints. */
+/* LoxProx Panel — calm ops console.
+   Talks only to the panel's own /api endpoints (CSP connect-src 'self').
+   No third-party code; DOM is built with safe APIs (never HTML strings).
+   Status first: the overview answers "is everything OK, and if not, what
+   should I do?" — then details, then 24h trends. */
 
-import * as THREE from "/static/vendor/three.module.min.js";
-import { animate, stagger } from "/static/vendor/anime.esm.min.js";
-
-// ─── i18n ────────────────────────────────────────────────────────────────
-
-const I18N = {
-    de: {
-        invite: "Einladung öffnen",
-        tab_overview: "Übersicht", tab_security: "Sicherheit",
-        tab_config: "Konfiguration", tab_logs: "Logs",
-        hero_kicker: "Loxone Security Gateway",
-        hero_ok: "Alles im grünen Bereich",
-        hero_warn: "Beobachtung aktiv",
-        hero_bad: "Eingriff erforderlich",
-        hs_req: "Anfragen/Min", hs_bans: "Blockierte Zugriffe",
-        hs_appsec: "Abgewehrte Angriffe", hs_cert: "Zertifikat (Tage)",
-        ch_req: "Anfragen pro Minute", ch_load: "Systemlast",
-        ch_res: "Ressourcen", ch_bans: "Aktive Sperren (24h)",
-        ch_appsec: "AppSec-Treffer (24h)", ch_24h: "vor 24h", ch_now: "jetzt",
-        no_data: "Sammle Daten … erste Punkte erscheinen in wenigen Minuten.",
-        h_qr: "Familien-Einladung", qr_none: "Kein QR verfügbar",
-        qr_host: "Öffentliche Adresse (Host[:Port])",
-        save: "Speichern", copy_link: "Link kopieren",
-        qr_note: "Der QR-Code enthält nur die Adresse — nie Zugangsdaten. Jedes Familienmitglied nutzt eigenen Miniserver-Benutzer.",
-        h_bans: "Aktive Sperren (CrowdSec)", t_origin: "Quelle",
-        t_scenario: "Szenario", t_duration: "Dauer", unban: "IP entsperren",
-        h_actions: "Aktionen", renew: "TLS-Zertifikat erneuern",
-        test_alert: "Discord-Testalarm",
-        actions_note: "Neustarts unterbrechen aktive Verbindungen kurz.",
-        h_config: "Konfiguration", save_cfg: "Konfiguration speichern",
-        apply: "Anwenden (deploy.sh)",
-        cfg_note: "Speichern schreibt /etc/loxprox/deploy.conf (mit Backup). Erst 'Anwenden' aktiviert Änderungen. Netz-Grundwerte (GATEWAY_IP, LAN_SUBNET, SSH) nur per SSH.",
-        h_logs: "Logs", follow: "Folgen",
-        grp_backend: "Miniserver", grp_rate: "Rate-Limits",
-        grp_timeouts: "Timeouts", grp_appsec: "AppSec & CrowdSec",
-        grp_alert: "Alarme & Wartung", grp_tls: "TLS", grp_tunnel: "Tunnel",
-        grp_gui: "Panel", grp_other: "Weitere",
-        svc: "Dienste", cert: "TLS-Zertifikat", days: "Tage übrig",
-        ms: "Miniserver", reach: "erreichbar", unreach: "NICHT erreichbar",
-        bans: "Blockierte Zugriffe", appsec: "Abgewehrte Angriffe (heute)", backup: "Letztes Backup",
-        hours_ago: "h alt", sys: "System", mode: "Verbindungsart", no_cert: "kein Zertifikat",
-        svc_sub: "Die Schutzsoftware im Hintergrund",
-        cert_sub: "Erneuert sich automatisch",
-        ms_sub: "Die Loxone-Zentrale im Haus",
-        bans_sub: "Ausgesperrte Absender-Adressen",
-        appsec_sub: "Schädliche Anfragen, von der Firewall gestoppt",
-        backup_sub: "Sicherung der Gateway-Konfiguration",
-        sys_sub: "Zustand des Gateway-Rechners",
-        mode_sub: "Wie deine Verbindung von außen geschützt ist",
-        mode_tls: "Verschlüsselt (TLS)", mode_tunnel: "Tunnel", mode_plain: "Direkt (HTTP)",
-        appsec_ips: "Adressen",
-        sys_disk: "Speicherplatz", sys_mem: "Arbeitsspeicher", sys_load: "Auslastung",
-        load_low: "niedrig", load_mid: "normal", load_high: "hoch",
-        confirm_restart: "Dienst wirklich neu starten: ",
-        confirm_unban: "IP entsperren: ", confirm_apply: "deploy.sh jetzt ausführen?",
-        need_pw: "Passwort (X-LoxProx-Auth)",
-        done: "Fertig", failed: "Fehlgeschlagen",
-        degraded: "Fertig, mit Einschränkungen — Protokoll unten prüfen",
-        theme_auto: "Design: automatisch", theme_light: "Design: hell",
-        theme_dark: "Design: dunkel", updated: "aktualisiert",
-    },
-    en: {
-        invite: "Open invitation",
-        tab_overview: "Overview", tab_security: "Security",
-        tab_config: "Configuration", tab_logs: "Logs",
-        hero_kicker: "Loxone Security Gateway",
-        hero_ok: "All systems secure",
-        hero_warn: "Watching closely",
-        hero_bad: "Attention required",
-        hs_req: "Requests/min", hs_bans: "Blocked visitors",
-        hs_appsec: "Attacks blocked", hs_cert: "Certificate (days)",
-        ch_req: "Requests per minute", ch_load: "System load",
-        ch_res: "Resources", ch_bans: "Active bans (24h)",
-        ch_appsec: "AppSec hits (24h)", ch_24h: "24h ago", ch_now: "now",
-        no_data: "Collecting data … first points appear within minutes.",
-        h_qr: "Family invitation", qr_none: "No QR available",
-        qr_host: "Public address (host[:port])",
-        save: "Save", copy_link: "Copy link",
-        qr_note: "The QR encodes only the address — never credentials. Give each family member their own Miniserver user.",
-        h_bans: "Active bans (CrowdSec)", t_origin: "Origin",
-        t_scenario: "Scenario", t_duration: "Duration", unban: "Unban IP",
-        h_actions: "Actions", renew: "Renew TLS certificate",
-        test_alert: "Discord test alert",
-        actions_note: "Restarts briefly interrupt active connections.",
-        h_config: "Configuration", save_cfg: "Save configuration",
-        apply: "Apply (deploy.sh)",
-        cfg_note: "Save writes /etc/loxprox/deploy.conf (backed up first). Only 'Apply' activates changes. Core network keys (GATEWAY_IP, LAN_SUBNET, SSH) are SSH-only.",
-        h_logs: "Logs", follow: "Follow",
-        grp_backend: "Miniserver", grp_rate: "Rate limits",
-        grp_timeouts: "Timeouts", grp_appsec: "AppSec & CrowdSec",
-        grp_alert: "Alerts & maintenance", grp_tls: "TLS", grp_tunnel: "Tunnel",
-        grp_gui: "Panel", grp_other: "Other",
-        svc: "Services", cert: "TLS certificate", days: "days left",
-        ms: "Miniserver", reach: "reachable", unreach: "NOT reachable",
-        bans: "Blocked visitors", appsec: "Attacks blocked (today)", backup: "Last backup",
-        hours_ago: "h old", sys: "System", mode: "Connection type", no_cert: "no certificate",
-        svc_sub: "The protection software running in the background",
-        cert_sub: "Renews automatically",
-        ms_sub: "The Loxone hub in your home",
-        bans_sub: "Addresses currently locked out",
-        appsec_sub: "Malicious requests stopped by the firewall",
-        backup_sub: "Backup of the gateway configuration",
-        sys_sub: "Health of the gateway computer",
-        mode_sub: "How your remote connection is secured",
-        mode_tls: "Encrypted (TLS)", mode_tunnel: "Tunnel", mode_plain: "Direct (HTTP)",
-        appsec_ips: "addresses",
-        sys_disk: "Storage", sys_mem: "Memory", sys_load: "Load",
-        load_low: "low", load_mid: "normal", load_high: "high",
-        confirm_restart: "Really restart service: ",
-        confirm_unban: "Unban IP: ", confirm_apply: "Run deploy.sh now?",
-        need_pw: "Password (X-LoxProx-Auth)",
-        done: "Done", failed: "Failed",
-        degraded: "Done, with degraded steps — check the log below",
-        theme_auto: "Theme: automatic", theme_light: "Theme: light",
-        theme_dark: "Theme: dark", updated: "updated",
-    },
-};
-
-let lang = localStorage.getItem("lp-lang") || "de";
-let authRequired = false;
+import { I18N } from "/static/i18n.js";
+import { createChart } from "/static/charts.js";
 
 const $ = (id) => document.getElementById(id);
-const t = (k) => (I18N[lang][k] || k);
-const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
-const SMALL = matchMedia("(max-width: 720px)").matches;
 
-function esc(s) {
-    const d = document.createElement("div");
-    d.textContent = String(s);
-    return d.innerHTML;
+// ─── storage (every access guarded: private mode / blocked storage) ─────
+
+function storageGet(kind, key) {
+    try { return window[kind].getItem(key); } catch (e) { return null; }
+}
+function storageSet(kind, key, value) {
+    try {
+        if (value === null) window[kind].removeItem(key);
+        else window[kind].setItem(key, value);
+    } catch (e) { /* storage unavailable — keep the in-memory value */ }
 }
 
-function applyLang() {
-    document.querySelectorAll("[data-i18n]").forEach((el) => {
-        el.textContent = t(el.dataset.i18n);
-    });
-    $("langBtn").textContent = lang === "de" ? "EN" : "DE";
-    document.documentElement.lang = lang;
+// ─── i18n & formatting ──────────────────────────────────────────────────
+
+let lang = storageGet("localStorage", "lp-lang") === "en" ? "en" : "de";
+
+function t(key, vars) {
+    const dict = I18N[lang] || I18N.de;
+    let s = key in dict ? dict[key] : (key in I18N.de ? I18N.de[key] : key);
+    if (vars) s = s.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? String(vars[k]) : m));
+    return s;
+}
+function tn(key, n, vars) {
+    return t(key + (n === 1 ? "_one" : "_other"), Object.assign({ n }, vars));
 }
 
-$("langBtn").onclick = () => {
-    lang = lang === "de" ? "en" : "de";
-    localStorage.setItem("lp-lang", lang);
-    applyLang();
-    refresh();
-    loadConfig();
-    renderHistory();
+const locale = () => (lang === "de" ? "de-DE" : "en-GB");
+const nfCache = new Map();
+function num(value, decimals = 0) {
+    if (value === null || value === undefined || !Number.isFinite(value)) return t("no_value");
+    const key = locale() + decimals;
+    if (!nfCache.has(key)) {
+        nfCache.set(key, new Intl.NumberFormat(locale(), {
+            minimumFractionDigits: decimals, maximumFractionDigits: decimals }));
+    }
+    return nfCache.get(key).format(value);
+}
+function pct(value) {
+    if (value === null || value === undefined || !Number.isFinite(value)) return t("no_value");
+    return new Intl.NumberFormat(locale(), { style: "percent", maximumFractionDigits: 0 }).format(value / 100);
+}
+function clock(epochSec, seconds) {
+    const opts = { hour: "2-digit", minute: "2-digit", hourCycle: "h23" };
+    if (seconds) opts.second = "2-digit";
+    return new Date(epochSec * 1000).toLocaleTimeString(locale(), opts);
+}
+function duration(sec) {
+    const s = Math.max(0, Math.floor(sec));
+    const m = Math.floor(s / 60);
+    return m + ":" + String(s % 60).padStart(2, "0");
+}
+
+// ─── small DOM helpers ──────────────────────────────────────────────────
+
+function el(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined && text !== null) node.textContent = text;
+    return node;
+}
+function icon(name, extra) {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "icon" + (extra ? " " + extra : ""));
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    use.setAttribute("href", "#i-" + name);
+    svg.append(use);
+    return svg;
+}
+const LEVEL_ICON = { ok: "ok", warn: "warn", bad: "bad", info: "info", neutral: "neutral" };
+
+function setResult(node, level, message) {
+    if (!message) { node.replaceChildren(); delete node.dataset.state; return; }
+    node.dataset.state = level;
+    node.replaceChildren(icon(LEVEL_ICON[level] || "info"), el("span", "", message));
+}
+
+/* A cancelled password prompt is not a failure: say so neutrally. */
+function reportError(node, key, err, vars) {
+    if (err instanceof ApiError && err.kind === "cancelled") setResult(node, "info", t("auth_cancelled"));
+    else setResult(node, "bad", t(key, Object.assign({ err: errText(err) }, vars)));
+}
+
+function announce(message) {
+    const live = $("srLive");
+    live.textContent = "";
+    window.setTimeout(() => { live.textContent = message; }, 60);
+}
+
+function setBusy(btn, busy) {
+    if (busy) { btn.setAttribute("aria-disabled", "true"); btn.dataset.busy = "1"; }
+    else { btn.removeAttribute("aria-disabled"); delete btn.dataset.busy; }
+}
+const isBusy = (btn) => btn.dataset.busy === "1";
+
+// ─── API ────────────────────────────────────────────────────────────────
+
+class ApiError extends Error {
+    constructor(kind, status, detail) {
+        super(kind);
+        this.kind = kind;          // network | timeout | bad_json | http | cancelled
+        this.status = status || 0;
+        this.detail = detail || "";
+    }
+}
+
+// Server messages are English; translate the ones the UI can expect.
+const SERVER_ERRORS = {
+    "a job is already running": "err_job_running",
+    "deploy.sh path unknown — re-run deploy once via SSH": "err_deploy_path",
+    "service not allowed": "err_service",
+    "qrencode failed": "err_qrencode",
+    "host not allowed": "err_host_forbidden",
+    "invalid IP": "unban_invalid",
+    "invalid host": "inv_invalid",
 };
+function serverMsg(msg) {
+    if (!msg) return "";
+    return SERVER_ERRORS[msg] ? t(SERVER_ERRORS[msg]) : String(msg).slice(0, 300);
+}
+function errText(err) {
+    if (!(err instanceof ApiError)) return t("err_bad_json");
+    if (err.kind === "network") return t("err_network");
+    if (err.kind === "timeout") return t("err_timeout");
+    if (err.kind === "cancelled") return t("auth_cancelled");
+    if (err.kind === "bad_json") return t("err_bad_json");
+    if (err.detail) return serverMsg(err.detail);
+    return t("err_http", { code: err.status });
+}
 
-// ─── theme ───────────────────────────────────────────────────────────────
+// Password for mutations (GUI_PASSWORD). Kept for this tab only, as before.
+let authRequired = false;
+let password = storageGet("sessionStorage", "lp-pw") || "";
+function setPassword(pw) {
+    password = pw || "";
+    storageSet("sessionStorage", "lp-pw", password || null);
+}
+
+async function request(method, url, body, timeout) {
+    const ctrl = new AbortController();
+    const timer = window.setTimeout(() => ctrl.abort(), timeout || 20000);
+    const headers = { Accept: "application/json" };
+    if (method === "POST") {
+        headers["Content-Type"] = "application/json";
+        headers["X-LoxProx-Gui"] = "1";            // CSRF guard, required by the server
+        if (password) headers["X-LoxProx-Auth"] = password;
+    }
+    let res;
+    try {
+        res = await fetch(url, {
+            method, headers, cache: "no-store", credentials: "same-origin", signal: ctrl.signal,
+            body: body === undefined ? undefined : JSON.stringify(body),
+        });
+    } catch (e) {
+        throw new ApiError(e && e.name === "AbortError" ? "timeout" : "network");
+    } finally {
+        window.clearTimeout(timer);
+    }
+    let data;
+    try { data = await res.json(); } catch (e) { throw new ApiError("bad_json", res.status); }
+    return { status: res.status, data: data || {} };
+}
+
+async function getJSON(url, timeout) {
+    const { status, data } = await request("GET", url, undefined, timeout);
+    if (status !== 200 || data.ok !== true) throw new ApiError("http", status, data.error);
+    return data;
+}
+
+/* POST with the CSRF header; on 401 ask for the password and retry.
+   Resolves to { status, data }; throws ApiError (incl. "cancelled"). */
+async function post(url, body, timeout) {
+    let wrong = false;
+    for (;;) {
+        if (authRequired && !password) {
+            if (!(await askPassword(wrong))) throw new ApiError("cancelled");
+        }
+        const sent = Boolean(password);
+        const res = await request("POST", url, body || {}, timeout);
+        if (res.status !== 401) return res;
+        authRequired = true;
+        wrong = sent;
+        setPassword("");
+        if (!(await askPassword(wrong))) throw new ApiError("cancelled");
+    }
+}
+
+// ─── dialogs ────────────────────────────────────────────────────────────
+
+function openDialog(dlg, initialFocus) {
+    const opener = document.activeElement;
+    dlg.showModal();
+    if (initialFocus) initialFocus.focus();
+    return () => {
+        if (dlg.open) dlg.close();
+        if (opener && opener.isConnected && typeof opener.focus === "function") opener.focus();
+    };
+}
+
+function confirmDialog({ title, text, extra, okLabel, danger }) {
+    return new Promise((resolve) => {
+        const dlg = $("confirmDlg");
+        $("confirmTitle").textContent = title;
+        $("confirmText").textContent = text;
+        $("confirmExtra").textContent = extra || "";
+        $("confirmExtra").hidden = !extra;
+        const ok = $("confirmOk");
+        ok.textContent = okLabel;
+        ok.className = "btn " + (danger ? "btn-danger" : "btn-primary");
+        const close = openDialog(dlg, $("confirmCancel"));
+        const finish = (value) => {
+            ok.removeEventListener("click", onOk);
+            $("confirmCancel").removeEventListener("click", onCancel);
+            dlg.removeEventListener("cancel", onEsc);
+            close();
+            resolve(value);
+        };
+        const onOk = () => finish(true);
+        const onCancel = () => finish(false);
+        const onEsc = (e) => { e.preventDefault(); finish(false); };
+        ok.addEventListener("click", onOk);
+        $("confirmCancel").addEventListener("click", onCancel);
+        dlg.addEventListener("cancel", onEsc);
+    });
+}
+
+function askPassword(wrong) {
+    return new Promise((resolve) => {
+        const dlg = $("authDlg");
+        const input = $("authPw");
+        const err = $("authError");
+        input.value = "";
+        const showErr = (msg) => {
+            err.hidden = !msg;
+            err.replaceChildren(...(msg ? [icon("bad"), el("span", "", msg)] : []));
+            if (msg) input.setAttribute("aria-invalid", "true");
+            else input.removeAttribute("aria-invalid");
+        };
+        showErr(wrong ? t("auth_wrong") : "");
+        const close = openDialog(dlg, input);
+        const finish = (value) => {
+            $("authForm").removeEventListener("submit", onSubmit);
+            $("authCancel").removeEventListener("click", onCancel);
+            dlg.removeEventListener("cancel", onEsc);
+            close();
+            resolve(value);
+        };
+        const onSubmit = (e) => {
+            e.preventDefault();
+            if (!input.value) { showErr(t("auth_empty")); input.focus(); return; }
+            setPassword(input.value);
+            finish(true);
+        };
+        const onCancel = () => finish(false);
+        const onEsc = (e) => { e.preventDefault(); finish(false); };
+        $("authForm").addEventListener("submit", onSubmit);
+        $("authCancel").addEventListener("click", onCancel);
+        dlg.addEventListener("cancel", onEsc);
+    });
+}
+
+// ─── theme ──────────────────────────────────────────────────────────────
+
+const THEMES = ["auto", "light", "dark"];
+const THEME_BG = { light: "#f5f5f7", dark: "#111113" };
 
 function currentTheme() {
     return document.documentElement.getAttribute("data-theme") || "auto";
 }
-
-function setTheme(mode) {
+function setTheme(mode, speak) {
     if (mode === "auto") document.documentElement.removeAttribute("data-theme");
     else document.documentElement.setAttribute("data-theme", mode);
-    try {
-        if (mode === "auto") localStorage.removeItem("lp-theme");
-        else localStorage.setItem("lp-theme", mode);
-    } catch (e) { /* storage disabled */ }
-    const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
-    document.querySelector('meta[name="theme-color"]').setAttribute("content", bg);
-    scene.recolor();
-}
-
-$("themeBtn").onclick = () => {
-    const order = ["auto", "light", "dark"];
-    const next = order[(order.indexOf(currentTheme()) + 1) % 3];
-    setTheme(next);
-    toast(t("theme_" + next));
-};
-
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => scene.recolor());
-
-// ─── toast ───────────────────────────────────────────────────────────────
-
-let toastTimer = null;
-
-function toast(msg) {
-    const el = $("toast");
-    el.textContent = msg;
-    el.classList.add("show");
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => el.classList.remove("show"), 2600);
-}
-
-// ─── API helpers ─────────────────────────────────────────────────────────
-
-function hdrs() {
-    const h = { "Content-Type": "application/json", "X-LoxProx-Gui": "1" };
-    if (authRequired) {
-        let pw = sessionStorage.getItem("lp-pw");
-        if (!pw) {
-            pw = prompt(t("need_pw")) || "";
-            sessionStorage.setItem("lp-pw", pw);
-        }
-        h["X-LoxProx-Auth"] = pw;
-    }
-    return h;
-}
-
-async function post(url, body) {
-    const res = await fetch(url, { method: "POST", headers: hdrs(), body: JSON.stringify(body || {}) });
-    if (res.status === 401) { sessionStorage.removeItem("lp-pw"); toast("401"); }
-    return res.json();
-}
-
-// ─── tabs ────────────────────────────────────────────────────────────────
-
-let activeTab = "overview";
-
-function switchTab(name) {
-    if (name === activeTab) return;
-    activeTab = name;
-    document.querySelectorAll(".tab").forEach((b) => {
-        const on = b.dataset.tab === name;
-        b.classList.toggle("is-active", on);
-        b.setAttribute("aria-selected", on);
+    storageSet("localStorage", "lp-theme", mode === "auto" ? null : mode);
+    document.querySelectorAll('meta[name="theme-color"]').forEach((m) => {
+        const media = m.getAttribute("media") || "";
+        const scheme = media.includes("dark") ? "dark" : "light";
+        m.setAttribute("content", THEME_BG[mode === "auto" ? scheme : mode]);
     });
-    document.querySelectorAll(".panel-tab").forEach((s) => {
-        s.hidden = s.id !== "tab-" + name;
-    });
-    const section = $("tab-" + name);
-    if (!REDUCED) {
-        animate([...section.children], {
-            translateY: [16, 0], opacity: [0, 1],
-            duration: 500, ease: "outCubic", delay: stagger(60),
-        });
-    }
-    if (name === "overview" || name === "security") replayCharts(name);
-    if (name === "logs" && !$("logView").textContent) loadLog();
+    $("themeBtnLabel").textContent = t("theme_btn", { mode: t("theme_" + mode) });
+    if (speak) announce(t("theme_changed", { mode: t("theme_" + mode) }));
 }
-
-document.querySelectorAll(".tab").forEach((b) => {
-    b.onclick = () => switchTab(b.dataset.tab);
+$("themeBtn").addEventListener("click", () => {
+    const next = THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length];
+    setTheme(next, true);
 });
 
-// ─── animated counters ───────────────────────────────────────────────────
+// ─── navigation (hash routes, focus moves to the view heading) ──────────
 
-const counterState = {};
+const VIEWS = ["overview", "security", "config", "logs"];
+const VIEW_TITLE = { overview: "nav_overview", security: "nav_security", config: "nav_config", logs: "nav_logs" };
+let view = null;
+let pendingFocus = null;
 
-function setCounter(id, value, fmt) {
-    const el = $(id);
-    const target = Number.isFinite(value) ? value : null;
-    if (target === null) { el.textContent = "–"; counterState[id] = null; return; }
-    const from = counterState[id];
-    counterState[id] = target;
-    const format = fmt || ((v) => Math.round(v));
-    if (REDUCED || from === null || from === undefined || from === target) {
-        el.textContent = format(target);
-        return;
-    }
-    const obj = { v: from };
-    animate(obj, {
-        v: target, duration: 700, ease: "outExpo",
-        onUpdate: () => { el.textContent = format(obj.v); },
+function viewFromHash() {
+    const h = location.hash.replace(/^#/, "");
+    return VIEWS.includes(h) ? h : null;
+}
+
+function showView(name, focus) {
+    view = name;
+    document.querySelectorAll("section.view").forEach((s) => { s.hidden = s.dataset.view !== name; });
+    document.querySelectorAll(".nav-link").forEach((a) => {
+        if (a.dataset.view === name) a.setAttribute("aria-current", "page");
+        else a.removeAttribute("aria-current");
     });
-}
-
-// ─── charts (custom SVG, anime.js draw-in) ───────────────────────────────
-
-const W = 600, H = 150, PAD = 6;
-const chartDrawn = {};   // chart id -> already draw-animated
-let gradSeq = 0;
-
-function bucketize(values, n, mode) {
-    if (values.length <= n) return values.slice();
-    const out = [];
-    const step = values.length / n;
-    for (let i = 0; i < n; i++) {
-        const slice = values.slice(Math.floor(i * step), Math.max(Math.floor((i + 1) * step), Math.floor(i * step) + 1));
-        if (mode === "sum") out.push(slice.reduce((a, b) => a + b, 0));
-        else if (mode === "max") out.push(Math.max(...slice));
-        else out.push(slice.reduce((a, b) => a + b, 0) / slice.length);
-    }
-    return out;
-}
-
-function linePath(vals, max) {
-    const n = vals.length;
-    const sx = (W - 2 * PAD) / Math.max(n - 1, 1);
-    let d = "";
-    for (let i = 0; i < n; i++) {
-        const x = PAD + i * sx;
-        const y = H - PAD - (vals[i] / max) * (H - 2 * PAD);
-        d += (i ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1);
-    }
-    return d;
-}
-
-function renderChart(svgId, vals, opts) {
-    const svg = $(svgId);
-    if (!vals.length) {
-        svg.innerHTML = `<text x="8" y="24" class="chart-empty" fill="currentColor"
-            font-size="12" opacity="0.6">${esc(t("no_data"))}</text>`;
-        return;
-    }
-    const max = Math.max(...vals, opts.minMax || 1);
-    const d = linePath(vals, max);
-    let line = svg.querySelector(".c-line");
-    if (!line) {
-        const gid = "grad" + (gradSeq++);
-        svg.innerHTML =
-            `<defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
-               <stop offset="0" style="stop-color:var(--chart-line)" stop-opacity="0.30"/>
-               <stop offset="1" style="stop-color:var(--chart-line)" stop-opacity="0"/>
-             </linearGradient></defs>
-             <path class="c-area" fill="url(#${gid})" stroke="none"/>
-             <path class="c-line" fill="none" style="stroke:var(--chart-line)"
-                   stroke-width="2" stroke-linejoin="round" stroke-linecap="round"
-                   vector-effect="non-scaling-stroke"/>`;
-        line = svg.querySelector(".c-line");
-    }
-    line.setAttribute("d", d);
-    svg.querySelector(".c-area").setAttribute(
-        "d", d + `L${W - PAD} ${H - PAD}L${PAD} ${H - PAD}Z`);
-    if (!chartDrawn[svgId]) {
-        chartDrawn[svgId] = true;
-        drawIn(svgId);
+    document.title = t(VIEW_TITLE[name]) + " · LoxProx Panel";
+    if (name === "logs") { if (logText === null && !logLoading) loadLog(true); }
+    if (focus) {
+        window.scrollTo(0, 0);
+        const target = pendingFocus && $(pendingFocus);
+        pendingFocus = null;
+        (target || $("h-" + name)).focus();
     }
 }
 
-function drawIn(svgId) {
-    if (REDUCED) return;
-    const svg = $(svgId);
-    const line = svg.querySelector(".c-line");
-    const area = svg.querySelector(".c-area");
-    if (!line) return;
-    const len = line.getTotalLength();
-    line.style.strokeDasharray = len;
-    line.style.strokeDashoffset = len;
-    animate(line, {
-        strokeDashoffset: [len, 0], duration: 1100, ease: "outQuart",
-        onComplete: () => { line.style.strokeDasharray = "none"; },
-    });
-    if (area) animate(area, { opacity: [0, 1], duration: 900, ease: "outCubic", delay: 250 });
+window.addEventListener("hashchange", () => {
+    const next = viewFromHash();
+    if (next) showView(next, true);
+});
+
+function goTo(name, focusId) {
+    pendingFocus = focusId || null;
+    if (view === name) showView(name, true);
+    else location.hash = "#" + name;
 }
 
-const TAB_CHARTS = { overview: ["reqChart", "loadChart"], security: ["bansChart", "appsecChart"] };
+document.querySelector(".skip-link").addEventListener("click", (e) => {
+    e.preventDefault();
+    $("h-" + (view || "overview")).focus();
+});
 
-function replayCharts(tab) {
-    (TAB_CHARTS[tab] || []).forEach((id) => { if (chartDrawn[id]) drawIn(id); });
+// ─── service metadata ───────────────────────────────────────────────────
+
+const SERVICES = {
+    "nginx": { name: "svc_nginx", impact: "imp_nginx", desc: "desc_nginx", restart: true },
+    "crowdsec": { name: "svc_crowdsec", impact: "imp_crowdsec", desc: "desc_crowdsec", restart: true },
+    "crowdsec-firewall-bouncer": { name: "svc_bouncer", impact: "imp_bouncer", desc: "desc_bouncer", restart: true },
+    "frpc": { name: "svc_frpc", impact: "imp_frpc", desc: "desc_frpc", restart: true },
+    "loxprox-monitor.timer": { name: "svc_monitor", impact: "imp_monitor" },
+    "network-watchdog.timer": { name: "svc_watchdog", impact: "imp_watchdog" },
+    "tunnel-watchdog.timer": { name: "svc_tunnelwd", impact: "imp_tunnelwd" },
+    "loxprox-gui": { name: "svc_gui" },
+};
+const RESTARTABLE = ["nginx", "crowdsec", "crowdsec-firewall-bouncer", "frpc"];
+const TRANSIENT = ["activating", "reloading", "deactivating"];
+
+const svcName = (unit) => (SERVICES[unit] ? t(SERVICES[unit].name) : unit);
+function stateWord(state) {
+    const key = "st_" + state;
+    return key in I18N.de ? t(key) : String(state || t("st_unknown"));
+}
+function svcLevel(unit, state) {
+    if (state === "active") return "ok";
+    if (TRANSIENT.includes(state)) return "warn";
+    return SERVICES[unit] && SERVICES[unit].restart ? "bad" : "warn";
 }
 
-let lastHistory = null;
+// ─── status: evaluation ─────────────────────────────────────────────────
 
-function renderHistory() {
-    if (!lastHistory) return;
-    const pts = lastHistory.points;
-    const num = (k) => pts.map((p) => (typeof p[k] === "number" ? p[k] : 0));
-    const req = bucketize(num("req"), 140, "avg");
-    const load = bucketize(num("load"), 140, "avg");
-    const bans = bucketize(num("bans"), 140, "max");
-    const sec = bucketize(num("sec"), 140, "sum");
-    renderChart("reqChart", req, { minMax: 5 });
-    renderChart("loadChart", load, { minMax: 1 });
-    renderChart("bansChart", bans, { minMax: 4 });
-    renderChart("appsecChart", sec, { minMax: 4 });
-    const last = pts[pts.length - 1] || {};
-    $("reqNow").textContent = (last.req ?? "–") + "/min";
-    $("loadNow").textContent = last.load ?? "–";
-    $("bansNow").textContent = last.bans ?? "–";
-    $("appsecNow").textContent = (last.sec ?? "–") + "/min";
+let statusData = null;
+let statusAt = 0;
+let statusErr = null;
+let statusInFlight = false;
+let lastLevel = null;
+
+function dismissedJobs() {
+    return (storageGet("sessionStorage", "lp-dismissed-jobs") || "").split(",").filter(Boolean);
 }
 
-async function fetchHistory() {
-    const res = await fetch("/api/history").then((r) => r.json()).catch(() => null);
-    if (!res || !res.ok) return;
-    lastHistory = res;
-    renderHistory();
-}
-
-// ─── gauges ──────────────────────────────────────────────────────────────
-
-const CIRC = 2 * Math.PI * 36;
-
-function setGauge(circleId, textId, pct) {
-    const c = $(circleId);
-    if (pct == null) { $(textId).textContent = "–"; return; }
-    $(textId).textContent = pct + "%";
-    c.classList.toggle("is-bad", pct > 90);
-    c.classList.toggle("is-warn", pct > 75 && pct <= 90);
-    const off = CIRC * (1 - pct / 100);
-    if (REDUCED) c.style.strokeDashoffset = off;
-    else animate(c, { strokeDashoffset: off, duration: 900, ease: "outCubic" });
-}
-
-// ─── system micro-bars (storage / memory / load) ────────────────────────
-
-const sysBarState = { disk: null, mem: null, load: null };
-
-function setBar(id, pct, key) {
-    const el = $(id);
-    if (!el) return;
-    const target = Math.max(0, Math.min(100, pct));
-    const prev = sysBarState[key];
-    sysBarState[key] = target;
-    if (REDUCED || prev == null || prev === target) {
-        el.style.width = target + "%";
-        return;
-    }
-    el.style.width = prev + "%";
-    animate(el, { width: target + "%", duration: 700, ease: "outCubic" });
-}
-
-function loadPct(load) {
-    return load == null ? 0 : Math.max(0, Math.min(100, Math.round((load / 4) * 100)));
-}
-
-function loadWord(load) {
-    if (load == null) return { txt: "–", cls: "" };
-    if (load > 2) return { txt: t("load_high"), cls: "is-warn" };
-    if (load >= 1) return { txt: t("load_mid"), cls: "" };
-    return { txt: t("load_low"), cls: "" };
-}
-
-function pctCls(pct, warnAt) {
-    return pct != null && pct > warnAt ? "is-warn" : "";
-}
-
-function sysBarRow(label, valueHtml, fillCls, fillId) {
-    return `<div class="sysbar"><div class="sysbar-head"><span class="sysbar-label">${label}</span>` +
-        `<span class="sysbar-val">${valueHtml}</span></div>` +
-        `<div class="sysbar-track"><div class="sysbar-fill ${fillCls}" id="${fillId}"></div></div></div>`;
-}
-
-function sysBarsHtml(sy) {
-    const disk = sy.disk_pct ?? null;
-    const mem = sy.mem_pct ?? null;
-    const load = sy.load ?? null;
-    const lw = loadWord(load);
-    return `<div class="sysbar-list">` +
-        sysBarRow(t("sys_disk"), disk == null ? "–" : disk + "%", pctCls(disk, 85), "sysDiskFill") +
-        sysBarRow(t("sys_mem"), mem == null ? "–" : mem + "%", pctCls(mem, 90), "sysMemFill") +
-        sysBarRow(t("sys_load"),
-            `${lw.txt} <span class="mono sysbar-raw">${load == null ? "–" : load}</span>`,
-            lw.cls, "sysLoadFill") +
-        `</div>`;
-}
-
-// ─── status refresh ──────────────────────────────────────────────────────
-
-function tile(label, sub, value, cls, extraCls) {
-    return `<div class="card tile ${cls || ""} ${extraCls || ""}"><div class="label">${label}</div>` +
-        (sub ? `<div class="tile-sub">${sub}</div>` : "") +
-        `<div class="value"><span class="dot"></span>${value}</div></div>`;
-}
-
-const SEV = { "": 0, ok: 0, warn: 1, bad: 2 };
-let tilesBuilt = false;
-let failedFetches = 0;
-
-async function refresh() {
-    const res = await fetch("/api/status").then((r) => r.json()).catch(() => null);
-    if (!res || !res.ok) {
-        if (++failedFetches >= 2) $("liveDot").classList.add("is-stale");
-        return;
-    }
-    failedFetches = 0;
-    $("liveDot").classList.remove("is-stale");
-    const s = res.status, tiles = [];
-    let worst = 0;
-    const push = (label, sub, value, cls, extraCls) => {
-        worst = Math.max(worst, SEV[cls] || 0);
-        tiles.push(tile(label, sub, value, cls, extraCls));
-    };
-
-    const badSvc = Object.entries(s.services).filter(([, v]) => v !== "active");
-    push(t("svc"), t("svc_sub"), badSvc.length ? esc(badSvc.map(([k, v]) => k + ": " + v).join(", ")) : "OK",
-        badSvc.length ? "bad" : "ok");
-    if (s.cert_days === null) push(t("cert"), t("cert_sub"), t("no_cert"), s.mode === "tls" ? "warn" : "");
-    else push(t("cert"), t("cert_sub"), s.cert_days + " " + t("days"),
-        s.cert_days < 7 ? "bad" : (s.cert_days < 21 ? "warn" : "ok"));
-    if (s.miniserver !== null) push(t("ms"), t("ms_sub"), s.miniserver ? t("reach") : t("unreach"),
-        s.miniserver ? "ok" : "bad");
-    push(t("bans"), t("bans_sub"), s.decisions.count, s.decisions.count > 0 ? "warn" : "ok");
-    push(t("appsec"), t("appsec_sub"),
-        s.appsec.hits + " (" + s.appsec.ips + " " + t("appsec_ips") + ")", s.appsec.hits ? "warn" : "ok");
-    push(t("backup"), t("backup_sub"), s.backup ? s.backup.age_hours + " " + t("hours_ago") : "—",
-        s.backup && s.backup.age_hours < 26 ? "ok" : "bad");
-    const sy = s.system;
-    push(t("sys"), t("sys_sub"), sysBarsHtml(sy),
-        (sy.disk_pct > 85 || sy.mem_pct > 90) ? "warn" : "ok", "sys-tile");
-    push(t("mode"), t("mode_sub"), t("mode_" + s.mode) || s.mode, "");
-
-    $("tiles").innerHTML = tiles.join("");
-    setBar("sysDiskFill", sy.disk_pct ?? 0, "disk");
-    setBar("sysMemFill", sy.mem_pct ?? 0, "mem");
-    setBar("sysLoadFill", loadPct(sy.load ?? null), "load");
-    if (!tilesBuilt && !REDUCED) {
-        tilesBuilt = true;
-        animate([...$("tiles").children], {
-            translateY: [14, 0], opacity: [0, 1],
-            duration: 500, ease: "outCubic", delay: stagger(40),
+function evaluate(s) {
+    const items = [];
+    const services = s.services || {};
+    for (const [unit, state] of Object.entries(services)) {
+        if (state === "active") continue;
+        const meta = SERVICES[unit] || {};
+        const busy = TRANSIENT.includes(state);
+        items.push({
+            id: "svc:" + unit,
+            level: svcLevel(unit, state),
+            title: t(busy ? "att_svc_busy_title" : "att_svc_title", { name: svcName(unit) }),
+            text: t("att_svc_text", { state: stateWord(state), impact: meta.impact ? t(meta.impact) : "" }).trim(),
+            action: meta.restart ? { type: "restart", unit } : { type: "ssh", cmd: "systemctl status " + unit },
         });
     }
-
-    // hero
-    const sev = ["ok", "warn", "bad"][worst];
-    $("heroTitle").textContent = t("hero_" + sev);
-    $("heroTitle").className = "hero-title" + (worst === 1 ? " is-warn" : worst === 2 ? " is-bad" : "");
-    $("heroSub").textContent = `${t("mode")}: ${t("mode_" + s.mode) || s.mode} · ${t("updated")} ${s.time.slice(11)}`;
-    setCounter("hsBans", s.decisions.count);
-    setCounter("hsAppsec", s.appsec.hits);
-    setCounter("hsCert", s.cert_days ?? NaN);
-    const lastPoint = lastHistory && lastHistory.points[lastHistory.points.length - 1];
-    setCounter("hsReq", lastPoint ? lastPoint.req : NaN);
-    setGauge("gMem", "gMemPct", sy.mem_pct ?? null);
-    setGauge("gDisk", "gDiskPct", sy.disk_pct ?? null);
-    scene.setSeverity(sev);
-
-    $("frpcBtn").hidden = s.mode !== "tunnel";
-    $("footLine").textContent = `LoxProx Panel v2.2 · ${s.time}`;
-
-    const tb = $("banTable").querySelector("tbody");
-    tb.innerHTML = s.decisions.items.map((d) =>
-        `<tr><td>${esc(d.ip)}</td><td>${esc(d.origin)}</td><td>${esc(d.scenario)}</td>` +
-        `<td>${esc(d.duration)}</td><td><button class="danger" data-unban="${esc(d.ip)}">×</button></td></tr>`
-    ).join("") || `<tr><td colspan="5" class="hint">—</td></tr>`;
-    tb.querySelectorAll("[data-unban]").forEach((b) => { b.onclick = () => unban(b.dataset.unban); });
-
-    if (s.job && s.job.running) pollJob(s.job.id);
+    if (s.miniserver === false) {
+        items.push({ id: "ms", level: "bad", title: t("att_ms_title"), text: t("att_ms_text"),
+            action: { type: "goto", view: "config", focus: "cfg-LOXONE_IP", label: "act_check_ms" } });
+    } else if (s.miniserver === null) {
+        items.push({ id: "ms-unset", level: "warn", title: t("att_ms_unset_title"), text: t("att_ms_unset_text"),
+            action: { type: "goto", view: "config", focus: "cfg-LOXONE_IP", label: "act_check_ms" } });
+    }
+    const d = s.cert_days;
+    if (typeof d === "number") {
+        if (d < 0) {
+            items.push({ id: "cert", level: "bad", title: t("att_cert_expired_title"), text: t("att_cert_expired_text"),
+                action: { type: "renew" } });
+        } else if (d < 21) {
+            items.push({ id: "cert", level: d < 7 ? "bad" : "warn",
+                title: d === 0 ? t("att_cert_today_title") : tn("att_cert_soon_title", d),
+                text: t("att_cert_soon_text"), action: { type: "renew" } });
+        }
+    } else if (s.mode === "tls") {
+        items.push({ id: "cert", level: "warn", title: t("att_cert_missing_title"), text: t("att_cert_missing_text"),
+            action: { type: "renew" } });
+    }
+    if (!s.backup) {
+        items.push({ id: "backup", level: "warn", title: t("att_backup_none_title"), text: t("att_backup_none_text") });
+    } else if (s.backup.age_hours >= 26) {
+        items.push({ id: "backup", level: "warn", title: t("att_backup_old_title", { h: num(Math.round(s.backup.age_hours)) }),
+            text: t("att_backup_old_text") });
+    }
+    const sys = s.system || {};
+    if (sys.disk_pct > 85) {
+        items.push({ id: "disk", level: sys.disk_pct > 90 ? "bad" : "warn",
+            title: t("att_disk_title", { p: num(sys.disk_pct) }), text: t("att_disk_text") });
+    }
+    if (sys.mem_pct > 90) {
+        items.push({ id: "mem", level: "warn", title: t("att_mem_title", { p: num(sys.mem_pct) }), text: t("att_mem_text") });
+    }
+    if (s.decisions && s.decisions.error && services.crowdsec === "active") {
+        items.push({ id: "decisions", level: "warn", title: t("att_dec_error_title"),
+            text: t("att_dec_error_text", { err: s.decisions.error }) });
+    }
+    const j = s.job;
+    if (j && !j.running && !dismissedJobs().includes(j.id)) {
+        const st = jobStatus(j);
+        if (st === "failed") {
+            items.push({ id: "job", level: "bad",
+                title: t(j.name === "renew-tls" ? "att_job_failed_renew" : "att_job_failed_apply", { rc: j.rc }),
+                text: t("att_job_failed_text"), action: { type: "log" } });
+        } else if (st === "degraded") {
+            items.push({ id: "job", level: "warn", title: t("att_job_degraded_title"),
+                text: t("att_job_degraded_text"), action: { type: "log" } });
+        }
+    }
+    items.sort((a, b) => (a.level === b.level ? 0 : a.level === "bad" ? -1 : b.level === "bad" ? 1 : 0));
+    const level = items.some((i) => i.level === "bad") ? "bad" : items.length ? "warn" : "ok";
+    return { level, items };
 }
 
-// ─── config form ─────────────────────────────────────────────────────────
+// ─── status: rendering ──────────────────────────────────────────────────
+
+function renderStatus() {
+    const s = statusData;
+    const failing = Boolean(statusErr);
+    const chip = $("statusChip");
+    const summary = $("summary");
+    let chipState, chipText, summaryState, sIcon, title, text;
+    let evaluation = null;
+
+    if (!s) {
+        if (failing) {
+            chipState = "offline"; chipText = t("chip_offline");
+            summaryState = "offline"; sIcon = "offline";
+            title = t("sum_fail_title"); text = t("sum_fail_text", { err: errText(statusErr) });
+        } else {
+            chipState = "loading"; chipText = t("chip_loading");
+            summaryState = "loading"; sIcon = "spinner";
+            title = t("sum_loading_title"); text = "";
+        }
+    } else {
+        evaluation = evaluate(s);
+        const lv = evaluation.level;
+        summaryState = lv;
+        sIcon = lv;
+        if (lv === "ok") { title = t("sum_ok_title"); text = t("sum_ok_text"); }
+        else if (lv === "warn") { title = tn("sum_warn_title", evaluation.items.length); text = t("sum_warn_text"); }
+        else { title = t("sum_bad_title"); text = t("sum_bad_text"); }
+        chipState = failing ? "offline" : lv;
+        chipText = failing ? t("chip_offline") : t("chip_" + lv);
+    }
+
+    chip.dataset.state = chipState;
+    $("statusChipIcon").setAttribute("href", "#i-" + (chipState === "loading" ? "spinner" : chipState === "offline" ? "offline" : LEVEL_ICON[chipState]));
+    $("statusChipText").textContent = chipText;
+    chip.setAttribute("aria-label", t("chip_label", { state: chipText }));
+    chip.querySelector(".icon").classList.toggle("is-spinning", chipState === "loading");
+
+    summary.dataset.state = summaryState;
+    $("summaryIcon").setAttribute("href", "#i-" + sIcon);
+    summary.querySelector(".summary-icon").classList.toggle("is-spinning", sIcon === "spinner");
+    $("summaryTitle").textContent = title;
+    $("summaryText").textContent = text;
+    $("summaryText").hidden = !text;
+    $("retryBtn").hidden = !failing;
+    const stale = $("summaryStale");
+    stale.hidden = !(s && failing);
+    stale.textContent = s && failing ? t("sum_stale", { time: clock(statusAt / 1000, true) }) : "";
+    $("summaryMode").textContent = s ? t("sum_mode", { mode: t("mode_" + s.mode) }) : "";
+    $("summaryUpdated").textContent = s && s.time ? t("sum_updated", { time: s.time.slice(11) }) : "";
+    $("summarySep").hidden = !(s && s.time);
+
+    // Announce real changes of the overall state (not every poll).
+    const spoken = s ? (failing ? "offline" : evaluation.level) : (failing ? "offline" : null);
+    if (spoken && lastLevel !== null && spoken !== lastLevel) {
+        announce(t("chip_label", { state: chipText }) + " — " + (s && failing ? stale.textContent : title));
+    }
+    if (spoken) lastLevel = spoken;
+
+    renderAttention(evaluation ? evaluation.items : []);
+    renderTiles(s);
+    renderDecisions(s);
+    renderRestartStates(s);
+    renderRenewVisibility();
+}
+
+let attentionSig = "";
+function renderAttention(items) {
+    const box = $("attention");
+    box.hidden = items.length === 0;
+    const sig = lang + "|" + items.map((i) => i.id + i.level + i.title + i.text).join("|");
+    if (sig === attentionSig) return;
+    attentionSig = sig;
+    const list = $("attentionList");
+    const active = document.activeElement;
+    const focusedId = active && list.contains(active) ? active.closest("[data-item]").dataset.item : null;
+    list.replaceChildren(...items.map(attentionItem));
+    if (focusedId) {
+        const again = list.querySelector(`[data-item="${CSS.escape(focusedId)}"] button, [data-item="${CSS.escape(focusedId)}"] a`);
+        (again || (items.length ? $("attentionTitle") : $("summaryTitle"))).focus();
+    }
+}
+
+function attentionItem(item) {
+    const li = el("li", "att-item");
+    li.dataset.item = item.id;
+    li.dataset.level = item.level;
+    li.append(icon(item.level, "att-icon"));
+    const titleEl = el("p", "att-title");
+    titleEl.append(el("span", "sr-only", t("badge_" + item.level) + ": "), document.createTextNode(item.title));
+    li.append(titleEl);
+    if (item.text) li.append(el("p", "att-text", item.text));
+    const a = item.action;
+    if (a) {
+        const row = el("div", "att-actions");
+        if (a.type === "restart") {
+            const b = el("button", "btn btn-sm", t("act_restart"));
+            b.type = "button";
+            b.setAttribute("aria-label", t("restart_aria", { name: svcName(a.unit) }));
+            b.addEventListener("click", () => restartService(a.unit, b, $("overviewResult")));
+            row.append(b);
+        } else if (a.type === "renew") {
+            const b = el("button", "btn btn-sm", t("act_renew"));
+            b.type = "button";
+            b.addEventListener("click", () => startRenew(b, $("overviewResult")));
+            row.append(b);
+        } else if (a.type === "goto") {
+            const link = el("a", "btn btn-sm", t(a.label));
+            link.href = "#" + a.view;
+            link.addEventListener("click", (e) => { e.preventDefault(); goTo(a.view, a.focus); });
+            row.append(link);
+        } else if (a.type === "log") {
+            const b = el("button", "btn btn-sm", t("act_show_log"));
+            b.type = "button";
+            b.addEventListener("click", openJobLog);
+            row.append(b);
+        } else if (a.type === "ssh") {
+            row.append(el("span", "hint", t("att_svc_ssh")), el("code", "", a.cmd));
+        }
+        li.append(row);
+    }
+    return li;
+}
+
+function setTile(id, level, value, sub) {
+    const tile = $(id);
+    tile.dataset.state = level;
+    const badge = tile.querySelector("[data-badge]");
+    badge.dataset.level = level;
+    if (level === "neutral") badge.replaceChildren();
+    else badge.replaceChildren(icon(level), el("span", "badge-text", t("badge_" + level)));
+    const v = tile.querySelector("[data-value]");
+    if (v && value !== undefined) v.textContent = value;
+    const subEl = tile.querySelector("[data-sub]");
+    if (subEl && sub !== undefined) { subEl.textContent = sub; subEl.hidden = !sub; }
+}
+
+function setMeter(id, level, text, fraction) {
+    const m = $(id);
+    m.dataset.level = level;
+    m.querySelector("[data-meter-val]").textContent = text;
+    m.querySelector("[data-meter-fill]").style.width = Math.round(Math.max(0, Math.min(1, fraction || 0)) * 100) + "%";
+}
+
+function renderTiles(s) {
+    if (!s) return;
+    // services
+    const entries = Object.entries(s.services || {});
+    const active = entries.filter(([, st]) => st === "active").length;
+    let svcLv = "ok";
+    entries.forEach(([u, st]) => {
+        const lv = svcLevel(u, st);
+        if (lv === "bad" || (lv === "warn" && svcLv === "ok")) svcLv = lv;
+    });
+    setTile("tile-services", svcLv, t("svc_count", { a: active, n: entries.length }));
+    $("svcList").replaceChildren(...entries.map(([unit, st]) => {
+        const li = el("li", "svc-row");
+        li.append(el("span", "svc-name", svcName(unit)));
+        const state = el("span", "svc-state");
+        const lv = svcLevel(unit, st);
+        state.dataset.level = lv;
+        state.append(icon(lv), el("span", "", stateWord(st)));
+        li.append(state);
+        return li;
+    }));
+
+    // Miniserver
+    if (s.miniserver === true) setTile("tile-ms", "ok", t("ms_yes"), t("ms_sub"));
+    else if (s.miniserver === false) setTile("tile-ms", "bad", t("ms_no"), t("ms_sub"));
+    else setTile("tile-ms", "warn", t("ms_unset"), t("ms_sub"));
+
+    // certificate (hidden when the gateway doesn't terminate TLS itself)
+    const d = s.cert_days;
+    $("tile-cert").hidden = typeof d !== "number" && s.mode !== "tls";
+    if (typeof d === "number") {
+        const lv = d < 7 ? "bad" : d < 21 ? "warn" : "ok";
+        const txt = d < 0 ? t("cert_expired") : d === 0 ? t("cert_today") : tn("cert_days", d);
+        setTile("tile-cert", lv, txt, t("cert_sub"));
+    } else if (s.mode === "tls") {
+        setTile("tile-cert", "warn", t("cert_none"), t("cert_sub"));
+    } else {
+        setTile("tile-cert", "neutral", t("cert_unused"), t("cert_sub_unused"));
+    }
+
+    // CrowdSec decisions (informational: bans mean protection works)
+    const dec = s.decisions || {};
+    if (dec.error) setTile("tile-bans", "warn", t("bans_error"), dec.error);
+    else setTile("tile-bans", "neutral", num(dec.count || 0), t(dec.count ? "bans_sub" : "bans_none_sub"));
+
+    // AppSec today
+    const ap = s.appsec || { hits: 0, ips: 0 };
+    setTile("tile-appsec", "neutral", num(ap.hits), ap.hits ? tn("appsec_sub", ap.ips) : t("appsec_none_sub"));
+
+    // backup
+    const b = s.backup;
+    if (!b) setTile("tile-backup", "warn", t("backup_none"), t("backup_none_sub"));
+    else {
+        const h = b.age_hours;
+        const txt = h < 1 ? t("backup_recent") : h < 48 ? t("backup_hours", { h: num(Math.round(h)) }) : tn("backup_days", Math.floor(h / 24));
+        setTile("tile-backup", h >= 26 ? "warn" : "ok", txt, t("backup_sub", { size: num(b.size_mb, 1) }));
+    }
+
+    // system
+    const sys = s.system || {};
+    const diskLv = sys.disk_pct > 90 ? "bad" : sys.disk_pct > 85 ? "warn" : "neutral";
+    const memLv = sys.mem_pct > 90 ? "warn" : "neutral";
+    const load = typeof sys.load === "number" ? sys.load : null;
+    const loadWord = load === null ? "" : load > 2 ? t("load_high") : load >= 1 ? t("load_mid") : t("load_low");
+    setMeter("meter-disk", diskLv, pct(sys.disk_pct), (sys.disk_pct || 0) / 100);
+    setMeter("meter-mem", memLv, pct(sys.mem_pct), (sys.mem_pct || 0) / 100);
+    setMeter("meter-load", load !== null && load > 2 ? "warn" : "neutral",
+        load === null ? t("no_value") : num(load, 2) + " · " + loadWord, load === null ? 0 : load / 4);
+    const sysLv = diskLv === "bad" ? "bad" : (diskLv === "warn" || memLv === "warn") ? "warn" : "ok";
+    setTile("tile-system", sysLv);
+
+    // connection mode: TLS is already named in the summary line; the tile
+    // matters for the tunnel (frpc state) and for unencrypted direct mode.
+    $("tile-conn").hidden = s.mode === "tls";
+    if (s.mode === "tunnel") {
+        const st = (s.services || {}).frpc;
+        setTile("tile-conn", st && st !== "active" ? "bad" : "neutral", t("mode_tunnel"),
+            t("conn_sub_tunnel", { state: stateWord(st || "unknown") }));
+    } else {
+        setTile("tile-conn", "neutral", t("mode_" + s.mode), t("conn_sub"));
+    }
+}
+
+// ─── security view ──────────────────────────────────────────────────────
+
+let decSig = "";
+function renderDecisions(s) {
+    const stateMsg = $("decState");
+    const wrap = $("decWrap");
+    if (!s) {
+        stateMsg.hidden = false;
+        stateMsg.dataset.state = statusErr ? "error" : "";
+        stateMsg.textContent = statusErr ? t("dec_error", { err: errText(statusErr) }) : t("dec_loading");
+        wrap.hidden = true;
+        $("decCount").textContent = "";
+        return;
+    }
+    const dec = s.decisions || { count: 0, items: [] };
+    if (dec.error) {
+        stateMsg.hidden = false;
+        stateMsg.dataset.state = "error";
+        stateMsg.textContent = t("dec_error", { err: dec.error });
+        wrap.hidden = true;
+        $("decCount").textContent = "";
+        decSig = "";
+        return;
+    }
+    const items = dec.items || [];
+    $("decCount").textContent = tn("dec_count", dec.count || 0) +
+        ((dec.count || 0) > items.length ? " " + t("dec_showing", { k: items.length }) : "");
+    if (!items.length) {
+        stateMsg.hidden = false;
+        stateMsg.dataset.state = "";
+        stateMsg.textContent = t("dec_empty");
+        wrap.hidden = true;
+        decSig = "";
+        return;
+    }
+    stateMsg.hidden = true;
+    wrap.hidden = false;
+    const sig = lang + JSON.stringify(items);
+    if (sig === decSig) return;
+    decSig = sig;
+    const body = $("decBody");
+    const active = document.activeElement;
+    const focusedIp = active && body.contains(active) ? active.dataset.ip : null;
+    body.replaceChildren(...items.map((d) => {
+        const tr = el("tr");
+        tr.append(el("td", "ip", d.ip), el("td", "", d.scenario), el("td", "", d.origin), el("td", "", d.duration));
+        const td = el("td", "act");
+        const b = el("button", "btn btn-sm", t("unban"));
+        b.type = "button";
+        b.dataset.ip = d.ip;
+        b.setAttribute("aria-label", t("unban_aria", { ip: d.ip }));
+        b.addEventListener("click", () => unban(d.ip, b));
+        td.append(b);
+        tr.append(td);
+        return tr;
+    }));
+    if (focusedIp) {
+        const again = body.querySelector(`button[data-ip="${CSS.escape(focusedIp)}"]`);
+        (again || $("decTitle")).focus();
+    }
+}
+
+async function unban(ip, btn) {
+    if (btn && isBusy(btn)) return false;
+    const ok = await confirmDialog({
+        title: t("confirm_unban_title", { ip }), text: t("confirm_unban_text"), okLabel: t("unban"), danger: true });
+    if (!ok) return false;
+    if (btn) setBusy(btn, true);
+    const result = $("decResult");
+    try {
+        const r = await post("/api/unban", { ip });
+        if (r.status === 200 && r.data.ok) {
+            setResult(result, "ok", t("unban_ok", { ip }));
+            refreshStatus();
+            return true;
+        }
+        setResult(result, "bad", t("unban_fail", { err: serverMsg(r.data.error) || r.data.output || t("err_http", { code: r.status }) }));
+    } catch (e) {
+        reportError(result, "unban_fail", e);
+    } finally {
+        if (btn) setBusy(btn, false);
+    }
+    return false;
+}
+
+function isIPv4(v) {
+    const parts = v.split(".");
+    return parts.length === 4 && parts.every((p) => /^(0|[1-9]\d{0,2})$/.test(p) && Number(p) <= 255);
+}
+function isIPv6(v) {
+    if (!/^[0-9A-Fa-f:.]+$/.test(v) || !v.includes(":")) return false;
+    if ((v.match(/::/g) || []).length > 1) return false;
+    let groups = v.split(":");
+    const last = groups[groups.length - 1];
+    if (last.includes(".")) { if (!isIPv4(last)) return false; groups = groups.slice(0, -1).concat(["0", "0"]); }
+    const filled = groups.filter((g) => g !== "");
+    if (!filled.every((g) => /^[0-9A-Fa-f]{1,4}$/.test(g))) return false;
+    return v.includes("::") ? filled.length < 8 : groups.length === 8;
+}
+const isIP = (v) => isIPv4(v) || isIPv6(v);
+function isHost(v) {
+    const i = v.indexOf(":");
+    const host = i < 0 ? v : v.slice(0, i);
+    const port = i < 0 ? "" : v.slice(i + 1);
+    if (i >= 0 && !(/^\d+$/.test(port) && Number(port) >= 1 && Number(port) <= 65535)) return false;
+    if (isIP(host)) return true;
+    return /^[A-Za-z0-9]([A-Za-z0-9-]{0,62}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,62}[A-Za-z0-9])?)*$/.test(host);
+}
+function isCidr(v) {
+    const [ip, prefix, extra] = v.split("/");
+    if (extra !== undefined || !isIP(ip)) return false;
+    if (prefix === undefined) return true;
+    const max = isIPv4(ip) ? 32 : 128;
+    return /^\d{1,3}$/.test(prefix) && Number(prefix) <= max;
+}
+
+function fieldError(input, errNode, message) {
+    if (message) {
+        input.setAttribute("aria-invalid", "true");
+        errNode.replaceChildren(icon("bad"), el("span", "", message));
+        errNode.hidden = false;
+    } else {
+        input.removeAttribute("aria-invalid");
+        errNode.replaceChildren();
+        errNode.hidden = true;
+    }
+}
+
+$("unbanForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const input = $("unbanIp");
+    const ip = input.value.trim();
+    const msg = !ip ? t("unban_empty") : !isIP(ip) ? t("unban_invalid") : "";
+    fieldError(input, $("unbanError"), msg);
+    if (msg) { input.focus(); return; }
+    if (await unban(ip, e.submitter || null)) input.value = "";
+});
+$("unbanIp").addEventListener("input", () => fieldError($("unbanIp"), $("unbanError"), ""));
+
+function buildRestartList() {
+    $("restartList").replaceChildren(...RESTARTABLE.map((unit) => {
+        const li = el("li", "action-row");
+        li.dataset.unit = unit;
+        const info = el("div", "action-info");
+        info.append(el("p", "action-name", svcName(unit)), el("p", "action-desc", t(SERVICES[unit].desc)));
+        const state = el("span", "svc-state");
+        state.dataset.stateFor = unit;
+        const b = el("button", "btn", t("restart"));
+        b.type = "button";
+        b.setAttribute("aria-label", t("restart_aria", { name: svcName(unit) }));
+        b.addEventListener("click", () => restartService(unit, b, $("svcResult")));
+        li.append(info, state, b);
+        return li;
+    }));
+    renderRestartStates(statusData);
+}
+
+function renderRestartStates(s) {
+    document.querySelectorAll("#restartList .action-row").forEach((row) => {
+        const unit = row.dataset.unit;
+        const st = s && s.services ? s.services[unit] : undefined;
+        row.hidden = unit === "frpc" && !(s && s.mode === "tunnel") && st === undefined;
+        const cell = row.querySelector("[data-state-for]");
+        if (st === undefined) { cell.replaceChildren(); return; }
+        const lv = svcLevel(unit, st);
+        cell.dataset.level = lv;
+        cell.replaceChildren(icon(lv), el("span", "", stateWord(st)));
+    });
+}
+
+async function restartService(unit, btn, resultEl) {
+    if (isBusy(btn)) return;
+    const name = svcName(unit);
+    const ok = await confirmDialog({
+        title: t("confirm_restart_title", { name }), text: t("confirm_restart_text"), okLabel: t("restart"), danger: true });
+    if (!ok) return;
+    setBusy(btn, true);
+    try {
+        const r = await post("/api/restart", { service: unit }, 40000);
+        if (r.status === 200 && r.data.ok) {
+            setResult(resultEl, r.data.state === "active" ? "ok" : "warn", t("restart_ok", { name, state: stateWord(r.data.state) }));
+        } else {
+            setResult(resultEl, "bad", t("restart_fail", { name, err: serverMsg(r.data.error) || r.data.output || t("err_http", { code: r.status }) }));
+        }
+    } catch (e) {
+        reportError(resultEl, "restart_fail", e, { name });
+    } finally {
+        setBusy(btn, false);
+        refreshStatus();
+    }
+}
+
+$("alertBtn").addEventListener("click", async () => {
+    const btn = $("alertBtn");
+    if (isBusy(btn)) return;
+    setBusy(btn, true);
+    try {
+        const r = await post("/api/test-alert", {}, 30000);
+        if (r.status === 200 && r.data.ok) setResult($("alertResult"), "ok", t("alert_ok"));
+        else setResult($("alertResult"), "bad", t("alert_fail", { err: serverMsg(r.data.error) || r.data.output || t("err_http", { code: r.status }) }));
+    } catch (e) {
+        reportError($("alertResult"), "alert_fail", e);
+    } finally {
+        setBusy(btn, false);
+    }
+});
+
+async function startRenew(btn, resultEl) {
+    if (isBusy(btn)) return;
+    const ok = await confirmDialog({
+        title: t("confirm_renew_title"), text: t("confirm_renew_text"), okLabel: t("renew_btn"), danger: false });
+    if (!ok) return;
+    setBusy(btn, true);
+    try {
+        const r = await post("/api/renew-tls");
+        if (r.status === 200 && r.data.ok) { setResult(resultEl, "", ""); startJob(r.data.job_id, "renew-tls", true); }
+        else setResult(resultEl, "bad", t("renew_fail", { err: serverMsg(r.data.error) || t("err_http", { code: r.status }) }));
+    } catch (e) {
+        reportError(resultEl, "renew_fail", e);
+    } finally {
+        setBusy(btn, false);
+    }
+}
+$("renewBtn").addEventListener("click", () => startRenew($("renewBtn"), $("renewResult")));
+
+function renderRenewVisibility() {
+    const tlsOn = cfg && cfg.config ? String(cfg.config.ENABLE_TLS).toLowerCase() === "true" : null;
+    const hasCert = statusData && typeof statusData.cert_days === "number";
+    $("renewItem").hidden = tlsOn === false && !hasCert;
+}
+
+function renderAuthNote() {
+    if (!cfg) { $("authNote").hidden = true; return; }
+    $("authNote").hidden = false;
+    $("authNoteText").textContent = t(cfg.auth_required ? "auth_note_on" : "auth_note_off");
+}
+
+// ─── background job (apply / renew-TLS) ─────────────────────────────────
+
+let job = null;           // { id, name, state, elapsed, rc, log, waiting, revealed }
+let jobTimer = null;
+let jobFails = 0;
+
+function jobStatus(j) {
+    if (j.status) return j.status;
+    if (j.running) return "running";
+    return j.rc === 0 ? "ok" : j.rc === 3 ? "degraded" : "failed";
+}
+const jobKind = () => (job && job.name === "renew-tls" ? "renew" : "apply");
+
+function jobTitle() {
+    if (!job) return "";
+    switch (job.state) {
+        case "running": return t("job_running_" + jobKind());
+        case "ok": return t("job_ok_" + jobKind());
+        case "degraded": return t("att_job_degraded_title");
+        case "failed": return t(job.name === "renew-tls" ? "att_job_failed_renew" : "att_job_failed_apply", { rc: job.rc });
+        default: return t("job_lost");
+    }
+}
+
+function renderJob() {
+    const panel = $("jobPanel");
+    if (!job || !job.revealed || dismissedJobs().includes(job.id)) { panel.hidden = true; return; }
+    panel.hidden = false;
+    panel.dataset.state = job.state;
+    const iconName = { running: "spinner", ok: "ok", degraded: "warn", failed: "bad", lost: "warn" }[job.state];
+    $("jobIcon").setAttribute("href", "#i-" + iconName);
+    panel.querySelector(".job-icon").classList.toggle("is-spinning", job.state === "running");
+    $("jobTitle").textContent = jobTitle();
+    let meta;
+    if (job.state === "running") meta = job.waiting ? t("job_waiting") : t("job_elapsed", { t: duration(job.elapsed) });
+    else if (job.state === "degraded") meta = t("att_job_degraded_text");
+    else if (job.state === "failed") meta = t("att_job_failed_text");
+    else if (job.state === "lost") meta = t("job_lost_text");
+    else meta = t("job_meta_done", { id: job.id });
+    $("jobMeta").textContent = meta;
+    $("jobClose").hidden = job.state === "running";
+    const pre = $("jobLog");
+    const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 24;
+    if (pre.textContent !== job.log) {
+        pre.textContent = job.log || "";
+        if (atEnd) pre.scrollTop = pre.scrollHeight;
+    }
+    $("jobDetails").hidden = !job.log;
+}
+
+function scheduleJobPoll(ms) {
+    window.clearTimeout(jobTimer);
+    jobTimer = window.setTimeout(pollJob, ms);
+}
+
+function startJob(id, name, speak) {
+    if (job && job.id === id && job.state === "running") return;
+    job = { id, name, state: "running", elapsed: 0, rc: null, log: job && job.id === id ? job.log : "", waiting: false, revealed: true };
+    jobFails = 0;
+    renderJob();
+    if (speak) announce(t("job_started", { title: jobTitle() }));
+    scheduleJobPoll(speak ? 800 : 0);
+}
+
+function finishJob(state) {
+    const wasRunning = job.state === "running";
+    job.state = state;
+    job.waiting = false;
+    window.clearTimeout(jobTimer);
+    renderJob();
+    if (wasRunning) announce(jobTitle() + ". " + $("jobMeta").textContent);
+    refreshStatus();
+    if (job.name === "apply") loadConfig();
+}
+
+async function pollJob() {
+    if (!job) return;
+    try {
+        const d = await getJSON("/api/job/" + encodeURIComponent(job.id), 10000);
+        jobFails = 0;
+        job.waiting = false;
+        job.name = d.job.name;
+        job.elapsed = d.job.elapsed;
+        job.rc = d.job.rc;
+        job.log = d.log || "";
+        const st = jobStatus(d.job);
+        if (st === "running") { renderJob(); scheduleJobPoll(2000); }
+        else finishJob(st);
+    } catch (e) {
+        if (e.kind === "http" && e.status === 404) { finishJob("lost"); return; }
+        jobFails += 1;
+        job.waiting = true;
+        renderJob();
+        if (jobFails > 60) { finishJob("lost"); return; }   // ~10 minutes without an answer
+        scheduleJobPoll(Math.min(2000 * Math.pow(2, Math.min(jobFails, 3)), 10000));
+    }
+}
+
+/* The status poll also reports the current job — e.g. one started from
+   another browser, or a finished one after a page reload. */
+function syncJobFromStatus(j) {
+    if (!j) return;
+    if (j.running) { startJob(j.id, j.name, false); return; }
+    if (job && job.id === j.id) return;
+    const st = jobStatus(j);
+    if ((st === "failed" || st === "degraded") && !dismissedJobs().includes(j.id)) {
+        // Shown in "what to do"; the panel itself opens via "show log".
+        job = { id: j.id, name: j.name, state: st, elapsed: j.elapsed, rc: j.rc, log: "", waiting: false, revealed: false };
+        renderJob();
+        getJSON("/api/job/" + encodeURIComponent(j.id), 10000)
+            .then((d) => { if (job && job.id === j.id) { job.log = d.log || ""; renderJob(); } })
+            .catch(() => { /* log tail is optional here */ });
+    }
+}
+
+$("jobClose").addEventListener("click", () => {
+    if (!job) return;
+    storageSet("sessionStorage", "lp-dismissed-jobs", dismissedJobs().concat(job.id).slice(-20).join(","));
+    renderJob();
+    renderStatus();
+    $("h-" + (view || "overview")).focus();
+});
+
+function openJobLog() {
+    if (!job) return;
+    job.revealed = true;
+    renderJob();
+    $("jobDetails").open = true;
+    $("jobPanel").scrollIntoView({ block: "start" });
+    $("jobDetails").querySelector("summary").focus();
+}
+
+// ─── configuration: invite / QR ─────────────────────────────────────────
+
+let cfg = null;
+let cfgErr = null;
+let cfgLoading = false;
+
+function renderInvite() {
+    const box = $("qrBox");
+    if (!cfg) {
+        const msg = el("p", "state-msg", cfgErr ? t("cfg_load_fail", { err: cfgErr }) : t("cfg_loading"));
+        box.replaceChildren(msg);
+        return;
+    }
+    const host = cfg.qr_host || "";
+    const link = host ? "loxone://ms?host=" + host : "";
+    $("qrHostValue").textContent = host || t("no_value");
+    $("qrSource").textContent = t("inv_source_" + (cfg.qr_mode || "unset"));
+    $("qrLink").value = link;
+    if (link) $("qrCopy").removeAttribute("aria-disabled");
+    else $("qrCopy").setAttribute("aria-disabled", "true");
+    $("qrPrint").href = "/invite?lang=" + lang;
+    if (host) {
+        const current = box.querySelector("img");
+        if (!current || current.dataset.host !== host) {
+            const img = el("img");
+            img.alt = t("inv_qr_alt", { link });
+            img.dataset.host = host;
+            img.width = 176;
+            img.height = 176;
+            img.addEventListener("error", () => box.replaceChildren(el("p", "state-msg", t("inv_qr_failed"))));
+            img.src = "/qr.svg?host=" + encodeURIComponent(host);
+            box.replaceChildren(img);
+        } else {
+            current.alt = t("inv_qr_alt", { link });
+        }
+    } else {
+        box.replaceChildren(el("p", "state-msg", t("inv_qr_none")));
+    }
+    if (document.activeElement !== $("qrManual") && !$("qrManual").dataset.edited) {
+        $("qrManual").value = cfg.qr_mode === "manual" ? host : "";
+    }
+}
+
+$("qrManual").addEventListener("input", () => {
+    $("qrManual").dataset.edited = "1";
+    fieldError($("qrManual"), $("qrManualError"), "");
+});
+
+$("qrForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const input = $("qrManual");
+    const host = input.value.trim();
+    if (host && !isHost(host)) {
+        fieldError(input, $("qrManualError"), t("inv_invalid"));
+        input.focus();
+        return;
+    }
+    fieldError(input, $("qrManualError"), "");
+    try {
+        const r = await post("/api/qr-host", { host });
+        if (r.status === 200 && r.data.ok) {
+            delete input.dataset.edited;
+            setResult($("qrResult"), "ok", t(host ? "inv_saved" : "inv_cleared"));
+            loadConfig();
+        } else if (r.data.error === "invalid host") {
+            fieldError(input, $("qrManualError"), t("inv_invalid"));
+            input.focus();
+        } else {
+            setResult($("qrResult"), "bad", t("inv_save_fail", { err: serverMsg(r.data.error) || t("err_http", { code: r.status }) }));
+        }
+    } catch (err) {
+        reportError($("qrResult"), "inv_save_fail", err);
+    }
+});
+
+$("qrCopy").addEventListener("click", async () => {
+    const input = $("qrLink");
+    const link = input.value;
+    if (!link) return;
+    try {
+        if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(link);
+            setResult($("qrResult"), "ok", t("inv_copied"));
+            return;
+        }
+    } catch (e) { /* fall through to the selection fallback */ }
+    input.focus();
+    input.select();
+    let copied = false;
+    try { copied = document.execCommand("copy"); } catch (e) { copied = false; }
+    setResult($("qrResult"), copied ? "ok" : "info", t(copied ? "inv_copied" : "inv_copy_fail"));
+});
+
+// ─── configuration: typed editor driven by the server's EDITABLE_KEYS ───
 
 const CFG_GROUPS = [
     ["grp_backend", ["LOXONE_IP", "LOXONE_PORT"]],
@@ -542,319 +1153,544 @@ const CFG_GROUPS = [
         "TUNNEL_TOKEN", "TUNNEL_PROXY_NAME", "TUNNEL_REMOTE_PORT", "TUNNEL_PUBLIC_HOST"]],
     ["grp_gui", ["ENABLE_GUI", "GUI_PORT", "GUI_PASSWORD"]],
 ];
+const ENUMS = { appsec_mode: ["enforce", "monitor"], tunnel_proto: ["quic", "tcp"] };
+const MASK = "•••";
+const KEY_HINTS = { GUI_PASSWORD: "h_gui_password", ENABLE_GUI: "h_enable_gui" };
 
-const ENUM_OPTIONS = { appsec_mode: ["monitor", "enforce"], tunnel_proto: ["quic", "tcp"] };
+const VALIDATORS = {
+    ip: isIP,
+    port: (v) => /^\d+$/.test(v) && Number(v) >= 1 && Number(v) <= 65535,
+    int: (v) => /^\d+$/.test(v) && Number(v) > 0 && Number(v) < 100000,
+    bool: () => true,
+    appsec_mode: (v) => ENUMS.appsec_mode.includes(v),
+    tunnel_proto: (v) => ENUMS.tunnel_proto.includes(v),
+    hhmm: (v) => /^([01]\d|2[0-3]):[0-5]\d$/.test(v),
+    url_or_empty: (v) => v === "" || v.startsWith("https://"),
+    email_or_empty: (v) => v === "" || /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v),
+    host_or_empty: (v) => v === "" || isHost(v),
+    name: (v) => /^[A-Za-z0-9_-]{1,64}$/.test(v),
+    secret: (v) => v.length <= 256 && !v.includes("\n") && !v.includes('"'),
+    cidr_array: (v) => v.split(/[\s,]+/).filter(Boolean).every(isCidr),
+};
 
-function cfgField(key, value, kind) {
-    const wrap = document.createElement("div");
-    const label = document.createElement("label");
-    label.textContent = key;
-    wrap.appendChild(label);
-    if (kind === "bool") {
-        const sw = document.createElement("label");
-        sw.className = "switch";
-        sw.innerHTML = `<input type="checkbox" data-key="${key}"><span class="slider"></span>`;
-        sw.querySelector("input").checked = String(value).toLowerCase() === "true";
-        wrap.appendChild(sw);
-    } else if (ENUM_OPTIONS[kind]) {
-        const sel = document.createElement("select");
-        sel.dataset.key = key;
-        sel.innerHTML = ENUM_OPTIONS[kind].map((o) => `<option>${o}</option>`).join("");
-        sel.value = ENUM_OPTIONS[kind].includes(value) ? value : ENUM_OPTIONS[kind][0];
-        wrap.appendChild(sel);
-    } else {
-        const inp = document.createElement("input");
-        inp.dataset.key = key;
-        if (kind === "int" || kind === "port" || kind === "ip") inp.classList.add("mono");
-        let v = Array.isArray(value) ? value.join(" ") : String(value);
-        // bash-array raw form ("a" "b") → display as plain space-separated list
-        if (/^\(.*\)$/.test(v)) v = v.slice(1, -1).replace(/"/g, " ").trim().replace(/\s+/g, " ");
-        inp.value = v;
-        wrap.appendChild(inp);
+const fields = new Map();   // key -> { kind, input, clear, original, masked, err, changed }
+
+function displayValue(kind, value) {
+    let v = Array.isArray(value) ? value.join(" ") : String(value === undefined || value === null ? "" : value);
+    if (kind === "cidr_array" && /^\(.*\)$/.test(v)) {
+        v = v.slice(1, -1).replace(/"/g, " ").trim().replace(/\s+/g, " ");
     }
+    return v;
+}
+
+function hintKey(key, kind) {
+    return KEY_HINTS[key] || "h_" + kind;
+}
+
+function buildField(key, kind, value) {
+    const id = "cfg-" + key;
+    const wrap = el("div", "field");
+    wrap.dataset.key = key;
+    const masked = value === MASK;
+    const fk = "f_" + key;
+    const labelText = el("span", "", fk in I18N.de ? t(fk) : key);
+    if (fk in I18N.de) labelText.dataset.i18n = fk;
+    const changed = el("span", "field-changed", t("field_changed"));
+    changed.dataset.i18n = "field_changed";
+    changed.hidden = true;
+    const keyEl = el("span", "key", key);
+    keyEl.setAttribute("lang", "en");
+
+    const hint = el("p", "hint");
+    hint.id = id + "-hint";
+    const hk = hintKey(key, kind);
+    if (masked) {
+        hint.textContent = t("masked_hint") + (hk in I18N.de && kind !== "bool" ? " " + t(hk) : "");
+    } else if (hk in I18N.de) {
+        hint.textContent = t(hk);
+        hint.dataset.i18n = hk;
+    }
+    const err = el("p", "field-error");
+    err.id = id + "-err";
+    err.hidden = true;
+
+    let input;
+    let original;
+    let clear = null;
+    if (kind === "bool") {
+        const labelId = id + "-label";
+        const label = el("span", "field-label");
+        label.id = labelId;
+        label.append(labelText, changed, keyEl);
+        const sw = el("label", "switch");
+        input = el("input");
+        input.type = "checkbox";
+        input.id = id;
+        input.setAttribute("role", "switch");
+        input.setAttribute("aria-labelledby", labelId);
+        input.checked = String(value).toLowerCase() === "true";
+        const stateText = el("span", "switch-state");
+        stateText.setAttribute("aria-hidden", "true");
+        const sync = () => { stateText.textContent = t(input.checked ? "sw_on" : "sw_off"); };
+        input.addEventListener("change", sync);
+        sync();
+        sw.append(input, el("span", "switch-track"), stateText);
+        sw.querySelector(".switch-track").setAttribute("aria-hidden", "true");
+        wrap.append(label);
+        if (hint.textContent) wrap.append(hint);
+        wrap.append(sw, err);
+        original = input.checked ? "true" : "false";
+    } else {
+        const label = el("label", "field-label");
+        label.htmlFor = id;
+        label.append(labelText, changed, keyEl);
+        if (ENUMS[kind]) {
+            input = el("select", "select");
+            const opts = ENUMS[kind].slice();
+            if (value && !opts.includes(value)) opts.push(value);
+            input.append(...opts.map((o) => { const op = el("option", "", o); op.value = o; return op; }));
+            input.value = value && opts.includes(value) ? value : opts[0];
+            original = input.value;
+        } else {
+            input = el("input", "input");
+            input.type = masked || kind === "secret" ? "password" : "text";
+            input.autocomplete = masked || kind === "secret" ? "new-password" : "off";
+            input.spellcheck = false;
+            input.setAttribute("autocapitalize", "off");
+            if (["ip", "port", "int", "hhmm", "cidr_array", "host_or_empty", "name"].includes(kind)) input.classList.add("mono");
+            if (kind === "port" || kind === "int") input.inputMode = "numeric";
+            if (kind === "email_or_empty") input.type = "email";
+            if (kind === "url_or_empty" && !masked) input.type = "url";
+            original = masked ? "" : displayValue(kind, value);
+            input.value = original;
+        }
+        input.id = id;
+        input.name = key;
+        wrap.append(label);
+        if (hint.textContent) wrap.append(hint);
+        wrap.append(input);
+        if (masked) {
+            clear = el("input");
+            clear.type = "checkbox";
+            clear.id = id + "-clear";
+            const cl = el("label", "check masked-clear");
+            const span = el("span", "", t("masked_clear"));
+            span.dataset.i18n = "masked_clear";
+            cl.append(clear, span);
+            clear.addEventListener("change", () => {
+                input.disabled = clear.checked;
+                if (clear.checked) input.value = "";
+                updateDirty();
+            });
+            wrap.append(cl);
+        }
+        wrap.append(err);
+    }
+    const described = [hint.textContent ? hint.id : "", err.id].filter(Boolean).join(" ");
+    input.setAttribute("aria-describedby", described);
+    input.addEventListener(input.type === "checkbox" || input.tagName === "SELECT" ? "change" : "input", () => {
+        fieldError(input, err, "");
+        updateDirty();
+    });
+    fields.set(key, { kind, input, clear, original, masked, err, changed, labelText });
     return wrap;
 }
 
-async function loadConfig() {
-    const res = await fetch("/api/config").then((r) => r.json()).catch(() => null);
-    if (!res || !res.ok) return;
-    authRequired = res.auth_required;
-    $("qrHost").value = res.qr_host || "";
-    $("qrModeLine").textContent = "Mode: " + res.qr_mode;
-    if (res.qr_host) {
-        $("qrHolder").innerHTML =
-            `<img src="/qr.svg?host=${encodeURIComponent(res.qr_host)}" alt="QR">`;
-    }
-    const schema = res.schema || {};
-    const form = $("cfgForm");
-    form.innerHTML = "";
-    const placed = new Set();
-    for (const [gkey, keys] of CFG_GROUPS) {
-        const present = keys.filter((k) => k in res.config);
-        if (!present.length) continue;
-        const group = document.createElement("div");
-        group.className = "cfg-group";
-        group.innerHTML = `<h4>${t(gkey)}</h4>`;
-        const fields = document.createElement("div");
-        fields.className = "cfg-fields";
-        present.forEach((k) => {
-            fields.appendChild(cfgField(k, res.config[k], schema[k]));
-            placed.add(k);
-        });
-        group.appendChild(fields);
-        form.appendChild(group);
-    }
-    const rest = Object.keys(res.config).filter((k) => !placed.has(k));
-    if (rest.length) {
-        const group = document.createElement("div");
-        group.className = "cfg-group";
-        group.innerHTML = `<h4>${t("grp_other")}</h4>`;
-        const fields = document.createElement("div");
-        fields.className = "cfg-fields";
-        rest.forEach((k) => fields.appendChild(cfgField(k, res.config[k], schema[k])));
-        group.appendChild(fields);
-        form.appendChild(group);
-    }
+function currentValue(f) {
+    if (f.clear && f.clear.checked) return "";
+    if (f.kind === "bool") return f.input.checked ? "true" : "false";
+    return f.kind === "secret" || f.masked ? f.input.value : f.input.value.trim();
 }
 
-$("cfgSave").onclick = async () => {
-    const changes = {};
-    $("cfgForm").querySelectorAll("[data-key]").forEach((el) => {
-        changes[el.dataset.key] = el.type === "checkbox" ? String(el.checked) : el.value;
+function fieldChanged(f) {
+    if (f.masked) return Boolean(f.clear && f.clear.checked) || f.input.value !== "";
+    return currentValue(f) !== f.original;
+}
+
+function updateDirty() {
+    let n = 0;
+    fields.forEach((f) => {
+        const c = fieldChanged(f);
+        f.changed.hidden = !c;
+        if (c) n += 1;
     });
-    const res = await post("/api/config", { changes });
-    if (res.ok) toast(t("done") + " → " + res.hint);
-    else toast(JSON.stringify(res.errors || res.error));
-};
+    const note = $("cfgDirty");
+    note.textContent = n ? tn("cfg_dirty", n) : t("cfg_clean");
+    note.dataset.dirty = n ? "true" : "false";
+    $("cfgReset").hidden = !n;
+    return n;
+}
+const isDirty = () => fields.size > 0 && [...fields.values()].some(fieldChanged);
 
-// ─── actions ─────────────────────────────────────────────────────────────
-
-async function unban(ip) {
-    if (!ip || !confirm(t("confirm_unban") + ip)) return;
-    const res = await post("/api/unban", { ip });
-    toast(res.ok ? t("done") : (res.error || t("failed")));
-    refresh();
+function buildForm() {
+    const form = $("cfgForm");
+    fields.clear();
+    const config = cfg.config || {};
+    const schema = cfg.schema || {};
+    const groups = CFG_GROUPS.map(([g, keys]) => [g, keys.filter((k) => k in config)])
+        .filter(([, keys]) => keys.length);
+    const rest = Object.keys(config).filter((k) => !CFG_GROUPS.some(([, keys]) => keys.includes(k)));
+    if (rest.length) groups.push(["grp_other", rest]);
+    form.replaceChildren(...groups.map(([g, keys]) => {
+        const fs = el("fieldset", "cfg-group");
+        const legend = el("legend", "", t(g));
+        legend.dataset.i18n = g;
+        const grid = el("div", "cfg-fields");
+        keys.forEach((k) => grid.append(buildField(k, schema[k] || "secret", config[k])));
+        fs.append(legend, grid);
+        return fs;
+    }));
+    form.hidden = false;
+    $("cfgActions").hidden = false;
+    $("cfgState").hidden = true;
+    clearErrors();
+    updateDirty();
 }
 
-$("unbanBtn").onclick = () => unban($("unbanIp").value.trim());
+function renderCfgState() {
+    const node = $("cfgState");
+    if (cfg) { node.hidden = true; return; }
+    node.hidden = false;
+    node.dataset.state = cfgErr ? "error" : "";
+    node.textContent = cfgErr ? t("cfg_load_fail", { err: cfgErr }) : t("cfg_loading");
+}
 
-document.querySelectorAll("[data-restart]").forEach((b) => {
-    b.onclick = async () => {
-        const svc = b.dataset.restart;
-        if (!confirm(t("confirm_restart") + svc)) return;
-        const res = await post("/api/restart", { service: svc });
-        toast((res.ok ? t("done") : t("failed")) + " — " + svc + " " + (res.state || ""));
-        refresh();
-    };
-});
+async function loadConfig() {
+    if (cfgLoading) return;
+    cfgLoading = true;
+    try {
+        cfg = await getJSON("/api/config");
+        cfgErr = null;
+        authRequired = Boolean(cfg.auth_required);
+        if (!isDirty()) buildForm();
+    } catch (e) {
+        cfgErr = errText(e);
+    } finally {
+        cfgLoading = false;
+    }
+    renderCfgState();
+    renderInvite();
+    renderAuthNote();
+    renderRenewVisibility();
+}
 
-$("alertBtn").onclick = async () => {
-    const r = await post("/api/test-alert");
-    toast(r.ok ? t("done") : t("failed"));
-};
+function clearErrors() {
+    $("cfgErrors").hidden = true;
+    $("cfgErrorsList").replaceChildren();
+    fields.forEach((f) => fieldError(f.input, f.err, ""));
+}
 
-$("renewBtn").onclick = async () => {
-    const r = await post("/api/renew-tls");
-    if (r.ok) pollJob(r.job_id); else toast(r.error || t("failed"));
-};
+function showErrors(errors) {
+    const keys = Object.keys(errors);
+    fields.forEach((f, k) => fieldError(f.input, f.err, errors[k] || ""));
+    const box = $("cfgErrors");
+    $("cfgErrorsTitle").replaceChildren(icon("bad"), el("span", "", tn("cfg_err_summary", keys.length)));
+    $("cfgErrorsList").replaceChildren(...keys.map((k) => {
+        const li = el("li");
+        const f = fields.get(k);
+        const a = el("a", "", (f ? f.labelText.textContent : k) + ": " + errors[k]);
+        a.href = "#cfg-" + k;
+        a.addEventListener("click", (e) => { e.preventDefault(); if (f) f.input.focus(); });
+        li.append(a);
+        return li;
+    }));
+    box.hidden = false;
+    box.focus();
+}
 
-$("applyBtn").onclick = async () => {
-    if (!confirm(t("confirm_apply"))) return;
-    const r = await post("/api/apply");
-    if (r.ok) pollJob(r.job_id); else toast(r.error || t("failed"));
-};
+function collectChanges() {
+    const changes = {};
+    const errors = {};
+    fields.forEach((f, key) => {
+        if (!fieldChanged(f)) return;
+        const v = currentValue(f);
+        const check = VALIDATORS[f.kind] || VALIDATORS.secret;
+        if (!check(v)) errors[key] = t("err_field", { hint: t(hintKey(key, f.kind)) });
+        else changes[key] = v;
+    });
+    return { changes, errors };
+}
 
-$("qrSave").onclick = async () => {
-    const res = await post("/api/qr-host", { host: $("qrHost").value.trim() });
-    toast(res.ok ? t("done") : (res.error || t("failed")));
-    loadConfig();
-};
-
-$("qrCopy").onclick = () => {
-    const h = $("qrHost").value.trim();
-    if (h) { navigator.clipboard.writeText("loxone://ms?host=" + h); toast(t("done")); }
-};
-
-// ─── job polling ─────────────────────────────────────────────────────────
-
-let jobTimer = null;
-
-function pollJob(id) {
-    if (jobTimer) return;
-    $("jobLog").hidden = false;
-    jobTimer = setInterval(async () => {
-        const res = await fetch("/api/job/" + id).then((r) => r.json()).catch(() => null);
-        if (!res || !res.ok) { clearInterval(jobTimer); jobTimer = null; return; }
-        $("jobLog").textContent = "[" + res.job.name + " · " + res.job.elapsed + "s]\n" + (res.log || "");
-        $("jobLog").scrollTop = $("jobLog").scrollHeight;
-        if (!res.job.running) {
-            clearInterval(jobTimer); jobTimer = null;
-            // deploy.sh rc=3: deployed, but one or more OPTIONAL steps degraded
-            // (already listed in the log tail above) — a warning, not a failure.
-            if (res.job.rc === 0) toast(t("done"));
-            else if (res.job.rc === 3) toast(t("degraded"));
-            else toast(t("failed") + " (rc=" + res.job.rc + ")");
-            refresh();
+async function saveConfig() {
+    const result = $("cfgResult");
+    clearErrors();
+    const { changes, errors } = collectChanges();
+    if (Object.keys(errors).length) { showErrors(errors); return false; }
+    const keys = Object.keys(changes);
+    if (!keys.length) { setResult(result, "info", t("cfg_nochange")); return true; }
+    setResult(result, "info", t("cfg_saving"));
+    try {
+        const r = await post("/api/config", { changes });
+        if (r.status === 200 && r.data.ok) {
+            if ("GUI_PASSWORD" in changes) {
+                setPassword(changes.GUI_PASSWORD);
+                authRequired = Boolean(changes.GUI_PASSWORD);
+            }
+            fields.clear();                // everything is saved: allow a clean rebuild
+            setResult(result, "ok", t("cfg_saved", { keys: (r.data.changed || keys).join(", ") }));
+            await loadConfig();
+            return true;
         }
-    }, 2000);
+        if (r.data.errors) {
+            const mapped = {};
+            for (const [k, msg] of Object.entries(r.data.errors)) {
+                const f = fields.get(k);
+                mapped[k] = msg === "not editable" ? t("err_not_editable")
+                    : t("err_field", { hint: t(hintKey(k, f ? f.kind : "secret")) });
+            }
+            setResult(result, "", "");
+            showErrors(mapped);
+            return false;
+        }
+        setResult(result, "bad", t("cfg_save_fail", { err: serverMsg(r.data.error) || t("err_http", { code: r.status }) }));
+    } catch (e) {
+        reportError(result, "cfg_save_fail", e);
+    }
+    return false;
 }
 
-// ─── logs ────────────────────────────────────────────────────────────────
+$("cfgForm").addEventListener("submit", (e) => { e.preventDefault(); saveConfig(); });
 
-const LOGS = ["nginx-error", "nginx-access", "appsec", "watchdog",
-    "tunnel-watchdog", "monitor", "deploy", "gui"];
-let activeLog = LOGS[0];
-let followTimer = null;
-
-$("logChips").innerHTML = LOGS.map((l) =>
-    `<button class="chip${l === activeLog ? " is-active" : ""}" data-log="${l}">${l}</button>`).join("");
-
-document.querySelectorAll("[data-log]").forEach((b) => {
-    b.onclick = () => {
-        activeLog = b.dataset.log;
-        document.querySelectorAll("[data-log]").forEach((x) =>
-            x.classList.toggle("is-active", x.dataset.log === activeLog));
-        loadLog();
-    };
+$("cfgReset").addEventListener("click", () => {
+    if (!cfg) return;
+    fields.clear();
+    buildForm();
+    setResult($("cfgResult"), "info", t("cfg_discarded"));
+    $("cfgSave").focus();
 });
 
-async function loadLog() {
-    const res = await fetch("/api/log/" + activeLog).then((r) => r.json()).catch(() => null);
-    $("logView").hidden = false;
-    $("logView").textContent = res && res.ok ? res.lines : ((res && res.error) || "?");
-    $("logView").scrollTop = $("logView").scrollHeight;
+$("applyBtn").addEventListener("click", async () => {
+    const btn = $("applyBtn");
+    if (isBusy(btn)) return;
+    const dirty = isDirty();
+    const ok = await confirmDialog({
+        title: t("confirm_apply_title"), text: t("confirm_apply_text"),
+        extra: dirty ? t("confirm_apply_dirty") : "",
+        okLabel: dirty ? t("save_apply_btn") : t("apply_btn"), danger: false });
+    if (!ok) return;
+    setBusy(btn, true);
+    try {
+        if (dirty && !(await saveConfig())) return;
+        const r = await post("/api/apply");
+        if (r.status === 200 && r.data.ok) startJob(r.data.job_id, "apply", true);
+        else setResult($("cfgResult"), "bad", t("apply_fail", { err: serverMsg(r.data.error) || t("err_http", { code: r.status }) }));
+    } catch (e) {
+        reportError($("cfgResult"), "apply_fail", e);
+    } finally {
+        setBusy(btn, false);
+    }
+});
+
+window.addEventListener("beforeunload", (e) => {
+    if (isDirty()) { e.preventDefault(); e.returnValue = t("leave_warning"); }
+});
+
+// ─── logs ───────────────────────────────────────────────────────────────
+
+const LOGS = ["nginx-error", "nginx-access", "appsec", "watchdog", "tunnel-watchdog", "monitor", "deploy", "gui"];
+const logKey = (name) => "log_" + name.replace(/-/g, "_");
+let logName = LOGS.includes(storageGet("sessionStorage", "lp-log")) ? storageGet("sessionStorage", "lp-log") : LOGS[0];
+let logText = null;
+let logErr = null;
+let logAt = 0;
+let logLoading = false;
+let followTimer = null;
+let filterTimer = null;
+
+function buildLogChoice() {
+    $("logChoiceList").replaceChildren(...LOGS.map((name) => {
+        const item = el("label", "seg-item");
+        const input = el("input");
+        input.type = "radio";
+        input.name = "log";
+        input.value = name;
+        input.checked = name === logName;
+        input.addEventListener("change", () => {
+            logName = name;
+            storageSet("sessionStorage", "lp-log", name);
+            logText = null;
+            loadLog(true);
+        });
+        const span = el("span", "", t(logKey(name)));
+        span.dataset.i18n = logKey(name);
+        item.append(input, span);
+        return item;
+    }));
 }
 
-$("logFollow").onchange = () => {
-    clearInterval(followTimer);
+async function loadLog(scrollEnd) {
+    if (logLoading) return;
+    logLoading = true;
+    if (logText === null) $("logMeta").textContent = t("log_loading");
+    const name = logName;
+    try {
+        const d = await getJSON("/api/log/" + encodeURIComponent(name));
+        if (name !== logName) return;
+        logText = d.lines || "";
+        logErr = null;
+        logAt = Date.now() / 1000;
+    } catch (e) {
+        if (logErr === null) announce(t("log_fail", { err: errText(e) }));
+        logErr = errText(e);
+    } finally {
+        logLoading = false;
+    }
+    renderLog(scrollEnd);
+}
+
+function renderLog(scrollEnd) {
+    const pre = $("logView");
+    const meta = $("logMeta");
+    pre.setAttribute("aria-label", t("log_region", { name: t(logKey(logName)) }));
+    if (logErr && logText === null) {
+        meta.textContent = t("log_fail", { err: logErr });
+        pre.textContent = "";
+        return;
+    }
+    if (logText === null) return;
+    const atEnd = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 24;
+    const all = logText ? logText.split("\n") : [];
+    const q = $("logFilter").value.trim().toLowerCase();
+    const shown = q ? all.filter((l) => l.toLowerCase().includes(q)) : all;
+    const time = clock(logAt, true);
+    if (logText.startsWith("(not readable:")) {
+        meta.textContent = t("log_unreadable");
+        pre.textContent = logText;
+    } else if (!all.length) {
+        meta.textContent = t("log_empty");
+        pre.textContent = "";
+    } else if (!shown.length) {
+        meta.textContent = t("log_nomatch");
+        pre.textContent = "";
+    } else {
+        meta.textContent = q ? t("log_meta_filtered", { m: num(shown.length), n: num(all.length), time })
+            : t("log_meta", { n: num(all.length), time });
+        if (logErr) meta.textContent += " · " + t("log_fail", { err: logErr });
+        const text = shown.join("\n");
+        if (pre.textContent !== text) {
+            pre.textContent = text;
+            if (scrollEnd || atEnd) pre.scrollTop = pre.scrollHeight;
+        }
+    }
+}
+
+$("logReload").addEventListener("click", () => loadLog(true));
+$("logFilter").addEventListener("input", () => {
+    window.clearTimeout(filterTimer);
+    filterTimer = window.setTimeout(() => renderLog(true), 150);
+});
+$("logFollow").addEventListener("change", () => {
+    window.clearInterval(followTimer);
     followTimer = null;
     if ($("logFollow").checked) {
-        followTimer = setInterval(() => {
-            if (activeTab === "logs" && !document.hidden) loadLog();
+        loadLog(true);
+        followTimer = window.setInterval(() => {
+            if (view === "logs" && !document.hidden) loadLog(false);
         }, 5000);
     }
-};
+});
 
-// ─── three.js background scene ───────────────────────────────────────────
+// ─── history charts ─────────────────────────────────────────────────────
 
-const scene = (() => {
-    if (REDUCED) return { setSeverity() {}, recolor() {} };
-    const canvas = $("bg3d");
-    let renderer;
-    try {
-        renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
-    } catch (e) {
-        canvas.remove();
-        return { setSeverity() {}, recolor() {} };
-    }
-    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+let history = null;
+let historyErr = null;
+const chartCtx = { t, num, time: (s) => clock(s, false), announce };
+const charts = [
+    ["chart-req", { kind: "line", titleKey: "ch_req", noteKey: "ch_note_avg", key: "req", agg: "avg", decimals: 0, floor: 5 }],
+    ["chart-load", { kind: "line", titleKey: "ch_load", noteKey: "ch_note_avg", key: "load", agg: "avg", decimals: 2, floor: 1 }],
+    ["chart-bans", { kind: "line", titleKey: "ch_bans", noteKey: "ch_note_max", key: "bans", agg: "max", decimals: 0, floor: 4 }],
+    ["chart-appsec", { kind: "bars", titleKey: "ch_appsec", key: "sec", agg: "sum", decimals: 0, floor: 4 }],
+].map(([id, spec]) => createChart($(id), spec, chartCtx));
 
-    const scn = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 100);
-    camera.position.z = 7;
-
-    const cssColor = (name) =>
-        new THREE.Color(getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#69c350");
-
-    const group = new THREE.Group();
-    scn.add(group);
-
-    const shellMat = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.34 });
-    const shell = new THREE.LineSegments(
-        new THREE.EdgesGeometry(new THREE.IcosahedronGeometry(2.4, 1)), shellMat);
-    group.add(shell);
-
-    const coreMat = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.14 });
-    const core = new THREE.LineSegments(
-        new THREE.EdgesGeometry(new THREE.IcosahedronGeometry(1.3, 0)), coreMat);
-    group.add(core);
-
-    const N = SMALL ? 260 : 650;
-    const pos = new Float32Array(N * 3);
-    for (let i = 0; i < N; i++) {
-        const r = 2.9 + Math.random() * 1.8;
-        const th = Math.random() * Math.PI * 2;
-        const ph = Math.acos(2 * Math.random() - 1);
-        pos[i * 3] = r * Math.sin(ph) * Math.cos(th);
-        pos[i * 3 + 1] = r * Math.sin(ph) * Math.sin(th);
-        pos[i * 3 + 2] = r * Math.cos(ph);
-    }
-    const pGeo = new THREE.BufferGeometry();
-    pGeo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-    const pMat = new THREE.PointsMaterial({
-        size: 0.035, transparent: true, opacity: 0.75,
-        blending: THREE.AdditiveBlending, depthWrite: false,
-    });
-    const particles = new THREE.Points(pGeo, pMat);
-    scn.add(particles);
-
-    const target = cssColor("--accent");
-    const mats = [shellMat, coreMat, pMat];
-    mats.forEach((m) => m.color.copy(target));
-
-    let sevVar = "--ok";
-    const api = {
-        setSeverity(sev) {
-            sevVar = sev === "bad" ? "--bad" : sev === "warn" ? "--warn" : "--accent";
-            target.copy(cssColor(sevVar));
-        },
-        recolor() { target.copy(cssColor(sevVar)); },
-    };
-
-    let px = 0, py = 0;
-    addEventListener("pointermove", (e) => {
-        px = (e.clientX / innerWidth - 0.5) * 0.8;
-        py = (e.clientY / innerHeight - 0.5) * 0.5;
-    }, { passive: true });
-
-    function resize() {
-        const w = innerWidth, h = innerHeight;
-        renderer.setSize(w, h, false);
-        camera.aspect = w / h;
-        camera.updateProjectionMatrix();
-    }
-    addEventListener("resize", resize);
-    resize();
-
-    const clock = new THREE.Clock();
-    let raf = null;
-
-    function frame() {
-        raf = requestAnimationFrame(frame);
-        const dt = Math.min(clock.getDelta(), 0.1);
-        const tm = clock.elapsedTime;
-        group.rotation.y += dt * 0.10;
-        group.rotation.x = Math.sin(tm * 0.18) * 0.16;
-        particles.rotation.y -= dt * 0.035;
-        camera.position.x += (px * 1.6 - camera.position.x) * 0.04;
-        camera.position.y += (-py * 1.2 - camera.position.y) * 0.04;
-        camera.lookAt(0, 0, 0);
-        mats.forEach((m) => m.color.lerp(target, 0.04));
-        renderer.render(scn, camera);
-    }
-
-    document.addEventListener("visibilitychange", () => {
-        if (document.hidden) { cancelAnimationFrame(raf); raf = null; }
-        else if (!raf) { clock.getDelta(); frame(); }
-    });
-    frame();
-    return api;
-})();
-
-// ─── boot ────────────────────────────────────────────────────────────────
-
-applyLang();
-setTheme(currentTheme());
-
-if (!REDUCED) {
-    animate(document.querySelectorAll(".hero > *"), {
-        translateY: [18, 0], opacity: [0, 1],
-        duration: 650, ease: "outCubic", delay: stagger(80),
-    });
+function renderCharts() {
+    charts.forEach((c) => c.render(history, history ? null : historyErr));
 }
 
+async function refreshHistory() {
+    try {
+        history = await getJSON("/api/history", 20000);
+        historyErr = null;
+    } catch (e) {
+        historyErr = errText(e);
+    }
+    renderCharts();
+}
+
+// ─── status polling ─────────────────────────────────────────────────────
+
+async function refreshStatus() {
+    if (statusInFlight) return;
+    statusInFlight = true;
+    try {
+        const d = await getJSON("/api/status", 30000);
+        statusData = d.status;
+        statusAt = Date.now();
+        statusErr = null;
+    } catch (e) {
+        statusErr = e;
+    } finally {
+        statusInFlight = false;
+    }
+    renderStatus();
+    if (statusData && !statusErr) syncJobFromStatus(statusData.job);
+}
+
+$("retryBtn").addEventListener("click", () => {
+    refreshStatus();
+    if (!history) refreshHistory();
+    if (!cfg) loadConfig();
+});
+
+// ─── language ───────────────────────────────────────────────────────────
+
+function applyLang() {
+    document.documentElement.lang = lang;
+    document.querySelectorAll("[data-i18n]").forEach((node) => { node.textContent = t(node.dataset.i18n); });
+    document.querySelectorAll("[data-i18n-aria]").forEach((node) => { node.setAttribute("aria-label", t(node.dataset.i18nAria)); });
+    $("langBtnShort").textContent = t("lang_short");
+    $("langBtnLabel").textContent = t("lang_btn");
+    $("langBtn").setAttribute("lang", lang === "de" ? "en" : "de");
+    $("inviteLink").href = "/invite?lang=" + lang;
+    $("themeBtnLabel").textContent = t("theme_btn", { mode: t("theme_" + currentTheme()) });
+    if (view) document.title = t(VIEW_TITLE[view]) + " · LoxProx Panel";
+}
+
+$("langBtn").addEventListener("click", () => {
+    lang = lang === "de" ? "en" : "de";
+    storageSet("localStorage", "lp-lang", lang);
+    applyLang();
+    buildRestartList();
+    fields.forEach((f, key) => {
+        const hk = hintKey(key, f.kind);
+        const hint = $("cfg-" + key + "-hint");
+        if (hint && f.masked) hint.textContent = t("masked_hint") + (hk in I18N.de && f.kind !== "bool" ? " " + t(hk) : "");
+        if (f.kind === "bool") f.input.dispatchEvent(new Event("change"));
+    });
+    updateDirty();
+    renderStatus();
+    renderJob();
+    renderInvite();
+    renderCfgState();
+    renderAuthNote();
+    renderCharts();
+    if (logText !== null || logErr) renderLog(false);
+});
+
+// ─── boot ───────────────────────────────────────────────────────────────
+
+applyLang();
+setTheme(currentTheme(), false);
+buildRestartList();
+buildLogChoice();
+showView(viewFromHash() || "overview", false);
+renderStatus();
+renderCharts();
+renderInvite();
+renderCfgState();
 loadConfig();
-refresh();
-fetchHistory();
-setInterval(() => { if (!document.hidden) refresh(); }, 10000);
-setInterval(() => { if (!document.hidden) fetchHistory(); }, 60000);
+refreshStatus();
+refreshHistory();
+
+window.setInterval(() => { if (!document.hidden) refreshStatus(); }, 10000);
+window.setInterval(() => { if (!document.hidden) refreshHistory(); }, 60000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshStatus(); });
