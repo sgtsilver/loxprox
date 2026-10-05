@@ -1565,15 +1565,17 @@ test_unit_symlink_replaced() {
     # setup_network_watchdog end to end with the mock paths.
     ln -sfn "$target" "$dst"
     printf 'stale\n' > "$LOXPROX_INSTALL_DIR/network-watchdog.sh"
-    local inode_before
-    inode_before=$(stat -c %i "$LOXPROX_INSTALL_DIR/network-watchdog.sh")
+    # Hold the old file open — like a timer-run bash that is executing it.
+    # (Comparing inode numbers alone proves nothing: a freed inode is reused.)
+    exec 8<"$LOXPROX_INSTALL_DIR/network-watchdog.sh"
     setup_network_watchdog >/dev/null 2>&1
     [[ -f "$dst" && ! -L "$dst" ]] && pass "setup_network_watchdog replaces a symlinked unit" || fail "setup_network_watchdog kept the symlink"
     cmp -s "$PROJECT_DIR/security-monitoring/network-watchdog.sh" "$LOXPROX_INSTALL_DIR/network-watchdog.sh" \
         && pass "watchdog script refreshed" || fail "watchdog script not refreshed"
-    [[ "$(stat -c %i "$LOXPROX_INSTALL_DIR/network-watchdog.sh")" != "$inode_before" ]] \
-        && pass "script replaced (new inode → new owner), not overwritten in place like cp did" \
-        || fail "script overwritten in place (keeps the old owner)"
+    [[ "$(cat <&8)" == "stale" ]] \
+        && pass "script replaced by a new file — a reader of the old one still sees it intact" \
+        || fail "script rewritten in place under an open reader (write-through / running-script hazard)"
+    exec 8<&-
     if [[ $EUID -eq 0 ]]; then
         [[ "$(stat -c %U "$LOXPROX_INSTALL_DIR/network-watchdog.sh")" == "root" ]] && pass "installed script owned by root" \
             || fail "installed script owner $(stat -c %U "$LOXPROX_INSTALL_DIR/network-watchdog.sh")"

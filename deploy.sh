@@ -351,11 +351,14 @@ _loxprox_mkdir_mode() {
     install -d -m "$mode" "$dir" && chmod "$mode" "$dir"
 }
 
-# Installs a root-run script into the install dir. `install` replaces the
-# destination (new inode, root:root) — unlike `cp`, which keeps the owner of
-# an existing file.
+# Installs a root-run script into the install dir as a NEW file: unlink
+# first, then install root:root. `cp` onto an existing file kept its owner
+# (the login user, on the production gateway) and, like `install`, rewrites
+# the old inode in place — through a symlink, and under a copy of the script
+# that a timer may be executing right now (bash reads scripts as it runs).
 _loxprox_install_script() {
     local src="$1" dst="$2"
+    rm -f "$dst"
     install -m 0755 -o root -g root "$src" "$dst" 2>/dev/null || install -m 0755 "$src" "$dst"
 }
 
@@ -363,6 +366,7 @@ _loxprox_install_unit_file() {
     local src="$1" dst="$SYSTEMD_UNIT_DIR/$2"
     mkdir -p "$SYSTEMD_UNIT_DIR"
     _loxprox_unlink_unit_symlink "$dst"
+    rm -f "$dst"
     install -m 0644 -o root -g root "$src" "$dst" 2>/dev/null || install -m 0644 "$src" "$dst"
 }
 

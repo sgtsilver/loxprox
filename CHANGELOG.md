@@ -429,8 +429,9 @@ Defects the first production deploy of PR #44 exposed. No release was cut.
   refused to put root-run code there. `deploy.sh` now normalises the install
   directory before installing anything into it — `root:root 0755`, nothing
   below it owned by another user or group/world-writable (symlinks are never
-  followed) — and installs every root-run script with `install -o root`
-  instead of `cp`, which kept the previous owner of an existing file. Unit
+  followed) — and installs every root-run script
+  as new files (unlinked first, then `install -o root`) instead of `cp`, which
+  kept the previous owner of an existing file and rewrote it in place. Unit
   files `deploy.sh` owns are written as regular root-owned files; a symlink in
   their place (the `systemctl link` shape) is replaced instead of written
   through into its target. A symlinked install directory aborts the deploy.
