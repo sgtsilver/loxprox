@@ -177,7 +177,7 @@ jobs:
         run: sudo CI=true bash tests/host-integration.sh cron journald auditd panel-job
 
   logrotate-debian12:
-    name: Host integration — logrotate (Debian 12)
+    name: Host integration — logrotate + cron unit (Debian 12)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -187,9 +187,9 @@ jobs:
           docker run --rm -e CI=true -v "$PWD:/workspace" -w /workspace debian:12 bash -c '
             set -e
             apt-get update -qq
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq logrotate nginx > /dev/null 2>&1
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq logrotate nginx cron > /dev/null 2>&1
             echo "--- stock /etc/logrotate.d/nginx:"; cat /etc/logrotate.d/nginx
-            bash tests/host-integration.sh logrotate
+            bash tests/host-integration.sh logrotate cron-unit
           '
 
   apparmor-nginx:

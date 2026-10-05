@@ -271,6 +271,19 @@ PY
     rm -rf "$base" "$deploy" "$panel_py" "$marker"
 }
 
+# ── Debian 12's cron unit: restarting cron must not kill running jobs ────────
+
+t_cron_unit() {
+    section "cron.service (Debian 12 package) — restart keeps running jobs"
+    local unit=/lib/systemd/system/cron.service
+    [[ -f "$unit" ]] || { fail "$unit missing — install cron first"; return; }
+    if grep -qx 'KillMode=process' "$unit"; then
+        pass "$unit has KillMode=process — deploy.sh's 'systemctl restart cron' leaves running jobs alone"
+    else
+        fail "$unit has no KillMode=process: $(grep -E '^KillMode' "$unit" || echo 'default control-group')"
+    fi
+}
+
 # ── logrotate: Debian 12's logrotate with the stock nginx stanza present ─────
 
 t_logrotate() {
@@ -562,6 +575,7 @@ for s in "$@"; do
         auditd)                    t_auditd ;;
         panel-job)                 t_panel_job ;;
         logrotate)                 t_logrotate ;;
+        cron-unit)                 t_cron_unit ;;
         nginx-apparmor)            t_nginx_apparmor ;;
         nginx-container-setup)     t_nginx_container_setup; exit $? ;;
         nginx-container-test-proxy) t_nginx_container_test_proxy; exit $? ;;
