@@ -162,13 +162,26 @@ sudo bash deploy.sh --remove-tls
 
 ## Log Rotation
 
-Already configured by `deploy.sh` (`setup_logrotate`). Verify it works:
+Already configured by `deploy.sh` (`setup_logrotate`), in two files:
+
+| File | Covers | Policy |
+|------|--------|--------|
+| `/etc/logrotate.d/loxone-nginx` | `/var/log/nginx/loxone-*.log`, `/var/log/nginx/appsec-detections.log` | daily, 14 kept, compressed, nginx reopens its logs (USR1) |
+| `/etc/logrotate.d/loxprox` | `/var/log/loxprox-*.log` (monitor, network + tunnel watchdog, panel, cron jobs, deploy) | weekly or as soon as a file passes 10 MB, 8 kept, compressed, `copytruncate` |
+
+`deploy.sh` also narrows Debian's stock `/etc/logrotate.d/nginx` to
+`access.log` + `error.log`: its `/var/log/nginx/*.log` glob claims the same
+files as `loxone-nginx`, and logrotate then skips a whole file and fails the
+nightly run. Verify the complete configuration — not just one file, because
+the collision only shows when all files are parsed together:
 
 ```bash
-logrotate -d /etc/logrotate.d/loxone-nginx
+logrotate -d /etc/logrotate.conf 2>&1 | grep -iE '^error|duplicate'   # expect no output
+systemctl is-failed logrotate.service                                  # expect "inactive"
 ```
 
-Logs are kept for **14 days** then compressed and rotated out.
+The systemd journal is capped separately at 300 MB
+(`/etc/systemd/journald.conf.d/50-loxprox.conf`; check with `journalctl --disk-usage`).
 
 ---
 
@@ -182,7 +195,7 @@ mkdir -p /root/gateway-backup
 cp /etc/nginx/sites-available/loxone /root/gateway-backup/
 cp /etc/crowdsec/acquis.d/nginx.yaml /root/gateway-backup/
 cp /etc/sysctl.d/99-security-gateway.conf /root/gateway-backup/
-cp /etc/logrotate.d/loxone-nginx /root/gateway-backup/
+cp /etc/logrotate.d/loxone-nginx /etc/logrotate.d/loxprox /root/gateway-backup/
 ```
 
 Also export the Proxmox LXC config from the host:

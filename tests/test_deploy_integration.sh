@@ -73,6 +73,10 @@ export AUDIT_RULES_FILE="$MOCK_ROOT/etc/audit/rules.d/99-gateway.rules"
 export LOXPROX_CRON_FILE="$MOCK_ROOT/etc/cron.d/loxprox"
 export LOXPROX_ALERT_CRON_FILE="$MOCK_ROOT/etc/cron.d/loxprox-alert"
 export LOXPROX_DEPLOY_DIR="$MOCK_ROOT/opt/loxprox/deploy"
+# 2026-10 deploy follow-ups
+export LOXPROX_INSTALL_DIR="$MOCK_ROOT/opt/loxprox"
+export SYSTEMD_UNIT_DIR="$MOCK_ROOT/etc/systemd/system"
+export LOXPROX_STRAY_ACME_HOME="$MOCK_ROOT/stray-acme-home"
 
 mkdir -p "$MOCK_ROOT"/{etc/nginx/sites-available,etc/nginx/sites-enabled,etc/nginx/conf.d,etc/crowdsec/acquis.d,etc/crowdsec/parsers/s02-enrich,etc/sysctl.d,etc/logrotate.d,etc/loxprox,etc/systemd/system,etc/cron.d,opt/loxprox,var/log,root}
 
@@ -80,6 +84,8 @@ mkdir -p "$MOCK_ROOT"/{etc/nginx/sites-available,etc/nginx/sites-enabled,etc/ngi
 systemctl() { true; }
 apt-get() { true; }
 dpkg() { true; }
+# _loxprox_pkg_installed asks dpkg-query; "not installed" → the apt-get mock.
+dpkg-query() { return 1; }
 # v2.3: configure_nginx now ACTS on a failing `nginx -t` (restores the backup
 # and returns 1) instead of ignoring it, so an unmocked/absent nginx binary
 # would silently revert every regeneration under test.
@@ -99,7 +105,7 @@ ip() {
         *) command ip "$@" 2>/dev/null || true ;;
     esac
 }
-export -f systemctl apt-get dpkg nginx hostname ip
+export -f systemctl apt-get dpkg dpkg-query nginx hostname ip
 
 # Source deploy.sh functions (skip main via BASH_SOURCE guard)
 # shellcheck source=../deploy.sh
@@ -134,6 +140,9 @@ AUDIT_RULES_FILE="$MOCK_ROOT/etc/audit/rules.d/99-gateway.rules"
 LOXPROX_CRON_FILE="$MOCK_ROOT/etc/cron.d/loxprox"
 LOXPROX_ALERT_CRON_FILE="$MOCK_ROOT/etc/cron.d/loxprox-alert"
 LOXPROX_DEPLOY_DIR="$MOCK_ROOT/opt/loxprox/deploy"
+LOXPROX_INSTALL_DIR="$MOCK_ROOT/opt/loxprox"
+SYSTEMD_UNIT_DIR="$MOCK_ROOT/etc/systemd/system"
+LOXPROX_STRAY_ACME_HOME="$MOCK_ROOT/stray-acme-home"
 
 # ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -1469,6 +1478,272 @@ test_site_template_v3_upgrade() {
     rm -f "$NGINX_SITE" "$backup_path"
 }
 
+# ── 2026-10 deploy follow-ups ────────────────────────────────────────────────
+
+# Item 1: a pre-existing install dir owned by the SSH login user (production
+# since May) — the deploy copy was refused and the panel stayed broken.
+test_secure_install_dir() {
+    echo ""
+    echo "━━━ _loxprox_secure_install_dir() — pre-existing non-root install dir (2026-10) ━━━"
+
+    local dir="$LOXPROX_INSTALL_DIR"
+    rm -rf "$dir"; mkdir -p "$dir"
+    printf '#!/bin/bash\n' > "$dir/network-watchdog.sh"
+    printf '[Unit]\n' > "$dir/network-watchdog.service"
+    printf 'x\n' > "$dir/outside-target"
+    ln -s "$dir/outside-target" "$dir/a-link"
+    chmod 0775 "$dir"; chmod 0666 "$dir/network-watchdog.service"; chmod 0775 "$dir/network-watchdog.sh"
+
+    local saved_deploy_sh="$LOXPROX_DEPLOY_SH"
+    if [[ $EUID -eq 0 ]]; then
+        # The production state: uid 1000 owns the dir and the hand-copied units.
+        chown 1000:1000 "$dir" "$dir/network-watchdog.service" "$dir/network-watchdog.sh"
+        chmod 0755 "$dir"
+        rm -rf "$LOXPROX_DEPLOY_DIR"
+        install_deploy_source >/dev/null 2>&1 && fail "install_deploy_source accepted a uid-1000 parent (control)" \
+            || pass "control: install_deploy_source refuses the uid-1000 install dir (the live failure)"
+        LOXPROX_DEPLOY_SH="$saved_deploy_sh"
+    fi
+
+    _loxprox_secure_install_dir >/dev/null 2>&1 && pass "secure_install_dir returns 0" || fail "secure_install_dir failed"
+    [[ "$(stat -c %a "$dir")" == "755" ]] && pass "install dir is 0755" || fail "install dir mode $(stat -c %a "$dir")"
+    [[ "$(stat -c %a "$dir/network-watchdog.service")" == "644" ]] && pass "group/world write bit dropped (0666 → 0644)" \
+        || fail "file mode $(stat -c %a "$dir/network-watchdog.service")"
+    [[ "$(stat -c %a "$dir/network-watchdog.sh")" == "755" ]] && pass "executable kept, group write dropped (0775 → 0755)" \
+        || fail "script mode $(stat -c %a "$dir/network-watchdog.sh")"
+    [[ -L "$dir/a-link" ]] && pass "symlinks are left alone (never followed)" || fail "symlink was replaced"
+
+    if [[ $EUID -eq 0 ]]; then
+        local owners
+        owners=$(find "$dir" -xdev -printf '%u:%g\n' | sort -u | tr '\n' ' ')
+        [[ "$owners" == "root:root " ]] && pass "install dir and everything in it now root:root" || fail "owners after normalising: $owners"
+        rm -rf "$LOXPROX_DEPLOY_DIR"
+        install_deploy_source >/dev/null 2>&1 && pass "install_deploy_source succeeds on the normalised dir" \
+            || fail "install_deploy_source still refuses"
+        [[ "$LOXPROX_DEPLOY_SH" == "$LOXPROX_DEPLOY_DIR/deploy.sh" ]] && pass "config.env path → persisted copy" \
+            || fail "LOXPROX_DEPLOY_SH=$LOXPROX_DEPLOY_SH"
+        LOXPROX_DEPLOY_SH="$saved_deploy_sh"
+    else
+        pass "(not root — ownership part runs in the Debian 12 root container job)"
+    fi
+
+    # A symlinked install dir is refused outright.
+    local real="$MOCK_ROOT/opt/loxprox-real"
+    rm -rf "$dir" "$real"; mkdir -p "$real"; ln -s "$real" "$dir"
+    _loxprox_secure_install_dir >/dev/null 2>&1 && fail "symlinked install dir accepted" || pass "symlinked install dir refused"
+    rm -f "$dir"; rm -rf "$real"; mkdir -p "$dir"
+
+    grep -qE '^[[:space:]]*_loxprox_secure_install_dir \|\| \{' "$PROJECT_DIR/deploy.sh" \
+        && pass "main() secures the install dir before installing into it" || fail "main() does not call _loxprox_secure_install_dir"
+}
+
+# Item 1: unit files deploy.sh owns are real root-owned files — never written
+# through a symlink (cp follows one into its target).
+test_unit_symlink_replaced() {
+    echo ""
+    echo "━━━ _loxprox_install_unit_file() — symlinked unit (2026-10) ━━━"
+
+    mkdir -p "$SYSTEMD_UNIT_DIR" "$LOXPROX_INSTALL_DIR"
+    local target="$LOXPROX_INSTALL_DIR/network-watchdog.service" dst="$SYSTEMD_UNIT_DIR/network-watchdog.service"
+    local src="$PROJECT_DIR/security-monitoring/network-watchdog.service"
+    printf 'OLD-USER-OWNED-COPY\n' > "$target"
+    ln -sfn "$target" "$dst"
+
+    # Control: what plain `cp` (the old code) does to a symlinked unit.
+    local probe="$MOCK_ROOT/cp-probe.service"
+    printf 'OLD\n' > "$MOCK_ROOT/cp-probe-target"; ln -sfn "$MOCK_ROOT/cp-probe-target" "$probe"
+    cp "$src" "$probe"
+    [[ -L "$probe" ]] && cmp -s "$src" "$MOCK_ROOT/cp-probe-target" \
+        && pass "control: cp writes through the symlink into its target" || fail "control: cp did not write through"
+
+    _loxprox_install_unit_file "$src" network-watchdog.service >/dev/null 2>&1
+    [[ -f "$dst" && ! -L "$dst" ]] && pass "unit is a regular file now" || fail "unit is still a symlink"
+    cmp -s "$src" "$dst" && pass "unit content = repo unit" || fail "unit content differs"
+    grep -qx 'OLD-USER-OWNED-COPY' "$target" && pass "the old link target was not written through" || fail "link target modified"
+    [[ "$(stat -c %a "$dst")" == "644" ]] && pass "unit mode 0644" || fail "unit mode $(stat -c %a "$dst")"
+
+    # setup_network_watchdog end to end with the mock paths.
+    ln -sfn "$target" "$dst"
+    printf 'stale\n' > "$LOXPROX_INSTALL_DIR/network-watchdog.sh"
+    local inode_before
+    inode_before=$(stat -c %i "$LOXPROX_INSTALL_DIR/network-watchdog.sh")
+    setup_network_watchdog >/dev/null 2>&1
+    [[ -f "$dst" && ! -L "$dst" ]] && pass "setup_network_watchdog replaces a symlinked unit" || fail "setup_network_watchdog kept the symlink"
+    cmp -s "$PROJECT_DIR/security-monitoring/network-watchdog.sh" "$LOXPROX_INSTALL_DIR/network-watchdog.sh" \
+        && pass "watchdog script refreshed" || fail "watchdog script not refreshed"
+    [[ "$(stat -c %i "$LOXPROX_INSTALL_DIR/network-watchdog.sh")" != "$inode_before" ]] \
+        && pass "script replaced (new inode → new owner), not overwritten in place like cp did" \
+        || fail "script overwritten in place (keeps the old owner)"
+    if [[ $EUID -eq 0 ]]; then
+        [[ "$(stat -c %U "$LOXPROX_INSTALL_DIR/network-watchdog.sh")" == "root" ]] && pass "installed script owned by root" \
+            || fail "installed script owner $(stat -c %U "$LOXPROX_INSTALL_DIR/network-watchdog.sh")"
+    fi
+    rm -f "$probe" "$MOCK_ROOT/cp-probe-target"
+}
+
+# Item 2: every acme.sh call names its home — never $HOME-relative.
+test_acme_home_everywhere() {
+    echo ""
+    echo "━━━ acme.sh --home on every call (2026-10) ━━━"
+
+    local saved_home="$ACME_HOME" saved_tls_dir="$LOXPROX_TLS_DIR" saved_acme_conf="$NGINX_ACME_CONF"
+    ACME_HOME="$MOCK_ROOT/acme-home-check"
+    LOXPROX_TLS_DIR="$MOCK_ROOT/etc/loxprox/tls"
+    mkdir -p "$ACME_HOME" "$LOXPROX_TLS_DIR"
+    local calls="$MOCK_ROOT/acme.calls"
+    : > "$calls"
+    cat > "$ACME_HOME/acme.sh" <<MOCK
+#!/bin/bash
+# Records every call; a call without "--home $ACME_HOME" is the regression.
+printf '%s\\n' "\$*" >> "$calls"
+prev=""
+for a in "\$@"; do
+    [[ "\$prev" == "--home" && "\$a" == "$ACME_HOME" ]] && exit 0
+    prev="\$a"
+done
+echo "NO --home" >> "$calls"
+exit 9
+MOCK
+    chmod +x "$ACME_HOME/acme.sh"
+    crontab() { return 1; }
+
+    TLS_DOMAIN="loxprox.example.com"; TLS_ACME_SERVER="letsencrypt"; TLS_ACME_FALLBACK_SERVER=""
+    ACME_WEBROOT="$MOCK_ROOT/var/www/acme"; mkdir -p "$ACME_WEBROOT"
+    HOME=/ _loxprox_acme_issue >/dev/null 2>&1
+    HOME=/ _loxprox_acme_install_cert >/dev/null 2>&1
+    HOME=/ _loxprox_ensure_acme_cron >/dev/null 2>&1
+    HOME=/ _loxprox_tls_renew >/dev/null 2>&1
+    NGINX_ACME_CONF="$MOCK_ROOT/etc/nginx/conf.d/loxprox-acme.conf"; touch "$NGINX_ACME_CONF"
+    HOME=/ ENABLE_TLS=false setup_tls >/dev/null 2>&1
+    HOME=/ _loxprox_tls_remove >/dev/null 2>&1
+
+    local op
+    for op in --issue --install-cert --install-cronjob --renew --remove --uninstall; do
+        grep -q -- "^$op " "$calls" && pass "acme.sh $op was called" || fail "acme.sh $op not exercised: $(tr '\n' ';' < "$calls")"
+    done
+    if grep -q 'NO --home' "$calls"; then
+        fail "acme.sh called without --home $ACME_HOME: $(grep -B1 'NO --home' "$calls" | tr '\n' ';')"
+    else
+        pass "all $(grep -vc 'NO --home' "$calls") acme.sh calls carry --home $ACME_HOME (HOME=/ in the caller)"
+    fi
+
+    unset -f crontab
+    ACME_HOME="$saved_home"; LOXPROX_TLS_DIR="$saved_tls_dir"; NGINX_ACME_CONF="$saved_acme_conf"
+    TLS_DOMAIN=""; TLS_ACME_FALLBACK_SERVER="zerossl"
+}
+
+# Item 2: stray /.acme.sh from a HOME-less run is named, not silently ignored.
+test_stray_acme_home_warning() {
+    echo ""
+    echo "━━━ stray acme.sh home warning (2026-10) ━━━"
+    local out
+    rm -rf "$LOXPROX_STRAY_ACME_HOME"
+    out=$(_loxprox_warn_stray_acme_home 2>&1)
+    [[ -z "$out" ]] && pass "no stray home → silent" || fail "warned without a stray home: $out"
+    mkdir -p "$LOXPROX_STRAY_ACME_HOME"
+    out=$(_loxprox_warn_stray_acme_home 2>&1)
+    grep -q "Stray acme.sh state at $LOXPROX_STRAY_ACME_HOME" <<<"$out" && pass "stray home named with removal advice" || fail "no warning: $out"
+    [[ -d "$LOXPROX_STRAY_ACME_HOME" ]] && pass "stray home left in place (key material is the operator's call)" || fail "stray home deleted"
+    rm -rf "$LOXPROX_STRAY_ACME_HOME"
+}
+
+# Items 2 + 3: deploy.sh never runs with the launcher's umask or without HOME.
+test_umask_and_home() {
+    echo ""
+    echo "━━━ umask 022 + HOME at deploy.sh start (2026-10) ━━━"
+    local out
+    out=$(umask 077; unset HOME; bash -c 'source "$1" >/dev/null 2>&1; umask; printf "HOME=%s\n" "${HOME:-<unset>}"' _ "$PROJECT_DIR/deploy.sh")
+    grep -qx '0022' <<<"$out" && pass "inherited umask 077 → deploy.sh runs with 0022" || fail "umask after sourcing: $out"
+    if [[ $EUID -eq 0 ]]; then
+        grep -qx 'HOME=/root' <<<"$out" && pass "root without HOME → HOME=/root" || fail "HOME after sourcing as root: $out"
+        out=$(HOME=/ bash -c 'source "$1" >/dev/null 2>&1; printf "HOME=%s\n" "$HOME"' _ "$PROJECT_DIR/deploy.sh")
+        grep -qx 'HOME=/root' <<<"$out" && pass "root with HOME=/ → HOME=/root" || fail "HOME=/ not corrected: $out"
+    else
+        grep -qx 'HOME=<unset>' <<<"$out" && pass "non-root: HOME left alone" || fail "non-root HOME changed: $out"
+    fi
+    out=$(HOME=/srv/custom bash -c 'source "$1" >/dev/null 2>&1; printf "%s" "$HOME"' _ "$PROJECT_DIR/deploy.sh")
+    [[ "$out" == "/srv/custom" ]] && pass "an existing HOME is kept" || fail "existing HOME overwritten: $out"
+}
+
+# Item 3: directories deploy.sh owns get their mode even if they exist 0700.
+test_dir_modes_with_inherited_umask() {
+    echo ""
+    echo "━━━ explicit dir modes under umask 077 (2026-10) ━━━"
+    local d
+    d=$(dirname "$JOURNALD_DROPIN")
+    rm -rf "$d"; mkdir -p "$d"; chmod 0700 "$d"; rm -f "$JOURNALD_DROPIN"
+    systemctl() { true; }
+    ( umask 077; setup_journald >/dev/null 2>&1 )
+    [[ "$(stat -c %a "$d")" == "755" ]] && pass "existing 0700 journald.conf.d corrected to 0755" || fail "dir mode $(stat -c %a "$d")"
+    [[ "$(stat -c %a "$JOURNALD_DROPIN")" == "644" ]] && pass "drop-in 0644 under umask 077" || fail "drop-in mode $(stat -c %a "$JOURNALD_DROPIN")"
+    chmod 0700 "$d"
+    ( umask 077; setup_journald >/dev/null 2>&1 )
+    [[ "$(stat -c %a "$d")" == "755" ]] && pass "also corrected when the drop-in is already current (no-restart path)" || fail "no-restart path left $(stat -c %a "$d")"
+    local fresh="$MOCK_ROOT/fresh-dir/sub"
+    ( umask 077; _loxprox_mkdir_mode 0755 "$fresh" )
+    [[ "$(stat -c %a "$fresh")" == "755" ]] && pass "_loxprox_mkdir_mode creates 0755 under umask 077" || fail "fresh dir mode $(stat -c %a "$fresh")"
+    local mkdirs
+    mkdirs=$(grep -nE 'mkdir -p (/etc/nftables\.d|/etc/systemd/system/[a-z.-]+\.d)' "$PROJECT_DIR/deploy.sh" || true)
+    [[ -z "$mkdirs" ]] && pass "deploy.sh's drop-in dirs are created with an explicit mode" || fail "plain mkdir -p left: $mkdirs"
+}
+
+# Item 4: panel unit — no stop-ordering behind nginx, bounded stop.
+test_gui_unit_stop_behaviour() {
+    echo ""
+    echo "━━━ loxprox-gui.service ordering + stop timeout (2026-10) ━━━"
+    rm -f "$GUI_UNIT"
+    _loxprox_write_gui_unit
+    grep -q '^After=network.target$' "$GUI_UNIT" && pass "After=network.target only" || fail "After= line: $(grep '^After=' "$GUI_UNIT")"
+    if grep -vE '^#' "$GUI_UNIT" | grep -q 'nginx\.service'; then fail "panel unit still ordered against nginx"; else pass "no ordering against nginx (nginx's stop no longer waits for the panel)"; fi
+    grep -q '^TimeoutStopSec=10$' "$GUI_UNIT" && pass "TimeoutStopSec=10" || fail "TimeoutStopSec missing"
+}
+
+# Item 5: package checks without `dpkg -l | grep -q`.
+test_pkg_installed_helper() {
+    echo ""
+    echo "━━━ _loxprox_pkg_installed() (2026-10) ━━━"
+    dpkg-query() { [[ "$*" == *" nginx" ]] && printf 'install ok installed'; return 0; }
+    _loxprox_pkg_installed nginx && pass "installed package detected" || fail "installed package missed"
+    _loxprox_pkg_installed qrencode && fail "absent package reported installed" || pass "absent package not installed"
+    dpkg-query() { return 1; }
+    local left
+    left=$(grep -nE '^[^#]*dpkg -l \|' "$PROJECT_DIR/deploy.sh" || true)
+    [[ -z "$left" ]] && pass "no 'dpkg -l | grep' left in deploy.sh" || fail "left: $left"
+}
+
+# Item 5: test-gateway.sh reads AppSec / acquisition counters exactly.
+test_gateway_metric_readers() {
+    echo ""
+    echo "━━━ test-gateway.sh counter readers (2026-10) ━━━"
+    if ! command -v jq >/dev/null 2>&1; then
+        pass "(jq not installed here — JSON path skipped)"
+    fi
+    local out
+    # The old reader: field 2 of a cscli table row is the engine NAME.
+    out=$(printf '%s\n' '│ appsec-loxone   │ 1.23k     │ 5       │' | awk '/appsec-loxone/ {print $2}')
+    [[ "$out" == "appsec-loxone" ]] && pass "control: the old awk \$2 read the engine name, not a count" || fail "control: got '$out'"
+
+    out=$( (source "$PROJECT_DIR/test-gateway.sh"
+            cscli() { [[ "$*" == "metrics -o json" ]] && printf '%s' '{"appsec-engine":{"appsec-loxone":{"processed":1234,"blocked":5}},"acquisition":{"file:/var/log/nginx/loxone-access.log":{"reads":987,"parsed":980}}}'; }
+            curl() { return 7; }
+            printf '%s|%s' "$(_appsec_processed)" "$(_nginx_lines_read)") 2>&1)
+    if command -v jq >/dev/null 2>&1; then
+        [[ "$out" == "1234|987" ]] && pass "JSON: exact AppSec + access-log counts" || fail "JSON readers: $out"
+    fi
+    out=$( (source "$PROJECT_DIR/test-gateway.sh"
+            cscli() { return 1; }
+            curl() { printf '%s\n' '# TYPE cs_appsec_reqs_total counter' \
+                       'cs_appsec_reqs_total{appsec_engine="appsec-loxone",source="127.0.0.1"} 41' \
+                       'cs_appsec_reqs_total{appsec_engine="appsec-loxone",source="10.0.0.9"} 1' \
+                       'cs_filesource_hits_total{source="/var/log/nginx/loxone-access.log"} 77' \
+                       'cs_filesource_hits_total{source="/var/log/auth.log"} 5'; }
+            printf '%s|%s' "$(_appsec_processed)" "$(_nginx_lines_read)") 2>&1)
+    [[ "$out" == "42|77" ]] && pass "Prometheus fallback: exact sums" || fail "Prometheus readers: $out"
+    out=$( (source "$PROJECT_DIR/test-gateway.sh"; cscli() { return 1; }; curl() { return 7; }
+            printf '[%s]' "$(_appsec_processed)") 2>&1)
+    [[ "$out" == "[]" ]] && pass "no source → empty (reported as unreadable, never as 0)" || fail "unreadable case: $out"
+}
+
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 
 cleanup() {
@@ -1529,6 +1804,17 @@ test_setup_journald
 test_setup_auditd
 test_install_deploy_source
 test_site_template_v3_upgrade
+
+# 2026-10 deploy follow-ups
+test_secure_install_dir
+test_unit_symlink_replaced
+test_acme_home_everywhere
+test_stray_acme_home_warning
+test_umask_and_home
+test_dir_modes_with_inherited_umask
+test_gui_unit_stop_behaviour
+test_pkg_installed_helper
+test_gateway_metric_readers
 
 echo ""
 echo "═══════════════════════════════════════════════════════════════════════════════"

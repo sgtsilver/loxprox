@@ -208,6 +208,7 @@ t_panel_job() {
     cat > "$deploy" <<'EOF'
 #!/bin/bash
 echo "deploy: started"
+echo "deploy: HOME=${HOME:-<unset>} umask=$(umask)"
 sleep 6
 echo "deploy: still alive after the panel unit was stopped"
 touch /tmp/loxprox-ci-job-saw-host-tmp
@@ -257,6 +258,11 @@ PY
         || fail "systemd-run job state after the panel stop: $st"
     grep -q 'still alive after the panel unit was stopped' <<<"$log" \
         && pass "the deploy kept running past the panel stop (full log)" || fail "deploy log incomplete: $log"
+    # 2026-10: the transient unit has no HOME of its own — acme.sh then used
+    # /.acme.sh. The runner passes --setenv=HOME=/root and UMask=0022.
+    grep -q 'deploy: HOME=/root umask=0022' <<<"$log" \
+        && pass "the job ran with HOME=/root and umask 0022 (panel unit itself has no HOME)" \
+        || fail "job environment: $(grep 'deploy: HOME' <<<"$log")"
     [[ -e "$marker" ]] && pass "the job wrote to the host /tmp, not the panel's PrivateTmp" \
                        || fail "job did not see the host /tmp"
     # Control — the pre-fix launch (a child process of the panel): killed with
@@ -269,6 +275,103 @@ PY
         fail "control did not reproduce the kill: $st"
     fi
     rm -rf "$base" "$deploy" "$panel_py" "$marker"
+}
+
+# ── install dir owned by the SSH user (production since May) ────────────────
+
+t_install_dir() {
+    section "install dir — pre-existing /opt/loxprox owned by a login user, symlinked unit"
+    local user=loxprox-ci-login dir="$LOXPROX_INSTALL_DIR" unit=loxprox-ci-probe.service
+    id "$user" >/dev/null 2>&1 || useradd -m "$user"
+    rm -rf "${dir:?}" "${SYSTEMD_UNIT_DIR:?}/${unit:?}"
+    install -d -m 0755 -o "$user" -g "$user" "$dir"
+    printf '[Unit]\nDescription=hand-copied\n' > "$dir/$unit"
+    printf '#!/bin/bash\n' > "$dir/network-watchdog.sh"
+    chown "$user:$user" "$dir/$unit" "$dir/network-watchdog.sh"
+    ln -s "$dir/$unit" "$SYSTEMD_UNIT_DIR/$unit"     # the `systemctl link` shape
+
+    local saved_sh="$LOXPROX_DEPLOY_SH"
+    install_deploy_source >/dev/null 2>&1 \
+        && fail "control: install_deploy_source accepted a dir owned by $user" \
+        || pass "control: install_deploy_source refuses a dir owned by $user (the live failure)"
+    LOXPROX_DEPLOY_SH="$saved_sh"
+
+    _loxprox_secure_install_dir >/dev/null 2>&1 && pass "secure_install_dir returns 0" || fail "secure_install_dir failed"
+    [[ "$(stat -c '%U:%G %a' "$dir")" == "root:root 755" ]] && pass "$dir → root:root 755" \
+        || fail "$dir is $(stat -c '%U:%G %a' "$dir")"
+    local strays
+    strays=$(find "$dir" -xdev \( ! -user 0 -o ! -group 0 -o ! -type l -perm /022 \) -printf '%u %m %p\n')
+    [[ -z "$strays" ]] && pass "nothing under $dir owned by $user or writable by others" || fail "left: $strays"
+
+    sudo -u "$user" sh -c "echo pwned >> '$dir/$unit'" 2>/dev/null \
+        && fail "$user can still write the unit target" || pass "$user can no longer write into $dir"
+
+    install_deploy_source >/dev/null 2>&1 && pass "install_deploy_source succeeds afterwards" || fail "install_deploy_source still refuses"
+    [[ "$(stat -c '%U:%G %a' "$LOXPROX_DEPLOY_DIR")" == "root:root 750" ]] && pass "$LOXPROX_DEPLOY_DIR → root:root 750" \
+        || fail "$LOXPROX_DEPLOY_DIR is $(stat -c '%U:%G %a' "$LOXPROX_DEPLOY_DIR" 2>&1)"
+    LOXPROX_DEPLOY_SH="$saved_sh"
+
+    _loxprox_install_unit_file "$REPO/security-monitoring/network-watchdog.timer" "$unit" >/dev/null 2>&1
+    [[ -f "$SYSTEMD_UNIT_DIR/$unit" && ! -L "$SYSTEMD_UNIT_DIR/$unit" ]] \
+        && pass "symlinked unit replaced by a regular file" || fail "unit is still a symlink"
+    [[ "$(stat -c '%U %a' "$SYSTEMD_UNIT_DIR/$unit")" == "root 644" ]] && pass "unit root 0644" \
+        || fail "unit is $(stat -c '%U %a' "$SYSTEMD_UNIT_DIR/$unit")"
+    grep -q 'hand-copied' "$dir/$unit" && pass "old link target not written through" || fail "link target overwritten"
+
+    rm -rf "${dir:?}" "${SYSTEMD_UNIT_DIR:?}/${unit:?}"
+    systemctl daemon-reload
+}
+
+# ── launch environment: systemd-run without HOME, umask 077 ──────────────────
+
+t_launch_env() {
+    section "launch env — deploy.sh under systemd-run (no HOME, UMask=0077)"
+    local out probe=/run/loxprox-ci-mode-probe
+    rm -rf "$probe"
+    out=$(systemd-run --quiet --wait --pipe --collect --property=UMask=0077 \
+        /bin/bash -c "printf 'launcher umask=%s HOME=%s\n' \"\$(umask)\" \"\${HOME:-<unset>}\"
+                      source '$REPO/deploy.sh' >/dev/null 2>&1
+                      printf 'deploy umask=%s HOME=%s\n' \"\$(umask)\" \"\$HOME\"
+                      umask 077; _loxprox_mkdir_mode 0755 '$probe'" 2>&1)
+    note "${out//$'\n'/ | }"
+    grep -q 'launcher umask=0077 HOME=<unset>' <<<"$out" && pass "reproduced the launch: umask 0077, no HOME" \
+        || fail "launcher environment not as expected"
+    grep -q 'deploy umask=0022 HOME=/root' <<<"$out" && pass "deploy.sh normalises to umask 0022, HOME=/root" \
+        || fail "deploy.sh environment not normalised"
+    [[ "$(stat -c %a "$probe" 2>/dev/null)" == "755" ]] && pass "owned dir created 0755 even under umask 077" \
+        || fail "probe dir mode $(stat -c %a "$probe" 2>&1)"
+    rm -rf "$probe"
+}
+
+# ── panel stop: the real panel under systemd exits on SIGTERM ────────────────
+
+t_panel_stop() {
+    section "panel stop — real loxprox-gui.py under systemd, systemctl stop"
+    local d=/var/lib/loxprox-ci-panel unit=loxprox-ci-gui port=18181
+    rm -rf "$d"; mkdir -p "$d"
+    printf 'ENABLE_GUI="true"\nGUI_PORT="%s"\n' "$port" > "$d/deploy.conf"
+    systemctl stop "$unit" 2>/dev/null
+    systemd-run --quiet --unit "$unit" --property=TimeoutStopSec=60 \
+        --setenv=LOXPROX_DEPLOY_CONF="$d/deploy.conf" --setenv=LOXPROX_RUNTIME_CONF="$d/config.env" \
+        --setenv=LOXPROX_STATE_DIR="$d/state" /usr/bin/python3 "$REPO/gui/loxprox-gui.py"
+    local i
+    for i in $(seq 1 30); do
+        curl -s -o /dev/null "http://127.0.0.1:$port/" && break
+        sleep 0.5
+    done
+    curl -s -o /dev/null "http://127.0.0.1:$port/" && pass "panel up on :$port" || { fail "panel did not start"; return; }
+    local t0 t1 result
+    t0=$(date +%s.%N)
+    systemctl stop "$unit"
+    t1=$(date +%s.%N)
+    result=$(journalctl -u "$unit" -o cat --no-pager -q | grep -cE 'State .stop-sigterm. timed out|Killing process|SIGKILL' || true)
+    awk -v a="$t0" -v b="$t1" 'BEGIN {exit !((b - a) < 5)}' \
+        && pass "systemctl stop took $(awk -v a="$t0" -v b="$t1" 'BEGIN {printf "%.1f", b - a}') s (was ~90 s + SIGKILL)" \
+        || fail "systemctl stop took $(awk -v a="$t0" -v b="$t1" 'BEGIN {printf "%.1f", b - a}') s"
+    [[ "$result" == "0" ]] && pass "no stop timeout / SIGKILL in the unit's journal" || fail "stop escalated to SIGKILL"
+    journalctl -u "$unit" -o cat --no-pager -q | grep -q 'LoxProx Panel stopped.' \
+        && pass "panel logged a clean exit" || fail "no clean-exit line in the journal"
+    rm -rf "$d"
 }
 
 # ── Debian 12's cron unit: restarting cron must not kill running jobs ────────
@@ -574,6 +677,9 @@ for s in "$@"; do
         journald)                  t_journald ;;
         auditd)                    t_auditd ;;
         panel-job)                 t_panel_job ;;
+        install-dir)               t_install_dir ;;
+        launch-env)                t_launch_env ;;
+        panel-stop)                t_panel_stop ;;
         logrotate)                 t_logrotate ;;
         cron-unit)                 t_cron_unit ;;
         nginx-apparmor)            t_nginx_apparmor ;;

@@ -124,13 +124,16 @@ if is_circuit_open; then
 fi
 
 # Send to Discord with retry logic
+# The status code is captured and compared, not piped into `grep -q`: under
+# pipefail a reader that exits early can turn a delivered alert into a retry.
 for attempt in 1 2 3; do
-    if curl -s -o /dev/null -w "%{http_code}" \
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
         -H "Content-Type: application/json" \
         -d "$PAYLOAD" \
         --connect-timeout 10 \
         --max-time 15 \
-        "$WEBHOOK_URL" | grep -q "^20[0-9]$"; then
+        "$WEBHOOK_URL") || http_code=""
+    if [[ "$http_code" =~ ^20[0-9]$ ]]; then
         clear_circuit
         exit 0
     fi

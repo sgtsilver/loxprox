@@ -88,6 +88,10 @@ def test_job_runs_as_its_own_transient_unit(tmp_path, fake_systemd_run):
         argv = args_file.read_text().splitlines() if args_file.exists() else []
     assert argv[:2] == ["--unit", f"loxprox-job-{job_id}"]
     assert "--collect" in argv
+    # 2026-10: a transient unit has no HOME — acme.sh then used /.acme.sh.
+    i = argv.index("/bin/bash")
+    assert "--setenv=HOME=/root" in argv[:i], argv
+    assert "--property=UMask=0022" in argv[:i], argv
     i = argv.index("/bin/bash")
     assert argv[i + 1] == "-c"
     assert argv[-2:] == ["bash", deploy], "deploy command passed through as argv"

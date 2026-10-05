@@ -162,7 +162,7 @@ jobs:
   # without CI=true). They prove what the portable suite can only mock.
 
   host-services:
-    name: Host integration — cron, journald, auditd, panel jobs
+    name: Host integration — cron, journald, auditd, panel, install dir
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -173,8 +173,8 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq cron auditd jq >/dev/null
           systemctl --no-pager --quiet is-active cron auditd systemd-journald
 
-      - name: cron / journald / auditd / panel jobs against the real daemons
-        run: sudo CI=true bash tests/host-integration.sh cron journald auditd panel-job
+      - name: cron / journald / auditd / panel / install dir against the real daemons
+        run: sudo CI=true bash tests/host-integration.sh cron journald auditd panel-job install-dir launch-env panel-stop
 
   logrotate-debian12:
     name: Host integration — logrotate + cron unit (Debian 12)

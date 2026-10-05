@@ -19,6 +19,23 @@
 
 set -euo pipefail
 
+# 2026-10: never inherit the launcher's umask. A deploy started with umask 077
+# created /etc/systemd/journald.conf.d as 0700 and would leave files such as
+# acme.sh's HTTP-01 challenge unreadable for nginx's worker. Modes that must be
+# tighter than 022 are set explicitly where the file is written.
+umask 022
+
+# 2026-10: a root run without HOME (a systemd-run transient unit, which is
+# also how the Panel launches apply / renew) made acme.sh fall back to
+# /.acme.sh: a second ACME account and a certificate issued outside
+# /root/.acme.sh. Every acme.sh call passes --home now; this keeps every other
+# tool that resolves "~" honest too.
+if [[ $EUID -eq 0 && ( -z "${HOME:-}" || "${HOME:-}" == "/" ) ]]; then
+    HOME=$(awk -F: '$3 == 0 && !n++ {print $6}' /etc/passwd 2>/dev/null) || HOME=""
+    [[ -n "$HOME" && "$HOME" != "/" ]] || HOME=/root
+    export HOME
+fi
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CONFIGURATION
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -115,6 +132,10 @@ LOXPROX_DEPLOY_SH="${LOXPROX_DEPLOY_SH:-$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]
 # (setup_tmp_mount) loses on the next reboot — and the panel runs with
 # PrivateTmp, so it never saw that directory in the first place.
 LOXPROX_DEPLOY_DIR="${LOXPROX_DEPLOY_DIR:-/opt/loxprox/deploy}"
+# 2026-10: the install dir every root-run LoxProx script lives in, and the
+# systemd unit dir deploy.sh writes its units to (overridable for tests).
+LOXPROX_INSTALL_DIR="${LOXPROX_INSTALL_DIR:-/opt/loxprox}"
+SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
 NGINX_SITE="${NGINX_SITE:-/etc/nginx/sites-available/loxone}"
 NGINX_ENABLED="${NGINX_ENABLED:-/etc/nginx/sites-enabled/loxone}"
 CROWDSEC_NGINX_ACQUIS="${CROWDSEC_NGINX_ACQUIS:-/etc/crowdsec/acquis.d/nginx.yaml}"
@@ -203,6 +224,16 @@ banner() {
 check_root()    { [[ $EUID -eq 0 ]] || { error "Run as root."; exit 1; }; }
 service_active(){ systemctl is-active --quiet "$1" 2>/dev/null; }
 
+# 2026-10 — pipefail rule for this script: never pipe into a reader that can
+# exit before its writer is done (`grep -q`, `grep -m`, `head`, `awk …exit`).
+# The writer then dies of SIGPIPE, the pipeline returns 141 and a match reads
+# as a miss (`dpkg -l | grep -q pkg` "found" nothing and re-ran apt-get).
+# Capture first and match the captured text. tests/test_ops_configs.py
+# enforces this for every shipped pipefail script.
+_loxprox_pkg_installed() {
+    [[ "$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null)" == "install ok installed" ]]
+}
+
 # ─── Degraded-mode step wrapper (v2.3) ───────────────────────────────────────
 #
 # Core proxy configuration (preflight, sysctls, firewall, nginx, CrowdSec
@@ -247,6 +278,92 @@ backup_file() {
     printf '%s\n' "$1" >> "$BACKUP_DIR/manifest.txt"
     info "Backed up: $1"
     return 0
+}
+
+# ─── Install-dir + unit-file hygiene (2026-10) ───────────────────────────────
+#
+# Everything under $LOXPROX_INSTALL_DIR runs as root (cron jobs, timers, the
+# panel, the persisted deploy source). On the production gateway the directory
+# had been created by hand before deploy.sh managed it — owned by the SSH login
+# user (uid 1000) — and two hand-copied unit files in it were too. deploy.sh's
+# `cp` onto an existing file keeps that owner, so a non-root user could have
+# rewritten root-run code; install_deploy_source rightly refused the directory.
+# Normalise once per run, before anything is installed there: the directory is
+# root:root 0755, nothing below it is owned by another user or writable by
+# group/other. Symlinks are never followed (find -xdev, chown -h).
+_loxprox_secure_install_dir() {
+    local dir="$LOXPROX_INSTALL_DIR"
+    if [[ -L "$dir" ]]; then
+        error "$dir is a symlink — refusing to install root-run code through it."
+        return 1
+    fi
+    if [[ -e "$dir" && ! -d "$dir" ]]; then
+        error "$dir exists but is not a directory."
+        return 1
+    fi
+    local before=""
+    [[ -d "$dir" ]] && before=$(stat -c '%U:%G %a' "$dir" 2>/dev/null)
+    install -d -m 0755 "$dir" && chmod 0755 "$dir" || { error "Cannot create/chmod $dir."; return 1; }
+
+    local -a bad_pred=( ! -type l -perm /022 )
+    if [[ $EUID -eq 0 ]]; then
+        chown root:root "$dir" || { error "chown root:root $dir failed."; return 1; }
+        bad_pred=( \( ! -user 0 -o ! -group 0 -o ! -type l -perm /022 \) )
+    fi
+    if [[ -n "$before" && "$before" != "root:root 755" && $EUID -eq 0 ]]; then
+        warn "$dir was $before — reset to root:root 0755 (it holds root-run code)."
+    fi
+    local bad
+    bad=$(find "$dir" -xdev -mindepth 1 "${bad_pred[@]}" -printf '%u:%g %m %p\n' 2>/dev/null) || true
+    [[ -n "$bad" ]] || return 0
+    warn "Entries under $dir writable or owned by a non-root user — fixing:"
+    local line
+    while IFS= read -r line; do warn "  $line"; done <<<"$bad"
+    if [[ $EUID -eq 0 ]]; then
+        find "$dir" -xdev -mindepth 1 \( ! -user 0 -o ! -group 0 \) -exec chown -h root:root {} + \
+            || { error "chown under $dir failed."; return 1; }
+    fi
+    find "$dir" -xdev -mindepth 1 ! -type l -perm /022 -exec chmod go-w {} + \
+        || { error "chmod under $dir failed."; return 1; }
+    return 0
+}
+
+# Installs a systemd unit file deploy.sh owns as a regular root-owned 0644
+# file. `cp`/`cat >` onto an existing SYMLINK write through it into the link
+# target — for a unit once added with `systemctl link` from a user-writable
+# place, that keeps the root-run unit editable by that user. The link is
+# replaced by a real file instead (enable/wants symlinks keep working).
+_loxprox_unlink_unit_symlink() {
+    local dst="$1"
+    if [[ -L "$dst" ]]; then
+        warn "$dst was a symlink to $(readlink "$dst") — replacing it with a root-owned file."
+        rm -f "$dst"
+    fi
+}
+
+# 2026-10: directories deploy.sh owns get an explicit mode — `mkdir -p`
+# leaves an existing directory as it is, so one created 0700 under an
+# inherited umask 077 (journald.conf.d on the production gateway) would stay
+# unreadable for non-root tools forever. `install -d -m` creates it with the
+# mode; the chmod also corrects one that already exists.
+_loxprox_mkdir_mode() {
+    local mode="$1" dir="$2"
+    install -d -m "$mode" "$dir" && chmod "$mode" "$dir"
+}
+
+# Installs a root-run script into the install dir. `install` replaces the
+# destination (new inode, root:root) — unlike `cp`, which keeps the owner of
+# an existing file.
+_loxprox_install_script() {
+    local src="$1" dst="$2"
+    install -m 0755 -o root -g root "$src" "$dst" 2>/dev/null || install -m 0755 "$src" "$dst"
+}
+
+_loxprox_install_unit_file() {
+    local src="$1" dst="$SYSTEMD_UNIT_DIR/$2"
+    mkdir -p "$SYSTEMD_UNIT_DIR"
+    _loxprox_unlink_unit_symlink "$dst"
+    install -m 0644 -o root -g root "$src" "$dst" 2>/dev/null || install -m 0644 "$src" "$dst"
 }
 
 validate_ip() {
@@ -393,7 +510,7 @@ _loxprox_extract_config_from_live_state() {
 
     if [[ -f "$NGINX_SITE" ]]; then
         local upstream_line
-        upstream_line=$(grep -oE 'server[[:space:]]+[0-9.]+:[0-9]+' "$NGINX_SITE" | head -1 | awk '{print $2}')
+        upstream_line=$(grep -oE 'server[[:space:]]+[0-9.]+:[0-9]+' "$NGINX_SITE" | awk '!n++ {print $2}')
         if [[ -n "$upstream_line" ]]; then
             loxone_ip="${upstream_line%:*}"
             loxone_port="${upstream_line#*:}"
@@ -411,7 +528,7 @@ _loxprox_extract_config_from_live_state() {
 
     if [[ -f "$NFTABLES_CONF" ]]; then
         local ssh_set
-        ssh_set=$(grep -oE 'tcp dport 22 ip saddr \{[^}]+\}' "$NFTABLES_CONF" | head -1 \
+        ssh_set=$(grep -oE 'tcp dport 22 ip saddr \{[^}]+\}' "$NFTABLES_CONF" | sed -n 1p \
                   | sed -E 's/.*\{[[:space:]]*//; s/[[:space:]]*\}.*//; s/[[:space:]]+//g')
         if [[ -n "$ssh_set" ]]; then
             local oldIFS="$IFS"; IFS=','
@@ -424,14 +541,14 @@ _loxprox_extract_config_from_live_state() {
     fi
 
     gateway_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
-    lan_subnet=$(ip route 2>/dev/null | awk '/proto kernel/ && /scope link/{print $1; exit}')
+    lan_subnet=$(ip route 2>/dev/null | awk '/proto kernel/ && /scope link/ && !n++ {print $1}')
 
     if [[ "$enable_appsec" == "true" && -f "$CROWDSEC_APPSEC_ACQUIS" ]]; then
         # v2.3 expresses monitor mode by pointing the acquisition at the local
         # log-only AppSec config; pre-v2.3 files may still carry a `mode:` key
         # (which CrowdSec never honoured — see H11 in the sweep-4 audit).
         local mode_line
-        mode_line=$(grep -E '^\s*mode:\s*' "$CROWDSEC_APPSEC_ACQUIS" | head -1)
+        mode_line=$(grep -m1 -E '^\s*mode:\s*' "$CROWDSEC_APPSEC_ACQUIS") || mode_line=""
         if [[ "$mode_line" =~ monitor ]] || grep -qF "$CROWDSEC_APPSEC_MONITOR_NAME" "$CROWDSEC_APPSEC_ACQUIS"; then
             appsec_mode="monitor"
         fi
@@ -722,7 +839,7 @@ verify_crowdsec_key() {
 
     local primary_fpr
     primary_fpr=$(gpg --show-keys --with-fingerprint --with-colons "$primary_key" 2>/dev/null \
-                  | awk -F: '$1=="fpr" {print $10; exit}')
+                  | awk -F: '$1=="fpr" && !n++ {print $10}')
     if [[ -z "$primary_fpr" ]]; then
         error "verify_crowdsec_key: could not extract fingerprint from primary key"
         return 1
@@ -741,7 +858,7 @@ verify_crowdsec_key() {
             continue
         fi
         fpr=$(gpg --show-keys --with-fingerprint --with-colons "$tmp" 2>/dev/null \
-              | awk -F: '$1=="fpr" {print $10; exit}')
+              | awk -F: '$1=="fpr" && !n++ {print $10}')
         rm -f "$tmp"
         if [[ -z "$fpr" ]]; then
             unreachable=$((unreachable + 1))
@@ -963,11 +1080,13 @@ preflight() {
     fi
 
     info "Checking port 1080..."
-    if ss -tlnp | grep -q ':1080 '; then
-        if ss -tlnp | grep ':1080 ' | grep -q nginx; then
+    local listeners
+    listeners=$(ss -tlnp 2>/dev/null) || listeners=""
+    if grep -q ':1080 ' <<<"$listeners"; then
+        if grep -qE ':1080 .*nginx' <<<"$listeners"; then
             info "Nginx already on :1080 — re-deploy mode."
         else
-            warn "Something else is on :1080:"; ss -tlnp | grep ':1080 '
+            warn "Something else is on :1080:"; grep ':1080 ' <<<"$listeners"
             [[ -t 0 ]] && read -rp "Continue? [y/N] " yn && [[ ! "$yn" =~ ^[Yy]$ ]] && exit 1
         fi
     else
@@ -1135,14 +1254,14 @@ ${tls_port_rule}${gui_port_rule}
 EOF
 
     # Ensure bouncer starts/restarts after nftables so it re-populates its table
-    mkdir -p /etc/systemd/system/crowdsec-firewall-bouncer.service.d
+    _loxprox_mkdir_mode 0755 /etc/systemd/system/crowdsec-firewall-bouncer.service.d
     cat > /etc/systemd/system/crowdsec-firewall-bouncer.service.d/after-nftables.conf <<EOF
 [Unit]
 After=nftables.service
 Wants=nftables.service
 EOF
 
-    mkdir -p /etc/nftables.d
+    _loxprox_mkdir_mode 0755 /etc/nftables.d
 
     # Pre-seed an empty geoip set so the include glob resolves to a real
     # set definition. Without this, the `@geoip_blocklist` reference in
@@ -1170,7 +1289,7 @@ EOF
 
 install_nginx() {
     banner "Installing Nginx"
-    if dpkg -l | grep -q "^ii  nginx "; then
+    if _loxprox_pkg_installed nginx; then
         info "Nginx already installed."
     else
         apt-get update -q
@@ -1636,7 +1755,7 @@ _loxprox_appsec_degrade() {
 setup_nginx_hardening() {
     banner "Nginx systemd Service Hardening"
 
-    mkdir -p /etc/systemd/system/nginx.service.d
+    _loxprox_mkdir_mode 0755 /etc/systemd/system/nginx.service.d
     cat > /etc/systemd/system/nginx.service.d/hardening.conf <<EOF
 [Service]
 PrivateTmp=yes
@@ -1775,6 +1894,18 @@ EOF
     chmod 0644 "$NGINX_ACME_CONF"
 }
 
+# 2026-10: before every acme.sh call carried --home, a run without HOME (a
+# systemd-run unit, e.g. the Panel's apply) put acme.sh's state in /.acme.sh —
+# a second ACME account, and a certificate whose renewal nothing schedules.
+# It is not used once --home is passed; say so instead of deleting key material.
+_loxprox_warn_stray_acme_home() {
+    local stray="${LOXPROX_STRAY_ACME_HOME:-/.acme.sh}"
+    [[ -d "$stray" && ! "$stray" -ef "$ACME_HOME" ]] || return 0
+    warn "Stray acme.sh state at $stray (from a run without HOME) — $ACME_HOME is the one in use."
+    warn "  It holds a separate ACME account key and certificate; nothing renews it. Once"
+    warn "  $ACME_HOME has renewed/installed the certificate, remove it: rm -rf $stray"
+}
+
 _loxprox_acme_issue_with_server() {
     # One issue attempt against a specific CA. Exit codes from acme.sh --issue:
     #   0 — issued / re-issued successfully
@@ -1786,6 +1917,7 @@ _loxprox_acme_issue_with_server() {
     # exit code. An earlier v1.5.0-dev iteration logged "rc=0" on real failures.
     local server="$1" rc=0
     "$ACME_HOME/acme.sh" --issue \
+        --home "$ACME_HOME" \
         --webroot "$ACME_WEBROOT" \
         -d "$TLS_DOMAIN" \
         --server "$server" \
@@ -1851,6 +1983,7 @@ _loxprox_acme_install_cert() {
     # M19: explicit failure propagation — the caller must not carry on and
     # mutate the site into TLS mode when no cert files were written.
     "$ACME_HOME/acme.sh" --install-cert \
+        --home "$ACME_HOME" \
         -d "$TLS_DOMAIN" \
         --fullchain-file "$LOXPROX_TLS_DIR/fullchain.pem" \
         --key-file       "$LOXPROX_TLS_DIR/privkey.pem" \
@@ -1880,7 +2013,7 @@ _loxprox_ensure_acme_cron() {
     cron_line=$(crontab -l 2>/dev/null | grep -F "acme.sh --cron" | head -1) || true
     if [[ -z "$cron_line" ]]; then
         warn "acme.sh cron line missing from root crontab — restoring."
-        "$ACME_HOME/acme.sh" --install-cronjob >> "$LOG_FILE" 2>&1 || warn "acme.sh --install-cronjob failed"
+        "$ACME_HOME/acme.sh" --install-cronjob --home "$ACME_HOME" >> "$LOG_FILE" 2>&1 || warn "acme.sh --install-cronjob failed"
         cron_line=$(crontab -l 2>/dev/null | grep -F "acme.sh --cron" | head -1) || true
     fi
     if [[ -n "$cron_line" ]]; then
@@ -2027,6 +2160,7 @@ setup_tls() {
             banner "TLS — enable (acme.sh + HTTP-01)"
             _loxprox_tls_validate_config || return 1
             _loxprox_install_acme_sh || return 1
+            _loxprox_warn_stray_acme_home
             _loxprox_write_acme_listener
             # Reload nginx so the :80 challenge listener is live before the
             # ACME server probes it. systemctl reload is graceful and keeps
@@ -2061,7 +2195,7 @@ setup_tls() {
                 _loxprox_site_disable_tls
                 rm -f "$NGINX_ACME_CONF"
                 if [[ -x "$ACME_HOME/acme.sh" && -n "${TLS_DOMAIN:-}" ]]; then
-                    "$ACME_HOME/acme.sh" --remove -d "$TLS_DOMAIN" >> "$LOG_FILE" 2>&1 || true
+                    "$ACME_HOME/acme.sh" --remove --home "$ACME_HOME" -d "$TLS_DOMAIN" >> "$LOG_FILE" 2>&1 || true
                 fi
                 if nginx -t >> "$LOG_FILE" 2>&1; then
                     systemctl reload nginx || { error "nginx reload failed after TLS disable."; return 1; }
@@ -2084,7 +2218,7 @@ _loxprox_tls_renew() {
     banner "TLS — manual renewal"
     [[ -x "$ACME_HOME/acme.sh" ]] || { error "acme.sh not installed; run deploy.sh with ENABLE_TLS=true first."; return 1; }
     [[ -n "$TLS_DOMAIN" ]] || { error "TLS_DOMAIN empty in $LOXPROX_DEPLOY_CONF"; return 1; }
-    "$ACME_HOME/acme.sh" --renew -d "$TLS_DOMAIN" --force >> "$LOG_FILE" 2>&1 || {
+    "$ACME_HOME/acme.sh" --renew --home "$ACME_HOME" -d "$TLS_DOMAIN" --force >> "$LOG_FILE" 2>&1 || {
         error "acme.sh --renew failed for $TLS_DOMAIN. See $LOG_FILE."
         return 1
     }
@@ -2099,8 +2233,8 @@ _loxprox_tls_remove() {
     rm -f "$NGINX_ACME_CONF"
     nginx -t >> "$LOG_FILE" 2>&1 && systemctl reload nginx || warn "nginx -t failed during removal; inspect site config."
     if [[ -x "$ACME_HOME/acme.sh" ]]; then
-        [[ -n "${TLS_DOMAIN:-}" ]] && "$ACME_HOME/acme.sh" --remove -d "$TLS_DOMAIN" >> "$LOG_FILE" 2>&1 || true
-        "$ACME_HOME/acme.sh" --uninstall >> "$LOG_FILE" 2>&1 || true
+        [[ -n "${TLS_DOMAIN:-}" ]] && "$ACME_HOME/acme.sh" --remove --home "$ACME_HOME" -d "$TLS_DOMAIN" >> "$LOG_FILE" 2>&1 || true
+        "$ACME_HOME/acme.sh" --uninstall --home "$ACME_HOME" >> "$LOG_FILE" 2>&1 || true
         rm -rf "$ACME_HOME"
     fi
     rm -rf "$LOXPROX_TLS_DIR"
@@ -2387,7 +2521,7 @@ EOF
 }
 
 _loxprox_install_tunnel_watchdog() {
-    local install_dir="/opt/loxprox"
+    local install_dir="$LOXPROX_INSTALL_DIR"
     local src_dir="${SCRIPT_DIR:-.}"
     mkdir -p "$install_dir"
 
@@ -2399,10 +2533,10 @@ _loxprox_install_tunnel_watchdog() {
         warn "tunnel-watchdog.sh not found at $script_src — tunnel self-heal NOT installed."
         return 0
     fi
-    install -m 0755 "$script_src" "$install_dir/tunnel-watchdog.sh"
+    _loxprox_install_script "$script_src" "$install_dir/tunnel-watchdog.sh"
     if [[ -f "$service_src" && -f "$timer_src" ]]; then
-        cp "$service_src" /etc/systemd/system/tunnel-watchdog.service
-        cp "$timer_src"   /etc/systemd/system/tunnel-watchdog.timer
+        _loxprox_install_unit_file "$service_src" tunnel-watchdog.service
+        _loxprox_install_unit_file "$timer_src"   tunnel-watchdog.timer
         systemctl daemon-reload
         systemctl enable --now tunnel-watchdog.timer
         ok "Tunnel watchdog armed (60s cycle: check → heal → alert)."
@@ -2510,27 +2644,35 @@ _loxprox_tunnel_remove() {
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _loxprox_write_gui_unit() {
+    _loxprox_unlink_unit_symlink "$GUI_UNIT"
     cat > "$GUI_UNIT" <<EOF
 # LoxProx — Panel unit (v2.2)
 # Generated by deploy.sh — DO NOT EDIT MANUALLY (re-run deploy.sh).
 #
 # Runs as root deliberately: the panel drives cscli (CrowdSec's local API
 # socket is root-only), systemctl (service restarts), reads deploy.conf
-# (0640 root) and runs deploy.sh for its apply job.
+# (0640 root) and starts deploy.sh for its apply job (as its own transient
+# unit — see gui/loxprox-gui.py JobRunner).
 # ProtectSystem / ProtectHome are deliberately NOT set for the same reason —
 # the apply job runs deploy.sh, which writes across /etc, /opt and /usr; any
 # filesystem sandbox here would break it. The panel's attack surface is
 # constrained at the network layer instead (nftables: LAN sources only) and
 # by the Host-header allowlist inside the panel itself.
+#
+# 2026-10: no After=nginx.service. The panel does not need nginx, and the
+# ordering made systemd stop the panel BEFORE nginx — so every nginx stop
+# (reboot, upgrade) waited for the panel. TimeoutStopSec bounds a stop that
+# hangs (the panel itself exits within a second of SIGTERM).
 [Unit]
 Description=LoxProx Panel (LAN-only GUI)
-After=network.target nginx.service
+After=network.target
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 ${GUI_APP}
 Restart=always
 RestartSec=5
+TimeoutStopSec=10
 PrivateTmp=true
 StandardOutput=append:/var/log/loxprox-gui.log
 StandardError=append:/var/log/loxprox-gui.log
@@ -2547,7 +2689,7 @@ setup_gui() {
         true|yes|1)
             banner "LoxProx Panel — enable (LAN-only GUI on :${GUI_PORT})"
 
-            dpkg -l | grep -q "^ii  qrencode " || apt-get install -y qrencode
+            _loxprox_pkg_installed qrencode || apt-get install -y qrencode
 
             local src="${SCRIPT_DIR:-.}/gui/loxprox-gui.py"
             if [[ ! -f "$src" ]]; then
@@ -2619,7 +2761,7 @@ setup_gui() {
 setup_apparmor() {
     banner "AppArmor"
 
-    if ! dpkg -l | grep -q "^ii  apparmor "; then
+    if ! _loxprox_pkg_installed apparmor; then
         apt-get install -y apparmor apparmor-utils
     fi
 
@@ -2701,7 +2843,9 @@ install_crowdsec() {
         info "CrowdSec already installed."
     fi
 
-    dpkg -l | grep -q "crowdsec-firewall-bouncer" || apt-get install -y crowdsec-firewall-bouncer
+    # Substring match over the whole package list, as before: it also has to
+    # see the -nftables / -iptables variants of the bouncer package.
+    grep -q "crowdsec-firewall-bouncer" <<<"$(dpkg -l 2>/dev/null)" || apt-get install -y crowdsec-firewall-bouncer
     ok "CrowdSec and firewall bouncer installed."
 }
 
@@ -2917,7 +3061,7 @@ setup_tmp_mount() {
         return 0
     fi
 
-    mkdir -p /etc/systemd/system/tmp.mount.d
+    _loxprox_mkdir_mode 0755 /etc/systemd/system/tmp.mount.d
     local drop=/etc/systemd/system/tmp.mount.d/loxprox.conf
     backup_file "$drop"
     cat > "$drop" <<'EOF'
@@ -2952,7 +3096,8 @@ _loxprox_has_authorized_key() {
     done < /etc/passwd
     for f in "${files[@]}"; do
         [[ -f "$f" ]] || continue
-        if grep -Ev '^\s*(#|$)' "$f" 2>/dev/null | grep -q '^\(ssh-\|ecdsa-sha2-\|sk-\)'; then
+        # Comment lines start with '#', so they can never match.
+        if grep -qE '^(ssh-|ecdsa-sha2-|sk-)' "$f" 2>/dev/null; then
             return 0
         fi
     done
@@ -3046,7 +3191,7 @@ _loxprox_interactive_collect_pubkey() {
                     error "That doesn't parse as a public key — try again."
                     continue
                 fi
-                fp=$(printf '%s\n' "$pasted" | ssh-keygen -l -f /dev/stdin 2>/dev/null | head -1)
+                fp=$(printf '%s\n' "$pasted" | ssh-keygen -l -f /dev/stdin 2>/dev/null | sed -n 1p) || fp=""
                 echo
                 echo "  You pasted:"
                 echo "    $pasted"
@@ -3211,7 +3356,7 @@ setup_ssh_hardening() {
 setup_unattended_upgrades() {
     banner "Unattended Upgrades"
 
-    dpkg -l | grep -q "^ii  unattended-upgrades " || apt-get install -y unattended-upgrades
+    _loxprox_pkg_installed unattended-upgrades || apt-get install -y unattended-upgrades
 
     cat > /etc/apt/apt.conf.d/50unattended-upgrades <<EOF
 Unattended-Upgrade::Allowed-Origins {
@@ -3246,7 +3391,7 @@ EOF
 setup_auditd() {
     banner "auditd (System Call Auditing)"
 
-    dpkg -l | grep -q "^ii  auditd " || apt-get install -y auditd audispd-plugins
+    _loxprox_pkg_installed auditd || apt-get install -y auditd audispd-plugins
 
     mkdir -p "$(dirname "$AUDIT_RULES_FILE")"
     cat > "$AUDIT_RULES_FILE" <<EOF
@@ -3438,12 +3583,13 @@ setup_journald() {
 [Journal]
 SystemMaxUse=${JOURNALD_SYSTEM_MAX_USE}
 "
+    _loxprox_mkdir_mode 0755 "$(dirname "$JOURNALD_DROPIN")" || { error "Cannot create $(dirname "$JOURNALD_DROPIN")."; return 1; }
     if [[ -f "$JOURNALD_DROPIN" ]] && [[ "$(cat "$JOURNALD_DROPIN")"$'\n' == "$desired" ]]; then
+        chmod 0644 "$JOURNALD_DROPIN"
         ok "journald cap already SystemMaxUse=${JOURNALD_SYSTEM_MAX_USE} ($JOURNALD_DROPIN) — no restart."
         return 0
     fi
     backup_file "$JOURNALD_DROPIN"
-    mkdir -p "$(dirname "$JOURNALD_DROPIN")"
     printf '%s' "$desired" > "$JOURNALD_DROPIN"
     chmod 0644 "$JOURNALD_DROPIN"
     if ! systemctl restart systemd-journald; then
@@ -3491,7 +3637,7 @@ EOF
 setup_security_monitoring() {
     banner "Security Monitoring (monitor + backup + progressive ban)"
 
-    local install_dir="/opt/loxprox"
+    local install_dir="$LOXPROX_INSTALL_DIR"
     local src_dir="${SCRIPT_DIR:-.}"
     mkdir -p "$install_dir"
 
@@ -3505,7 +3651,7 @@ setup_security_monitoring() {
         "$src_dir/security-monitoring/discord-alert.sh"
     do
         if [[ -f "$f" ]]; then
-            install -m 0755 "$f" "$install_dir/"
+            _loxprox_install_script "$f" "$install_dir/$(basename "$f")"
             info "Installed: $install_dir/$(basename "$f")"
         else
             warn "Missing source: $f — skipping"
@@ -3513,7 +3659,9 @@ setup_security_monitoring() {
     done
 
     # Monitor systemd timer (60s cycle)
-    cat > /etc/systemd/system/loxprox-monitor.service <<'EOF'
+    _loxprox_unlink_unit_symlink "$SYSTEMD_UNIT_DIR/loxprox-monitor.service"
+    _loxprox_unlink_unit_symlink "$SYSTEMD_UNIT_DIR/loxprox-monitor.timer"
+    cat > "$SYSTEMD_UNIT_DIR/loxprox-monitor.service" <<'EOF'
 [Unit]
 Description=LoxProx Gateway Monitor
 After=network.target nginx.service crowdsec.service
@@ -3525,7 +3673,7 @@ StandardOutput=append:/var/log/loxprox-monitor.log
 StandardError=append:/var/log/loxprox-monitor.log
 EOF
 
-    cat > /etc/systemd/system/loxprox-monitor.timer <<'EOF'
+    cat > "$SYSTEMD_UNIT_DIR/loxprox-monitor.timer" <<'EOF'
 [Unit]
 Description=Run LoxProx Gateway Monitor every 60 seconds
 
@@ -3713,7 +3861,7 @@ _loxprox_check_cron_files() {
 setup_network_watchdog() {
     banner "Network Watchdog"
 
-    local install_dir="/opt/loxprox"
+    local install_dir="$LOXPROX_INSTALL_DIR"
     local script_src="${SCRIPT_DIR:-.}/security-monitoring/network-watchdog.sh"
     local service_src="${SCRIPT_DIR:-.}/security-monitoring/network-watchdog.service"
     local timer_src="${SCRIPT_DIR:-.}/security-monitoring/network-watchdog.timer"
@@ -3723,8 +3871,7 @@ setup_network_watchdog() {
 
     # Copy watchdog script
     if [[ -f "$script_src" ]]; then
-        cp "$script_src" "$install_dir/network-watchdog.sh"
-        chmod 755 "$install_dir/network-watchdog.sh"
+        _loxprox_install_script "$script_src" "$install_dir/network-watchdog.sh"
         ok "Installed: $install_dir/network-watchdog.sh"
     else
         warn "network-watchdog.sh not found at $script_src — skipping watchdog install"
@@ -3733,15 +3880,16 @@ setup_network_watchdog() {
 
     # Copy Discord alert script (watchdog depends on it)
     if [[ -f "$discord_src" ]]; then
-        cp "$discord_src" "$install_dir/discord-alert.sh"
-        chmod 755 "$install_dir/discord-alert.sh"
+        _loxprox_install_script "$discord_src" "$install_dir/discord-alert.sh"
         ok "Installed: $install_dir/discord-alert.sh"
     fi
 
     # Install systemd units
     if [[ -f "$service_src" && -f "$timer_src" ]]; then
-        cp "$service_src" /etc/systemd/system/network-watchdog.service
-        cp "$timer_src" /etc/systemd/system/network-watchdog.timer
+        # deploy.sh copies its units into the unit dir (it never `systemctl
+        # link`s them); a symlink found there is replaced by a real file.
+        _loxprox_install_unit_file "$service_src" network-watchdog.service
+        _loxprox_install_unit_file "$timer_src"   network-watchdog.timer
         systemctl daemon-reload
         systemctl enable network-watchdog.timer
         systemctl start network-watchdog.timer
@@ -4538,6 +4686,10 @@ main() {
     fi
 
     preflight
+    # 2026-10: before any root-run code is installed under it. Fatal: putting
+    # root-run code into a directory another user controls is worse than not
+    # deploying.
+    _loxprox_secure_install_dir || { error "Fix $LOXPROX_INSTALL_DIR by hand, then re-run."; exit 1; }
     # H12: core steps (preflight, sysctls, firewall, nginx, CrowdSec install,
     # runtime config) stay bare — their failure is fatal because the gateway
     # cannot do its job without them. Everything optional goes through
@@ -4552,10 +4704,8 @@ main() {
     # Install and run GeoIP blocklist updater
     local geoip_src="${SCRIPT_DIR:-.}/security-monitoring/geoip-block.sh"
     if [[ -f "$geoip_src" ]]; then
-        mkdir -p /opt/loxprox
-        cp "$geoip_src" /opt/loxprox/geoip-block.sh
-        chmod 755 /opt/loxprox/geoip-block.sh
-        bash /opt/loxprox/geoip-block.sh || warn "GeoIP blocklist initial load failed — will retry via cron"
+        _loxprox_install_script "$geoip_src" "$LOXPROX_INSTALL_DIR/geoip-block.sh"
+        bash "$LOXPROX_INSTALL_DIR/geoip-block.sh" || warn "GeoIP blocklist initial load failed — will retry via cron"
     fi
 
     install_nginx

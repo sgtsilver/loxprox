@@ -584,6 +584,7 @@ JOB_WRAPPER = (
     'exit "$rc"'
 )
 JOB_KEEP = 20                       # newest jobs whose files stay in JOB_DIR
+JOB_HOME = "/root"                  # jobs run as root (systemd-run, no User=)
 _JOB_ID_RE = re.compile(r"^(\d{8}-\d{6})-")
 # A --collect'ed unit that has ended reads "inactive". Anything that is not
 # a definite "it ended" (incl. a systemctl timeout) counts as still running —
@@ -721,8 +722,12 @@ class JobRunner:
             argv = ["/bin/bash", "-c", JOB_WRAPPER, "loxprox-job", log_path, rc_path] + list(cmd)
             proc = None
             if unit:
+                # A transient unit starts with no HOME; acme.sh (renew-tls, and
+                # TLS in an apply) then used /.acme.sh instead of /root/.acme.sh.
+                # Jobs run as root, so give them root's environment basics.
                 rc, out = run([self._systemd_run, "--unit", unit, "--collect", "--quiet",
-                               "--description", f"LoxProx Panel job {job_id} ({name})"] + argv,
+                               "--description", f"LoxProx Panel job {job_id} ({name})",
+                               f"--setenv=HOME={JOB_HOME}", "--property=UMask=0022"] + argv,
                               timeout=30)
                 if rc != 0:
                     os.unlink(meta_path)
@@ -731,7 +736,8 @@ class JobRunner:
                 try:
                     proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                            start_new_session=True)
+                                            start_new_session=True,
+                                            env=dict(os.environ, HOME=os.environ.get("HOME") or JOB_HOME))
                 except OSError as exc:
                     os.unlink(meta_path)
                     return None, str(exc)
@@ -1090,6 +1096,19 @@ def build_allowed_hosts(conf):
     return allowed
 
 
+def request_shutdown(server):
+    """SIGTERM handler body (2026-10).
+
+    serve_forever() runs in the main thread — the thread a signal handler
+    interrupts — and server.shutdown() blocks until serve_forever() has
+    returned. Called inline from the handler it waited for itself: every
+    `systemctl stop/restart loxprox-gui` hung until systemd's stop timeout
+    and ended in SIGKILL. Asking from another thread lets serve_forever()
+    see the request at its next poll (≤ 0.5 s) and return normally.
+    """
+    threading.Thread(target=server.shutdown, name="panel-shutdown", daemon=True).start()
+
+
 def main():
     conf = load_conf(DEPLOY_CONF)
     if not is_true(conf.get("ENABLE_GUI", "true")):
@@ -1099,17 +1118,19 @@ def main():
     server = PanelServer(("", port), PanelHandler)
     server.conf = conf
     server.allowed_hosts = build_allowed_hosts(conf)
-    signal.signal(signal.SIGTERM, lambda *_: server.shutdown())
+    signal.signal(signal.SIGTERM, lambda *_: request_shutdown(server))
     HISTORY.load(HISTORY_FILE)
     threading.Thread(target=history_loop, daemon=True).start()
     print(f"LoxProx Panel listening on :{port} "
-          f"(hosts: {', '.join(sorted(server.allowed_hosts))})")
+          f"(hosts: {', '.join(sorted(server.allowed_hosts))})", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
+        HISTORY.save(HISTORY_FILE)   # samples since the last periodic save (best-effort)
+    print("LoxProx Panel stopped.", flush=True)
     return 0
 
 

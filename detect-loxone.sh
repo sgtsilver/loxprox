@@ -36,8 +36,8 @@ LOXONE_OUIS=("EE:E0:00" "E0:E0:00" "AC:4E:91" "B0:BE:76")
 
 detect_subnet() {
     local iface
-    iface=$(ip route | awk '/default/ {print $5}' | head -1)
-    [[ -z "$iface" ]] && iface=$(route -n 2>/dev/null | awk '/^0\.0\.0\.0/ {print $8}' | head -1)
+    iface=$(ip route | awk '/default/ && !n++ {print $5}')
+    [[ -z "$iface" ]] && iface=$(route -n 2>/dev/null | awk '/^0\.0\.0\.0/ && !n++ {print $8}')
     [[ -z "$iface" ]] && return 1
 
     local subnet
@@ -45,7 +45,7 @@ detect_subnet() {
     [[ -n "$subnet" ]] && echo "$subnet" && return 0
 
     # Fallback: try ifconfig-style
-    subnet=$(ifconfig "$iface" 2>/dev/null | awk '/inet / {print $2}' | head -1)
+    subnet=$(ifconfig "$iface" 2>/dev/null | awk '/inet / && !n++ {print $2}')
     [[ -n "$subnet" ]] && echo "${subnet}/24" && return 0
 
     return 1
@@ -73,12 +73,12 @@ probe_loxone() {
     [[ -z "$mac_json" ]] && return 1
 
     # Check for Loxone response format: {"LL": { "control": "dev/cfg/mac", ... }}
-    if ! echo "$mac_json" | grep -q '"LL".*"control".*"dev/cfg/mac"'; then
+    if ! grep -q '"LL".*"control".*"dev/cfg/mac"' <<<"$mac_json"; then
         return 1
     fi
 
     # Extract MAC address
-    mac=$(echo "$mac_json" | grep -oP '"value":\s*"\K[^"]+' | head -1 | tr '[:lower:]' '[:upper:]')
+    mac=$(grep -oP '"value":\s*"\K[^"]+' <<<"$mac_json" | sed -n 1p | tr '[:lower:]' '[:upper:]')
     [[ -z "$mac" ]] && return 1
 
     # Validate OUI
@@ -97,19 +97,21 @@ probe_loxone() {
     # If the OUI doesn't match, demand a matching /api response shape before
     # accepting this host as a Loxone Miniserver.
     if [[ "$oui_found" -eq 0 ]]; then
-        if ! echo "$version_json" | grep -q '"LL".*"control".*"dev/cfg/api"'; then
+        if ! grep -q '"LL".*"control".*"dev/cfg/api"' <<<"$version_json"; then
             return 1
         fi
     fi
 
-    version=$(echo "$version_json" | grep -oP "'version':\s*'\K[^']+" | head -1)
-    snr=$(echo "$version_json" | grep -oP "'snr':\s*'\K[^']+" | head -1)
+    version=$(grep -oP "'version':\s*'\K[^']+" <<<"$version_json" | sed -n 1p)
+    snr=$(grep -oP "'snr':\s*'\K[^']+" <<<"$version_json" | sed -n 1p)
 
     # Determine generation
     local gen="unknown"
     # Gen 1: HTTP only on port 80, no HTTPS redirect, version typically < 12.x for very old,
     # but Gen 1 firmware goes up to 14.x. Better heuristic: check if HTTPS works.
-    if curl -s --connect-timeout 1 --max-time 2 "https://${ip}/jdev/cfg/mac" 2>/dev/null | grep -q '"LL"'; then
+    local tls_probe
+    tls_probe=$(curl -s --connect-timeout 1 --max-time 2 "https://${ip}/jdev/cfg/mac" 2>/dev/null) || tls_probe=""
+    if grep -q '"LL"' <<<"$tls_probe"; then
         gen="Gen 2 (or newer — HTTPS detected)"
     else
         # Also check for redirect to HTTPS

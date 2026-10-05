@@ -817,7 +817,7 @@ verify_crowdsec_key() {
 
     local primary_fpr
     primary_fpr=$(gpg --show-keys --with-fingerprint --with-colons "$primary_key" 2>/dev/null \
-                  | awk -F: '$1=="fpr" {print $10; exit}')
+                  | awk -F: '$1=="fpr" && !n++ {print $10}')
     [[ -n "$primary_fpr" ]] || { error "Could not extract fingerprint from primary key"; return 1; }
     info "Primary key fingerprint: $primary_fpr"
 
@@ -830,7 +830,7 @@ verify_crowdsec_key() {
             rm -f "$tmp"; continue
         fi
         fpr=$(gpg --show-keys --with-fingerprint --with-colons "$tmp" 2>/dev/null \
-              | awk -F: '$1=="fpr" {print $10; exit}')
+              | awk -F: '$1=="fpr" && !n++ {print $10}')
         rm -f "$tmp"
         [[ -z "$fpr" ]] && continue
         if [[ "$fpr" == "$primary_fpr" ]]; then
@@ -874,7 +874,8 @@ _relay_has_authorized_key() {
     done < /etc/passwd
     for f in "${files[@]}"; do
         [[ -f "$f" ]] || continue
-        if grep -Ev '^\s*(#|$)' "$f" 2>/dev/null | grep -q '^\(ssh-\|ecdsa-sha2-\|sk-\)'; then
+        # Comment lines start with '#', so they can never match.
+        if grep -qE '^(ssh-|ecdsa-sha2-|sk-)' "$f" 2>/dev/null; then
             return 0
         fi
     done
@@ -1076,7 +1077,9 @@ setup_crowdsec() {
     else
         info "CrowdSec already installed."
     fi
-    dpkg -l | grep -q "crowdsec-firewall-bouncer" || apt-get install -y crowdsec-firewall-bouncer
+    # Captured, then matched (pipefail-safe); substring match as before, so the
+    # -nftables / -iptables variants of the bouncer package count too.
+    grep -q "crowdsec-firewall-bouncer" <<<"$(dpkg -l 2>/dev/null)" || apt-get install -y crowdsec-firewall-bouncer
 
     mkdir -p /etc/crowdsec/acquis.d
     cat > "$CROWDSEC_NGINX_ACQUIS" <<EOF
@@ -1171,7 +1174,11 @@ health_check() {
     # CRIT C1: surface residual SSH exposure — a relay left on password auth is
     # the whole finding. Informational (does not fail the install), because SOFT
     # mode is a deliberate no-lockout fallback on a keyless fresh VPS.
-    if sshd -T 2>/dev/null | grep -q '^passwordauthentication no'; then
+    # Captured: `sshd -T | grep -q` SIGPIPEs sshd under pipefail and reports a
+    # key-only relay as password-enabled.
+    local sshd_effective
+    sshd_effective=$(sshd -T 2>/dev/null) || sshd_effective=""
+    if grep -q '^passwordauthentication no' <<<"$sshd_effective"; then
         ok "SSH key-only (password authentication disabled)"
     else
         warn "SSH password authentication is ENABLED — install a key and run: sudo bash install-relay.sh --finalize-ssh"

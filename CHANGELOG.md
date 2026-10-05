@@ -416,6 +416,93 @@ notes at the end list what changes on the box.
 - The AppArmor profile is reloaded, still in complain mode — restart the
   soak clock.
 
+### 2026-10-05 deploy follow-up — merged into the v2.2.0 line (PR #45)
+
+Defects the first production deploy of PR #44 exposed. No release was cut.
+
+#### Fixed
+
+- **HIGH — the persistent deploy copy was refused on real installs, so the
+  Panel's Apply/Renew stayed broken.** `/opt/loxprox` had been created by hand
+  before `deploy.sh` managed it and belonged to the SSH login user (uid 1000),
+  as did two hand-copied unit files in it; `install_deploy_source` correctly
+  refused to put root-run code there. `deploy.sh` now normalises the install
+  directory before installing anything into it — `root:root 0755`, nothing
+  below it owned by another user or group/world-writable (symlinks are never
+  followed) — and installs every root-run script with `install -o root`
+  instead of `cp`, which kept the previous owner of an existing file. Unit
+  files `deploy.sh` owns are written as regular root-owned files; a symlink in
+  their place (the `systemctl link` shape) is replaced instead of written
+  through into its target. A symlinked install directory aborts the deploy.
+- **HIGH — acme.sh depended on `$HOME`.** A deploy launched without HOME (a
+  `systemd-run` unit — which is also how the Panel runs Apply/Renew) made
+  acme.sh use `/.acme.sh`: a second Let's Encrypt account and a certificate
+  issued outside `/root/.acme.sh`. Every acme.sh call now passes
+  `--home "$ACME_HOME"`, `deploy.sh` sets `HOME` to root's home when it runs
+  as root without one, Panel jobs get `HOME=/root` and `UMask=0022`, and a
+  leftover `/.acme.sh` is named in the TLS step (not deleted — it holds key
+  material).
+- **MED — inherited umask.** `deploy.sh` ran with its launcher's `umask 077`
+  and created `/etc/systemd/journald.conf.d` as `0700`. It now sets
+  `umask 022` first thing, and the drop-in directories it owns are created
+  with an explicit mode, which also corrects an existing `0700` one.
+- **MED — stopping the Panel hung for 90 s and ended in SIGKILL.** Its
+  SIGTERM handler called `server.shutdown()` from the thread running
+  `serve_forever()`, which then waited for itself. Shutdown is requested
+  from another thread now; the Panel exits within a second and saves its
+  chart history. The Panel unit drops `After=nginx.service` (it made every
+  nginx stop wait for the Panel — during the reboot nginx answered 500 for
+  ~90 s after CrowdSec had already stopped) and gets `TimeoutStopSec=10`.
+- **MED — false results under `pipefail`.** `cmd | grep -q …` returns 141
+  when grep exits at the first match and the writer dies of SIGPIPE, so a
+  match read as a miss: `test-gateway.sh` reported "Decision creation
+  failed" for a decision that existed and warned about SSH source
+  restrictions and the CrowdSec nftables table; `deploy.sh`'s
+  `dpkg -l | grep -q` re-ran `apt-get install`; the relay reported key-only
+  SSH as password-enabled. Every such pipeline in the shipped scripts now
+  captures first and matches the captured text (`grep -q … <<<"$out"`);
+  `head -1` became `awk '… && !n++'` / `sed -n 1p`. A static test rejects
+  `| grep -q`, `| grep -m`, `| head`, `| awk …exit` and `| sed …q` in every
+  shipped pipefail script.
+- **`test-gateway.sh`'s CrowdSec counters.** It read field 2 of `cscli
+  metrics` table rows — the engine/source name, not a count — and cscli
+  rounds counts (`1.23k`), so "AppSec metrics did not increment" could never
+  clear; in TLS mode its test request also went to `http://` and was
+  answered by the 497 → 301 redirect before AppSec ran. Counts now come from
+  `cscli metrics -o json` (fallback: CrowdSec's Prometheus endpoint), the
+  request uses the listener's scheme, and an unreadable counter is reported
+  as such. The decision check reads the whole `ip crowdsec` table (newer
+  bouncers keep one set per origin).
+- **Docs:** `phase4-monitoring` (EN + DE) describes both logrotate files, the
+  stock-nginx yield and a full-config `logrotate -d` check.
+
+#### Added
+
+- `test-gateway.sh` checks that `/opt/loxprox` is root-only and that the
+  LoxProx unit files are regular files.
+- CI: the pre-existing user-owned install directory (unit test in the root
+  Debian 12 container, and on a real host with a real login user and a
+  symlinked unit), every acme.sh call carrying `--home` with `HOME=/`,
+  `deploy.sh` under `systemd-run` with no HOME and `UMask=0077`, the HOME and
+  umask a Panel job sees, the real Panel stopped by `systemctl stop` (with a
+  pytest control showing the old handler never returns), and the pipefail
+  guard.
+
+#### Upgrade notes — what the next `sudo bash deploy.sh` changes
+
+- `/opt/loxprox` and everything in it becomes `root:root`, group/world write
+  bits are dropped (listed in the deploy log), and `/opt/loxprox/deploy/` is
+  created; `config.env` then points the Panel at it.
+- Unit files in `/etc/systemd/system` that were symlinks are replaced by
+  regular files (logged).
+- `/etc/systemd/journald.conf.d` becomes `0755`.
+- The Panel unit is rewritten (no `After=nginx.service`, `TimeoutStopSec=10`)
+  and restarted. The process being stopped is still the old code with the
+  deadlock, so this one stop should end in SIGKILL after the new 10 s
+  timeout instead of 90 s; every later stop is clean.
+- The TLS step re-uses `/root/.acme.sh`. It warns about `/.acme.sh` if that
+  directory is still there.
+
 > **v1.3.0 was withdrawn on 2026-05-18 — do not use.** The systemd unit change in v1.3.0 (moving `StartLimit*` from `[Service]` to `[Unit]`) activated a previously-silent `StartLimitBurst=3` that, combined with the watchdog's 60-second timer and `FailureAction=reboot`, caused an unbounded reboot loop on the 4th start. **v1.3.1 supersedes v1.3.0** and contains the same fixes plus the burst-value correction. Install v1.3.1 or later.
 
 ## [2.1.0] — 2026-07-29
