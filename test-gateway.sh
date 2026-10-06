@@ -706,7 +706,7 @@ test_gui() {
     gui_port="${gui_port:-1081}"
     [[ "${enable_gui,,}" == "true" ]] || return 0
 
-    test_header "GUI Panel (v2.2)"
+    test_header "GUI Panel (v2.3)"
 
     if systemctl is-active --quiet loxprox-gui.service 2>/dev/null; then
         pass "loxprox-gui.service is running"
