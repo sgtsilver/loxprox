@@ -113,6 +113,7 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 - Forward policy: DROP
 - CrowdSec bouncer manages dynamic `table ip crowdsec` for live blocks
 - Static rules in `table inet filter` never wiped on reload
+- GeoIP drop set (`@geoip_blocklist`, `/etc/nftables.d/99-geoip.conf`): ipdeny.com lists for CN, RU, KP and IR, loaded at deploy and refreshed nightly at 03:00 by `geoip-block.sh`. Each list is retried with backoff and must pass validation before it can replace the active one (IPv4 CIDR lines only, so an HTML error page never reaches nftables; a minimum count; no shrink beyond 50 % against the last known-good list). If any list fails, the last known-good set stays loaded and the reason per country (curl error, HTTP status, validation) is logged to `/var/log/loxprox-cron.log`. A list not refreshed for 3 days raises one Discord WARNING and an item in the panel's "what to do" list. Note: a blocked country also blocks your own access from there (travel).
 
 ### Layer 2: Reverse Proxy (nginx)
 
@@ -167,11 +168,6 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 ---
 
 ## What Could Be Added (Future Hardening)
-
-### Geo-blocking
-- Block high-risk countries via ipdeny.com + nftables set
-- Status: Script created, not enabled by default (may break traveling users)
-- Enable: `GEOIP_ENABLED=true /opt/loxprox/geoip-block.sh`
 
 ### Fail2ban (redundant but extra layer)
 - SSH: max 3 failed logins in 10 min = 1 hour ban

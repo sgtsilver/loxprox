@@ -12,6 +12,7 @@
 #   sudo CI=true bash tests/host-integration.sh cron journald auditd   # systemd host
 #   CI=true bash tests/host-integration.sh logrotate                   # Debian 12 container
 #   sudo CI=true bash tests/host-integration.sh nginx-apparmor         # host with docker
+#   sudo CI=true bash tests/host-integration.sh nginx-appsec           # host with docker
 # ═══════════════════════════════════════════════════════════════════════════════
 
 set -uo pipefail
@@ -668,9 +669,137 @@ t_nginx_apparmor() {
     rm -f "$old_profile"
 }
 
+# ── AppSec detection log: a blocked request reaches appsec-detections.log ────
+
+APPSEC_CTR=loxprox-ci-appsec
+APPSEC_LOG=/var/log/nginx/appsec-detections.log
+
+# Runs INSIDE the Debian 12 container: the gateway's own site (deploy.sh,
+# ENABLE_APPSEC=true, the real AppSec include) in front of a Miniserver
+# stand-in, plus an AppSec stand-in on 127.0.0.1:7422 that answers the way
+# CrowdSec's AppSec component does — 403 + JSON body for a blocked request,
+# 200 + JSON otherwise, and no X-Crowdsec-Action response header.
+t_nginx_appsec_setup() {
+    systemctl() { true; }
+    # shellcheck disable=SC2034  # consumed by deploy.sh's configure_nginx
+    LOXONE_IP=127.0.0.1 LOXONE_PORT=8081 ENABLE_APPSEC=true APPSEC_MODE=enforce
+    mkdir -p /etc/crowdsec/bouncers /var/log/nginx
+    printf 'api_key: ci-test-key\n' > /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml.local
+    cat > /etc/nginx/conf.d/ci-appsec-backends.conf <<'EMU'
+server {
+    listen 127.0.0.1:8081;
+    location / { return 200 "miniserver\n"; }
+}
+server {
+    listen 127.0.0.1:7422;
+    location / {
+        default_type application/json;
+        if ($http_x_crowdsec_appsec_uri ~ "^/(\.git/|jdev/sys/enc/)") {
+            return 403 '{"action":"ban","http_status":403}';
+        }
+        return 200 '{"action":"allow","http_status":200}';
+    }
+}
+EMU
+    configure_nginx >/dev/null 2>&1 || { echo "configure_nginx failed"; nginx -t; exit 1; }
+    configure_appsec_nginx >/dev/null 2>&1 || { echo "configure_appsec_nginx failed"; nginx -t; exit 1; }
+    grep -q 'X-Crowdsec-Appsec-Api-Key' "$NGINX_APPSEC_INCLUDE" || { echo "real AppSec include not written"; exit 1; }
+    nginx -t || exit 1
+    echo "container ready: template v$(_loxprox_site_marker_value "$_LOXPROX_SITE_VERSION_MARKER"), $(grep -c 'auth_request ' "$NGINX_SITE") auth_request locations"
+}
+
+# Runs INSIDE the container: turn the live site back into the pre-fix (v4)
+# verdict source — the X-Crowdsec-Action response header and v4's map keys.
+t_nginx_appsec_v4() {
+    sed -i -e 's/auth_request_set  \$appsec_status \$upstream_status;/auth_request_set  $appsec_status $upstream_http_x_crowdsec_action;/' \
+           -e 's/^    "401"         1;$/    "deny"        1;/' \
+           -e 's/^    "403"         1;$/    "ban"         1;\n    "captcha"     1;/' "$NGINX_SITE"
+    if ! grep -q 'upstream_http_x_crowdsec_action' "$NGINX_SITE" || ! grep -q '"ban"' "$NGINX_SITE" \
+        || grep -q '"403"' "$NGINX_SITE"; then
+        echo "v4 rewrite did not apply"; exit 1
+    fi
+    nginx -t && nginx -s reload
+}
+
+appsec_get() {  # appsec_get PATH → HTTP status of a request through the gateway
+    docker exec "$APPSEC_CTR" curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:1080$1"
+}
+
+t_nginx_appsec() {
+    section "nginx-extras (Debian 12) — AppSec blocks reach appsec-detections.log"
+    command -v docker >/dev/null || { fail "docker missing"; return; }
+    local code lines panel
+    docker rm -f "$APPSEC_CTR" >/dev/null 2>&1
+    docker run -d --name "$APPSEC_CTR" -e CI=true -v "$REPO:/workspace:ro" -w /workspace debian:12 sleep infinity >/dev/null
+    docker exec "$APPSEC_CTR" sh -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx-extras curl procps >/dev/null 2>&1' \
+        || { fail "could not install nginx-extras in the container"; return; }
+    docker exec "$APPSEC_CTR" sh -c 'nginx -s quit 2>/dev/null; sleep 1; pkill -x nginx; true'
+    docker exec "$APPSEC_CTR" bash /workspace/tests/host-integration.sh nginx-appsec-setup \
+        || { fail "container AppSec setup failed"; return; }
+    docker exec "$APPSEC_CTR" /usr/sbin/nginx || { fail "nginx did not start"; return; }
+    sleep 1
+
+    code=$(appsec_get '/jdev/cfg/api')
+    [[ "$code" == "200" ]] && pass "allowed request proxied to the Miniserver (HTTP 200)" || fail "allowed request: HTTP $code"
+    code=$(appsec_get '/.git/config?sk=CI-SECRET-QUERY')
+    [[ "$code" == "403" ]] && pass "AppSec 403 → nginx refuses the request (HTTP 403)" || fail "blocked request: HTTP $code"
+    code=$(appsec_get '/jdev/sys/enc/CI-SECRET-BLOB')
+    [[ "$code" == "403" ]] && pass "second blocked request (HTTP 403)" || fail "second blocked request: HTTP $code"
+    sleep 1
+    lines=$(docker exec "$APPSEC_CTR" cat "$APPSEC_LOG" 2>/dev/null)
+    note "appsec-detections.log:"
+    sed 's/^/      /' <<<"${lines:-<empty>}"
+    [[ "$(grep -c . <<<"$lines")" == "2" ]] && pass "exactly the two blocked requests were logged, the allowed one was not" \
+                                            || fail "expected 2 detection lines, got $(grep -c . <<<"$lines")"
+    grep -q '127.0.0.1 "GET /.git/config HTTP/1.1" appsec=403 status=403' <<<"$lines" \
+        && pass "line carries client address, method, path, appsec=403, status=403" \
+        || fail "no well-formed line for /.git/config"
+    grep -q '"GET /jdev/sys/enc/<redacted> HTTP/1.1"' <<<"$lines" \
+        && pass "Loxone credential path redacted (F3 scrub) in the detection log" \
+        || fail "Loxone credential path not redacted"
+    grep -q 'CI-SECRET' <<<"$lines" && fail "query string or credential blob written to the detection log" \
+                                    || pass "no query string, no credential blob on disk"
+
+    # The panel's own readers on that very file: "Abgewehrte Angriffe heute"
+    # (appsec_today) and the per-minute AppSec series of the 24 h chart.
+    rm -f /var/tmp/appsec-ci.log
+    docker cp "$APPSEC_CTR:$APPSEC_LOG" /var/tmp/appsec-ci.log >/dev/null
+    panel=$(python3 - "$REPO/gui/loxprox-gui.py" /var/tmp/appsec-ci.log <<'PY'
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("panel", sys.argv[1])
+panel = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(panel)
+panel.LOG_FILES["appsec"] = sys.argv[2]
+counter = panel.LogGrowthCounter(sys.argv[2])
+counter.pos = 0          # as if sampled just before the requests
+print(json.dumps({"today": panel.appsec_today(), "sec": counter.delta()}))
+PY
+)
+    [[ "$panel" == '{"today": {"hits": 2, "ips": 1}, "sec": 2}' ]] \
+        && pass "panel reads it: today 2 blocks from 1 address, 2 in the chart's AppSec series" \
+        || fail "panel readers: $panel"
+    rm -f /var/tmp/appsec-ci.log
+
+    # Control: the pre-fix (v4) verdict source, a response header CrowdSec
+    # never sends. Same 403 to the client, nothing logged — the empty file
+    # seen on the gateway since 2026-05-26.
+    docker exec "$APPSEC_CTR" bash /workspace/tests/host-integration.sh nginx-appsec-v4 \
+        || { fail "control: could not switch the site to the v4 header source"; docker rm -f "$APPSEC_CTR" >/dev/null 2>&1; return; }
+    sleep 1
+    code=$(appsec_get '/.git/config')
+    sleep 1
+    lines=$(docker exec "$APPSEC_CTR" cat "$APPSEC_LOG" 2>/dev/null)
+    if [[ "$code" == "403" && "$(grep -c . <<<"$lines")" == "2" ]]; then
+        pass "control: with the v4 header-based map the same 403 is NOT logged (reproduces the empty file)"
+    else
+        fail "control: HTTP $code, $(grep -c . <<<"$lines") line(s) — expected 403 and no new line"
+    fi
+    docker rm -f "$APPSEC_CTR" >/dev/null 2>&1
+}
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
-(( $# > 0 )) || { echo "usage: $0 <cron|journald|auditd|logrotate|nginx-apparmor> ..." >&2; exit 2; }
+(( $# > 0 )) || { echo "usage: $0 <cron|journald|auditd|logrotate|nginx-apparmor|nginx-appsec> ..." >&2; exit 2; }
 for s in "$@"; do
     case "$s" in
         cron)                      t_cron ;;
@@ -685,6 +814,9 @@ for s in "$@"; do
         nginx-apparmor)            t_nginx_apparmor ;;
         nginx-container-setup)     t_nginx_container_setup; exit $? ;;
         nginx-container-test-proxy) t_nginx_container_test_proxy; exit $? ;;
+        nginx-appsec)              t_nginx_appsec ;;
+        nginx-appsec-setup)        t_nginx_appsec_setup; exit $? ;;
+        nginx-appsec-v4)           t_nginx_appsec_v4; exit $? ;;
         *) echo "unknown section: $s" >&2; exit 2 ;;
     esac
 done

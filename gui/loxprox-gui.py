@@ -45,6 +45,11 @@ STATIC_DIR = os.environ.get(
     "LOXPROX_GUI_STATIC",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "static"))
 HISTORY_FILE = os.path.join(STATE_DIR, "gui-history.json")
+# 2026-10: GeoIP blocklist freshness (stamps written by geoip-block.sh).
+GEOIP_DIR = os.environ.get("LOXPROX_GEOIP_DIR", "/var/lib/loxone-geoip")
+GEOIP_NFT_FILE = os.environ.get("LOXPROX_GEOIP_NFT", "/etc/nftables.d/99-geoip.conf")
+GEOIP_SCRIPT = os.environ.get("LOXPROX_GEOIP_SCRIPT", "/opt/loxprox/geoip-block.sh")
+GEOIP_STALE_DAYS = int(os.environ.get("LOXPROX_GEOIP_STALE_DAYS", "3"))
 HISTORY_INTERVAL = 60          # seconds between samples
 HISTORY_MAX = 1440             # 24h at one sample per minute
 
@@ -296,6 +301,49 @@ def miniserver_reachable(conf):
         return False
 
 
+def active_decisions(data):
+    """Active decisions in `cscli decisions list -o json`, one per banned value.
+
+    cscli does not print decisions there: it prints ALERTS (verified on
+    CrowdSec 1.8.1), each with the alert's `scenario`, its `source` (country in
+    `cn`) and a nested `decisions` list whose entries carry `value`, `origin`,
+    `type`, `scope`, `duration`, `id` and their own `scenario`. Several alerts
+    can ban the same address, and an alert can carry no decision at all.
+    Reading `value`/`origin`/`duration` at the top level — what this used to
+    do — produced "?" rows the unban button could not act on, and counted
+    alerts. A flat list of decision objects is accepted as well. Simulated
+    decisions block nothing and are left out; the first decision per value
+    (newest alert first, as cscli orders them) wins.
+    """
+    out, seen = [], set()
+    for item in data if isinstance(data, list) else []:
+        if not isinstance(item, dict):
+            continue
+        if isinstance(item.get("decisions"), list) or ("value" not in item and "source" in item):
+            decisions, alert = item.get("decisions") or [], item
+        else:
+            decisions, alert = [item], {}
+        source = alert.get("source") if isinstance(alert.get("source"), dict) else {}
+        for dec in decisions:
+            if not isinstance(dec, dict) or dec.get("simulated"):
+                continue
+            value = dec.get("value")
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            out.append({
+                "id": dec.get("id"),
+                "value": value,
+                "origin": dec.get("origin") or "?",
+                "type": dec.get("type") or "?",
+                "scope": dec.get("scope") or "?",
+                "scenario": dec.get("scenario") or alert.get("scenario") or "?",
+                "duration": dec.get("duration") or "?",
+                "country": source.get("cn") or None,
+            })
+    return out
+
+
 def crowdsec_decisions():
     rc, out = run(["cscli", "decisions", "list", "-o", "json"], timeout=15)
     if rc != 0:
@@ -304,15 +352,14 @@ def crowdsec_decisions():
         data = json.loads(out) or []  # cscli emits `null` for an empty list
     except json.JSONDecodeError:
         return {"error": "unparseable cscli output", "count": 0, "items": []}
-    items = []
-    for dec in data[:10]:
-        items.append({
-            "ip": dec.get("value", "?"),
-            "origin": dec.get("origin", "?"),
-            "scenario": (dec.get("scenario") or "?").replace("crowdsecurity/", ""),
-            "duration": dec.get("duration", "?"),
-        })
-    return {"count": len(data), "items": items}
+    decisions = active_decisions(data)
+    items = [{
+        "ip": dec["value"],
+        "origin": dec["origin"],
+        "scenario": dec["scenario"].replace("crowdsecurity/", ""),
+        "duration": dec["duration"],
+    } for dec in decisions[:10]]
+    return {"count": len(decisions), "items": items}
 
 
 def appsec_today():
@@ -328,6 +375,52 @@ def appsec_today():
             if len(fields) > 1:
                 ips.add(fields[1])  # appsec_evt: $time_iso8601 $remote_addr ...
     return {"hits": hits, "ips": len(ips)}
+
+
+def geoip_status(now=None):
+    """Freshness of the GeoIP blocklist for the "what to do" list (2026-10).
+
+    geoip-block.sh keeps the last known-good list when a refresh fails, which
+    is right — but it used to fail silently every night. It now stamps
+    `last-success` ("<epoch> <ranges>") and `last-failure` ("<epoch> <reason>")
+    in GEOIP_DIR, and a `disabled` marker when GEOIP_ENABLED is off.
+    """
+    now = time.time() if now is None else now
+    if not os.path.exists(GEOIP_SCRIPT) or os.path.exists(os.path.join(GEOIP_DIR, "disabled")):
+        return {"enabled": False}
+    last_ok = ranges = None
+    try:
+        with open(os.path.join(GEOIP_DIR, "last-success"), encoding="utf-8") as fh:
+            parts = fh.read().split()
+        last_ok = int(parts[0])
+        ranges = int(parts[1]) if len(parts) > 1 else None
+    except (OSError, ValueError, IndexError):
+        # Installs that predate the stamp: the nftables include is rewritten
+        # only after a successful refresh (deploy.sh's placeholder carries no
+        # "Generated:" line), so its mtime is the last success.
+        try:
+            with open(GEOIP_NFT_FILE, encoding="utf-8") as fh:
+                if "Generated:" in fh.read(4096):
+                    last_ok = int(os.path.getmtime(GEOIP_NFT_FILE))
+        except OSError:
+            pass
+    last_error = None
+    try:
+        with open(os.path.join(GEOIP_DIR, "last-failure"), encoding="utf-8") as fh:
+            stamp, _, reason = fh.read().strip().partition(" ")
+        if last_ok is None or int(stamp) > last_ok:
+            last_error = reason[:200] or "unknown"
+    except (OSError, ValueError):
+        pass
+    return {
+        "enabled": True,
+        "last_ok": last_ok,
+        "age_hours": round((now - last_ok) / 3600, 1) if last_ok else None,
+        "ranges": ranges,
+        "stale": last_ok is None or now - last_ok >= GEOIP_STALE_DAYS * 86400,
+        "stale_days": GEOIP_STALE_DAYS,
+        "last_error": last_error,
+    }
 
 
 def latest_backup():
@@ -383,6 +476,7 @@ def collect_status():
         "miniserver": miniserver_reachable(conf),
         "decisions": crowdsec_decisions(),
         "appsec": appsec_today(),
+        "geoip": geoip_status(),
         "backup": latest_backup(),
         "system": system_stats(),
         "job": JOBS.current_summary(),
@@ -495,7 +589,7 @@ def history_sample(counters):
     rc, out = run(["cscli", "decisions", "list", "-o", "json"], timeout=15)
     if rc == 0:
         try:
-            bans = len(json.loads(out) or [])
+            bans = len(active_decisions(json.loads(out) or []))
         except json.JSONDecodeError:
             pass
     conf = load_conf(DEPLOY_CONF)

@@ -504,6 +504,110 @@ Defects the first production deploy of PR #44 exposed. No release was cut.
 - The TLS step re-uses `/root/.acme.sh`. It warns about `/.acme.sh` if that
   directory is still there.
 
+### 2026-10-06 follow-up — merged into the v2.2.0 line (PR #46)
+
+Three defects found on the production gateway after the PR #45 deploy. No
+release was cut.
+
+#### Fixed
+
+- **HIGH — the Panel's ban table was unusable, and progressive ban never
+  escalated anything.** On the gateway's CrowdSec 1.8.1, `cscli decisions
+  list -o json` prints *alerts*, each with a nested `decisions` list. The
+  Panel read `value` / `origin` / `duration` at the top level of each alert,
+  so every row showed "?" (and Unban had no address to send), and the count
+  was the number of alerts, not of banned addresses. The Panel now flattens
+  the alerts into their active decisions: one row per address (deduplicated),
+  the scenario taken from the alert when the decision has none, simulated
+  decisions skipped, and a flat list still accepted. The row keys the front
+  end reads are unchanged. The 24-hour "active bans" series counts decisions
+  too. `progressive-ban.py` had the same assumption: it found no `value`
+  anywhere and dropped every entry, so its log read "Extended: 0, Skipped:
+  0" and no repeat offender was ever escalated. It now reads the nested
+  decisions, logs "Active decisions: N (from M listed entries)" and never
+  escalates a simulated decision. The Grafana collector's ban count
+  (`jq 'length'`, which counted alerts) now counts distinct banned addresses.
+  `gateway-monitor.sh`'s "New CrowdSec Ban" alert already searched the JSON
+  recursively and was correct; a test now pins that on the real shape.
+- **MED — "Attacks blocked today" and the AppSec chart were always 0.**
+  `/var/log/nginx/appsec-detections.log` had stayed empty since it was
+  introduced on 2026-05-26 (v1.5.0). nginx wrote a line only when the AppSec
+  subrequest's `X-Crowdsec-Action` response header said "ban" or similar, but
+  CrowdSec's AppSec component never sends that header: it answers 200
+  (allow) or 403 (blocked) with a JSON body. Site template v5 takes the
+  verdict from the subrequest's HTTP status (`auth_request_set $appsec_status
+  $upstream_status`) and logs every 401/403. Only blocked requests are
+  logged, not inspected ones. The request line in that log now uses the
+  scrubbed path (`$loxone_log_uri`, no query string, Loxone credential paths
+  redacted) instead of the raw `$request`. The Panel tile, the AppSec series
+  of the 24-hour chart, the monitor's "AppSec Detections" Discord alert and
+  Grafana all read this file and work without changes. The history file
+  format is unchanged.
+- **MED — a failed GeoIP refresh failed silently, without a reason.** On
+  2026-10-06 03:00, `cn` and `ru` failed and the last known-good list (22,249
+  ranges) was kept, which is correct. But `curl -s` with stderr discarded
+  logged only "failed countries: cn ru", there was a single attempt with a
+  30 s cap, and nothing reported a list that kept failing. A probe from the
+  gateway hours later fetched both lists in under half a second, so this was
+  a transient failure at the source. `geoip-block.sh` now:
+  - retries each list after 30 s, 120 s and 300 s (`GEOIP_RETRY_DELAYS`),
+    with a 120 s transfer limit (`GEOIP_MAX_TIME`);
+  - logs the reason per attempt (curl exit code, HTTP status, curl's
+    message);
+  - validates every list before it can replace the active one: IPv4 CIDR
+    lines only, so an HTML error page answered with 200 is rejected; at
+    least `GEOIP_MIN_RANGES`; and no shrink of more than
+    `GEOIP_MAX_SHRINK_PCT` (50 %) against the last known-good list;
+  - stamps `last-success` (epoch and range count) and `last-failure`
+    (epoch and reason) in `/var/lib/loxone-geoip/`.
+
+  When the list has not refreshed for 3 days (`GEOIP_STALE_DAYS`),
+  `gateway-monitor.sh` sends one Discord WARNING per stale episode. The
+  warning gives the age, the kept range count, the last error and the
+  command to run, and is re-armed only after a successful refresh. The
+  Panel's "what to do" list shows the same (DE/EN). The keep-last-known-good
+  behaviour is unchanged. `deploy.sh`'s own run uses a short retry schedule
+  so a deploy is not held up for minutes. No second download source was
+  added (reasoning in PR #46).
+- **Docs:** `SECURITY` (EN + DE) described geo-blocking as "not enabled by
+  default". It is on, so the description moved to Layer 1 with the refresh,
+  validation and alerting behaviour. `GUI-PANEL` (EN + DE) describes the ban
+  count, the AppSec tile and the GeoIP item.
+
+#### Added
+
+- `tests/fixtures/cscli-decisions-list-1.8.1.json`: a masked real `cscli
+  decisions list -o json` sample (9 alerts, 8 decisions). Documentation
+  addresses only; machine id, UUIDs, AS data and coordinates replaced. The
+  Panel, progressive-ban, monitor and Grafana parsers are tested against it,
+  with a control showing the old Panel reader produced "?".
+- CI (`apparmor-nginx` job, new `host-integration.sh nginx-appsec` section):
+  real Debian 12 nginx-extras serves the `deploy.sh`-generated site with the
+  real AppSec include in front of an AppSec stand-in that answers like
+  CrowdSec (403 + JSON, no header). It checks four things:
+  - a blocked request lands in `appsec-detections.log` with client address,
+    scrubbed path and `appsec=403`, and an allowed request does not;
+  - no query string or credential blob reaches the file;
+  - the Panel's own readers count the result;
+  - control: the v4 header-based site logs nothing for the same 403.
+- `tests/test_geoip_monitor.sh`: `geoip-block.sh` against a fake `curl` and
+  `nft` (success, retry then success, the 2026-10-06 failure with the last
+  known-good list kept byte for byte, HTML / shrink / syntax rejection,
+  disabled marker), and the monitor's staleness alert (deduplication,
+  re-arming, pre-stamp installs, never loaded, disabled).
+
+#### Upgrade notes — what the next `sudo bash deploy.sh` changes
+
+- The nginx site is regenerated (template v4 → v5; the previous file is
+  backed up, and the TLS block is re-applied when the site serves HTTPS).
+- Blocked requests start appearing in `appsec-detections.log`. The monitor's
+  "AppSec Detections" Discord WARNING now fires for real (at most one every
+  5 minutes, listing the top addresses), as do the Panel tile and chart.
+- `geoip-block.sh` runs once during the deploy with a short retry schedule
+  and writes the first `last-success` stamp. Until a stamp exists, the
+  monitor and Panel judge freshness by the modification time of
+  `/etc/nftables.d/99-geoip.conf`, which only a successful refresh rewrites.
+
 > **v1.3.0 was withdrawn on 2026-05-18 — do not use.** The systemd unit change in v1.3.0 (moving `StartLimit*` from `[Service]` to `[Unit]`) activated a previously-silent `StartLimitBurst=3` that, combined with the watchdog's 60-second timer and `FailureAction=reboot`, caused an unbounded reboot loop on the 4th start. **v1.3.1 supersedes v1.3.0** and contains the same fixes plus the burst-value correction. Install v1.3.1 or later.
 
 ## [2.1.0] — 2026-07-29

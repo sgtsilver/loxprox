@@ -1313,7 +1313,9 @@ install_nginx() {
 # exactly the bug this versioning replaces.
 #   v4 (2026-10): proxy_hide_header for every security header nginx sets
 #                 itself, so the Miniserver's own copies stop being duplicated.
-_LOXPROX_SITE_TEMPLATE_VERSION=4
+#   v5 (2026-10): AppSec verdict from the subrequest's status, not a header
+#                 CrowdSec never sends — appsec-detections.log gets written.
+_LOXPROX_SITE_TEMPLATE_VERSION=5
 _LOXPROX_SITE_VERSION_MARKER="# LOXPROX-SITE-TEMPLATE-VERSION:"
 _LOXPROX_SITE_PARAMS_MARKER="# LOXPROX-SITE-PARAMS:"
 
@@ -1394,10 +1396,10 @@ configure_nginx() {
     # v1.5.0 originally tried to move the AppSec map + log_format out of the
     # site file into /etc/nginx/conf.d/loxprox-appsec.conf so future AppSec
     # features could land without touching the operator-customizable site.
-    # That fails nginx -t on Debian 12: `auth_request_set $appsec_action ...`
-    # is the directive that registers `$appsec_action` with nginx's variable
+    # That fails nginx -t on Debian 12: `auth_request_set $appsec_status ...`
+    # is the directive that registers `$appsec_status` with nginx's variable
     # subsystem, and it lives inside the location block. The map (or any
-    # `if=$appsec_action` reference) requires the variable to be already
+    # `if=$appsec_status` reference) requires the variable to be already
     # registered at parse time — which it isn't if it sits in a conf.d file
     # that nginx loads before sites-enabled/. So in v1.5.0 the map and
     # log_format stay inline in the site file (same as v1.4.0), and the only
@@ -1466,21 +1468,32 @@ configure_nginx() {
             # WAF. That trades availability for safety: an AppSec outage degrades
             # to a gateway outage, never to an unprotected passthrough. This is
             # intentional for a security gateway; do not "fix" it into fail-open.
+            # 2026-10 (template v5): the verdict is the AppSec subrequest's
+            # HTTP status. The old source, $upstream_http_x_crowdsec_action,
+            # read an "X-Crowdsec-Action" response header the CrowdSec AppSec
+            # component never sends — it answers 200 (allow) or 403 (ban, its
+            # default blocked code) with a JSON body — so the map never
+            # matched and appsec-detections.log stayed empty from the day it
+            # was introduced (2026-05-26). auth_request_set runs before
+            # auth_request returns the 401/403, so the variable is set in the
+            # log phase of a blocked request.
             appsec_auth='
         auth_request      /crowdsec-appsec;
-        auth_request_set  $appsec_action $upstream_http_x_crowdsec_action;'
+        auth_request_set  $appsec_status $upstream_status;'
             # Map registers $appsec_blocked at http scope so the access_log
             # `if=$appsec_blocked` directive can resolve it at parse time.
             # Keeping map + log_format inline (rather than in conf.d/) — see
             # the comment above about why nginx rejects the split.
-            appsec_http_extras='map $appsec_action $appsec_blocked {
+            # The request line is logged with the F3-scrubbed path
+            # ($loxone_log_uri, no query string): a false positive on a real
+            # app request must not write its session blob to disk.
+            appsec_http_extras='map $appsec_status $appsec_blocked {
     default       0;
-    "deny"        1;
-    "ban"         1;
-    "captcha"     1;
+    "401"         1;
+    "403"         1;
 }
-log_format appsec_evt '\''$time_iso8601 $remote_addr "$request" '\''
-                      '\''appsec=$appsec_action status=$status '\''
+log_format appsec_evt '\''$time_iso8601 $remote_addr "$request_method $loxone_log_uri $server_protocol" '\''
+                      '\''appsec=$appsec_status status=$status '\''
                       '\''ua="$http_user_agent" xff="$http_x_forwarded_for"'\'';
 '
             appsec_access_log='    access_log /var/log/nginx/appsec-detections.log appsec_evt if=$appsec_blocked;'
@@ -4709,7 +4722,10 @@ main() {
     local geoip_src="${SCRIPT_DIR:-.}/security-monitoring/geoip-block.sh"
     if [[ -f "$geoip_src" ]]; then
         _loxprox_install_script "$geoip_src" "$LOXPROX_INSTALL_DIR/geoip-block.sh"
-        bash "$LOXPROX_INSTALL_DIR/geoip-block.sh" || warn "GeoIP blocklist initial load failed — will retry via cron"
+        # A short retry schedule here: the nightly cron run uses the full
+        # backoff (minutes), which a deploy should not sit through.
+        GEOIP_RETRY_DELAYS="5" GEOIP_MAX_TIME=60 bash "$LOXPROX_INSTALL_DIR/geoip-block.sh" \
+            || warn "GeoIP blocklist load failed — last known-good list kept; the nightly cron run retries"
     fi
 
     install_nginx

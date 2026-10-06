@@ -21,8 +21,8 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DISCORD="${DISCORD_ALERT_PATH:-$SCRIPT_DIR/discord-alert.sh}"
-LOG_FILE="/var/log/loxprox-monitor.log"
-STATE_DIR="/var/lib/loxprox"
+LOG_FILE="${LOXPROX_MONITOR_LOG:-/var/log/loxprox-monitor.log}"
+STATE_DIR="${LOXPROX_STATE_DIR:-/var/lib/loxprox}"
 ALERT_COOLDOWN=300  # 5 min between identical alert types
 CERT_ALERT_COOLDOWN=86400  # H13: cert expiry is a slow-moving fact — 1 alert/day/level
 
@@ -32,6 +32,12 @@ CERT_ALERT_COOLDOWN=86400  # H13: cert expiry is a slow-moving fact — 1 alert/
 # is actually live.
 TLS_CERT="${LOXPROX_TLS_CERT:-/etc/loxprox/tls/fullchain.pem}"
 NGINX_SITE="${LOXPROX_NGINX_SITE:-/etc/nginx/sites-available/loxone}"
+
+# 2026-10: GeoIP blocklist freshness (stamps written by geoip-block.sh).
+GEOIP_DIR="${LOXPROX_GEOIP_DIR:-/var/lib/loxone-geoip}"
+GEOIP_NFT_FILE="${LOXPROX_GEOIP_NFT:-/etc/nftables.d/99-geoip.conf}"
+GEOIP_SCRIPT="${LOXPROX_GEOIP_SCRIPT:-/opt/loxprox/geoip-block.sh}"
+GEOIP_STALE_DAYS="${GEOIP_STALE_DAYS:-3}"
 
 mkdir -p "$STATE_DIR"
 
@@ -181,7 +187,7 @@ check_appsec_detections() {
     [ "$current_pos" -le "$last_pos" ] && { echo "$current_pos" > "$last_check_file"; return 0; }
     
     local detections
-    # M7: the appsec_evt log_format is `$time_iso8601 $remote_addr "$request" ...`
+    # M7: the appsec_evt log_format is `$time_iso8601 $remote_addr "<method> <path> <proto>" ...`
     # — field 1 is the timestamp, so aggregating it produced one line per second
     # instead of a top-offender list. Field 2 is the client IP.
     detections=$(tail -c +$((last_pos + 1)) "$log" 2>/dev/null | awk '{print $2}' | sort | uniq -c | sort -rn | head -10) || true  # H2-class: SIGPIPE/no-match must not abort
@@ -258,6 +264,52 @@ check_cert_expiry() {
     fi
 }
 
+check_geoip_staleness() {
+    # 2026-10: a failed nightly refresh keeps the last known-good list — safe,
+    # but it failed silently night after night. One WARNING per stale episode:
+    # the alert is keyed to the last success it reports, so it is re-armed only
+    # after the list has refreshed again.
+    [ -f "$GEOIP_SCRIPT" ] || return 0
+    [ -e "$GEOIP_DIR/disabled" ] && return 0
+
+    local last_ok="" ranges="" now
+    if [ -f "$GEOIP_DIR/last-success" ]; then
+        read -r last_ok ranges < "$GEOIP_DIR/last-success" || true
+    fi
+    # Installs that predate the stamp: the nftables include is rewritten only
+    # after a successful refresh (deploy.sh's placeholder has no "Generated:").
+    if [[ ! "$last_ok" =~ ^[0-9]+$ ]] && grep -qs 'Generated:' "$GEOIP_NFT_FILE"; then
+        last_ok=$(stat -c %Y "$GEOIP_NFT_FILE" 2>/dev/null) || last_ok=""
+    fi
+    [[ "$last_ok" =~ ^[0-9]+$ ]] || last_ok=0
+
+    now=$(date +%s)
+    if (( now - last_ok < GEOIP_STALE_DAYS * 86400 )); then
+        rm -f "$STATE_DIR/geoip_stale_alerted"
+        return 0
+    fi
+    [ "$(cat "$STATE_DIR/geoip_stale_alerted" 2>/dev/null)" = "$last_ok" ] && return 0
+
+    local since reason="" fail_ts="" fail_reason=""
+    if (( last_ok > 0 )); then
+        since="has not refreshed for $(( (now - last_ok) / 86400 )) day(s) — last success $(date -d "@$last_ok" '+%Y-%m-%d %H:%M')"
+    else
+        since="has never refreshed successfully"
+    fi
+    # The last failure's reason, if it is newer than the last success.
+    if [ -f "$GEOIP_DIR/last-failure" ]; then
+        read -r fail_ts fail_reason < "$GEOIP_DIR/last-failure" || true
+        if [[ "$fail_ts" =~ ^[0-9]+$ ]] && (( fail_ts > last_ok )); then
+            reason="${fail_reason:0:300}"
+        fi
+    fi
+    "$DISCORD" "WARNING" "GeoIP Blocklist Stale" \
+        "The GeoIP blocklist ${since}.\nThe last known-good list${ranges:+ (${ranges} ranges)} stays active, but new ranges are not picked up.\n${reason:+Last error: ${reason}\n}\nCheck: sudo bash ${GEOIP_SCRIPT}; tail /var/log/loxprox-cron.log" \
+        2>/dev/null || true
+    echo "$last_ok" > "$STATE_DIR/geoip_stale_alerted"
+    log "ALERT [WARNING]: GeoIP blocklist stale"
+}
+
 check_gateway_health() {
     if ! systemctl is-active --quiet nginx; then
         send_alert "CRITICAL" "NGINX DOWN" "nginx service is not running on the gateway." "nginx_down"
@@ -282,8 +334,12 @@ main() {
     check_appsec_detections
     check_system_resources
     check_cert_expiry
+    check_geoip_staleness
     
     log "Security monitor cycle completed"
 }
 
-main "$@"
+# Only run when executed, not when sourced (tests source it for single checks).
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

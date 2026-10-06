@@ -18,7 +18,11 @@ mkdir -p "$OUTDIR"
 
 CROWDSEC_BLOCKS=0
 if command -v cscli >/dev/null 2>&1; then
-    CROWDSEC_BLOCKS=$(cscli decisions list -o json 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
+    # `decisions list -o json` prints ALERTS with nested decisions — `length`
+    # counted alerts. Count distinct banned values across all of them (any
+    # shape: flat list or alerts), like gateway-monitor.sh does.
+    CROWDSEC_BLOCKS=$(cscli decisions list -o json 2>/dev/null \
+        | jq '[.. | objects | select(has("value") and has("duration")) | .value] | unique | length' 2>/dev/null || echo 0)
 fi
 
 CROWDSEC_ALERTS=0

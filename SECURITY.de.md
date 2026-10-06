@@ -113,6 +113,7 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 - Forward Policy: DROP
 - CrowdSec Bouncer verwaltet die dynamische `table ip crowdsec` für Live-Blocks
 - Statische Regeln in `table inet filter` werden bei Reload nie überschrieben
+- GeoIP-Drop-Set (`@geoip_blocklist`, `/etc/nftables.d/99-geoip.conf`): ipdeny.com-Listen für CN, RU, KP und IR, beim Deploy geladen und nachts um 03:00 Uhr von `geoip-block.sh` aktualisiert. Jede Liste wird mit Backoff erneut versucht und muss eine Prüfung bestehen, bevor sie die aktive ersetzen darf (nur IPv4-CIDR-Zeilen, damit eine HTML-Fehlerseite nie in nftables landet; eine Mindestanzahl; nicht mehr als 50 % kleiner als die letzte gültige Liste). Scheitert eine Liste, bleibt das letzte gültige Set geladen, und der Grund je Land (curl-Fehler, HTTP-Status, Prüfung) steht in `/var/log/loxprox-cron.log`. Ist die Liste seit 3 Tagen nicht aktualisiert, gibt es eine Discord-WARNING und einen Eintrag in der "Was zu tun ist"-Liste des Panels. Hinweis: Ein gesperrtes Land sperrt auch den eigenen Zugriff von dort (Reisen).
 
 ### Layer 2: Reverse Proxy (nginx)
 
@@ -167,11 +168,6 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 ---
 
 ## Was noch hinzukommen könnte (Future Hardening)
-
-### Geo-Blocking
-- High-Risk-Länder via ipdeny.com + nftables-Set blocken
-- Status: Script existiert, per Default nicht aktiv (kann reisende Nutzer ausschließen)
-- Aktivieren: `GEOIP_ENABLED=true /opt/loxprox/geoip-block.sh`
 
 ### Fail2ban (redundant, aber zusätzliche Schicht)
 - SSH: max. 3 fehlgeschlagene Logins in 10 Min = 1 Stunde Ban

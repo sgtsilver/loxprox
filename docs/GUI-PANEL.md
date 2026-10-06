@@ -39,7 +39,9 @@ everything OK, and if not, what should I do?*
   an explanation and the action that fixes it: restart a stopped service,
   renew an expiring certificate, check the Miniserver address, open the log
   of a failed apply. Timer-driven units that can't be restarted from the
-  panel show the `systemctl status …` command to run over SSH instead.
+  panel show the `systemctl status …` command to run over SSH instead. A
+  GeoIP blocklist that has not refreshed for 3 days shows its age, the last
+  error and the command to refresh it by hand.
 - **Details** — dense tiles:
 
 | Tile | Shows |
@@ -47,8 +49,8 @@ everything OK, and if not, what should I do?*
 | Services | Each unit and its state: nginx, CrowdSec, firewall bouncer, `loxprox-monitor.timer`, `network-watchdog.timer`, plus frpc and `tunnel-watchdog.timer` when the tunnel is on |
 | Miniserver | Live TCP check against `LOXONE_IP:LOXONE_PORT` |
 | TLS certificate | Days left on `/etc/loxprox/tls/fullchain.pem` — warning under 21 days, problem under 7 |
-| Blocked addresses | Number of active CrowdSec decisions (informational — bans mean the protection works) |
-| Attacks blocked today | AppSec detections today and from how many addresses |
+| Blocked addresses | Number of addresses with an active CrowdSec decision (informational — bans mean the protection works) |
+| Attacks blocked today | Requests the AppSec WAF blocked today (`/var/log/nginx/appsec-detections.log`) and from how many addresses |
 | Last backup | Age and size of the newest `/root/loxprox-backups/*.tar.gz` — warning when older than 26 hours or missing |
 | System | Disk, memory and load as labelled meters |
 | Connection | TLS, tunnel (with the frpc state) or direct HTTP |
