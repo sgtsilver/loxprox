@@ -1,6 +1,6 @@
 **Sprache:** Deutsch · [English](GUI-PANEL.md)
 
-# LoxProx Panel — LAN-only Web-GUI (v2.2)
+# LoxProx Panel — LAN-only Web-GUI (v2.3)
 
 > **Für wen das ist:** für alle, die eine Klick-Ansicht des Gateway-Zustands
 > wollen, eine Ein-Klick-Einladung für Familien-Handys, oder eine Möglichkeit,

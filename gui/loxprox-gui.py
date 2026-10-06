@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LoxProx Panel — LAN-only operator and family GUI (v2.2).
+"""LoxProx Panel — LAN-only operator and family GUI (v2.3).
 
 Serves the family QR invitation, live gateway status with 24h history charts,
 log viewing, a guarded deploy.conf editor with one-click apply, and support
@@ -887,7 +887,7 @@ CSP = ("default-src 'none'; script-src 'self'; "
 
 
 class PanelHandler(BaseHTTPRequestHandler):
-    server_version = "LoxProxPanel/2.2"
+    server_version = "LoxProxPanel/2.3"
     protocol_version = "HTTP/1.1"
 
     # -- plumbing ---------------------------------------------------------

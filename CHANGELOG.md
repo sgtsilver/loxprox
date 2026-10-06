@@ -2,6 +2,599 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.3.0] — 2026-10-06
+
+The v2.3 theme: **a calm ops console, and protections that actually run.**
+The LoxProx Panel became a status-first console that says what to do next.
+Three audits — the 2026-07-29 sweep 4, the 2026-10-05 live health audit and
+the deploys that followed it — found protections that were documented but
+had never worked on a real gateway:
+
+- cron had ignored `/etc/cron.d/loxprox` since v1.3.1, so progressive ban,
+  the daily backup and the GeoIP refresh never ran from cron;
+- progressive ban never saw a decision on CrowdSec 1.8.1;
+- the AppSec detection log had never been written since v1.5.0;
+- there was no nginx AppArmor profile at all;
+- the Panel's Apply killed its own deploy.
+
+All of these are fixed and covered by CI tests. Fixes that touch cron,
+journald, auditd, logrotate, nginx-extras or AppArmor are tested against
+the real service. The ban handling is tested against a masked real
+CrowdSec 1.8.1 sample.
+
+This release bundles everything merged after the v2.2.0 tag:
+
+- the sweep-4 closure across `deploy.sh`, the watchdogs, progressive ban
+  and the relay installer (PR #41);
+- the 2026-08-30 maintenance (PR #42);
+- the calm-console Panel (PR #43);
+- the health-audit fixes and their deploy follow-ups (PRs #44, #45);
+- the Panel-data and GeoIP fixes (PR #46).
+
+A v2.2.0 install upgrades in place with `sudo bash deploy.sh` over SSH;
+read the upgrade notes at the end first.
+
+### Security
+
+- **AppArmor nginx profile, complain-first (ADR 0006).** Debian ships no
+  nginx profile, so `setup_apparmor()`'s enforce-if-present branch never
+  fired and the documented AppArmor layer did not exist (0 processes
+  confined). `apparmor/usr.sbin.nginx` is authored for exactly the gateway's
+  surface (proxy `:1080`, ACME `:80`, AppSec `auth_request` to
+  `127.0.0.1:7422`, USR1 log reopen, read-only `/etc/loxprox/tls/`,
+  `/var/lib/nginx` temp dirs, dynamic modules): a compromised nginx cannot
+  read `/etc/loxprox/` outside `tls/`, touch `/opt/loxprox/` or execute
+  anything. Every deploy loads it in **complain** mode; enforce happens only
+  behind `APPARMOR_NGINX_MODE="enforce"` in `deploy.conf`, after a soak that
+  covers an acme.sh renewal, a logrotate cycle and a full deploy. (PR #42)
+- **MED — the AppArmor profile was not enforce-ready.** In complain mode,
+  nginx-extras logged ~58 `ALLOWED` events on every start/reload, each of
+  them a denial in enforce mode: lua-resty-core under `/usr/share/lua/`, the
+  perl module's pragmas under `/usr/share/perl/<version>/`, a NUMA probe in
+  `/sys/devices/system/node/`, and the binary upgrade
+  (`/run/nginx.pid.oldbin`, re-exec of `/usr/sbin/nginx` under the same
+  profile). All are allowed now, read-only except the pid file. The
+  complain/enforce default is unchanged; the soak restarts with this deploy. (PR #44)
+- **LOW — auditd now watches `/etc/loxprox`, `/etc/apparmor.d` and
+  `/opt/loxprox`** (keys `loxprox_config`, `apparmor_config`,
+  `loxprox_scripts`). Deploys, Panel config saves and acme.sh renewals write
+  there, so expect events in those windows. (PR #44)
+- **CI supply chain:** third-party actions are SHA-pinned
+  (`ludeeus/action-shellcheck` from a floating `@master` to `2.0.0`,
+  `lycheeverse/lychee-action` to `v2.9.0`) and the workflow runs with
+  `permissions: contents: read`. (PR #42)
+- **CI:** `actions/checkout` and `actions/setup-python` bumped to v7
+  (Dependabot, PRs #35 and #37).
+
+### Added
+
+- **TLS certificate expiry monitoring, gateway and relay (sweep-4 H13).**
+  `gateway-monitor.sh` now reads the live certificate's expiry whenever the
+  nginx site is actually in TLS mode and alerts via the existing Discord
+  path — WARNING under 21 days, CRITICAL under 7 days or once expired — at
+  most one alert per day per level; acme.sh renewal failures were
+  previously silent (its cron mails a mailbox that doesn't exist on the
+  gateway). On the relay, new `install-relay.sh --health-check` (services +
+  cert expiry, no changes to the box — safe to cron) reports the same
+  thresholds and fails the run under 7 days. (PR #41)
+- **`RELAY_WHITELIST_IPS` (sweep-4 H10).** The relay's firewall bouncer
+  drops banned sources on every port, including the frp control port, so a
+  single ban of the shared household WAN IP used to sever both the tunnel
+  and operator SSH at once. Listed IPs/CIDRs are written to
+  `/etc/crowdsec/parsers/s02-enrich/whitelist-loxprox-relay.yaml`; an empty
+  list now warns loudly. (PR #41)
+- **On-box version marker.** `write_runtime_config()` writes
+  `/etc/loxprox/VERSION` on every deploy — `version=`/`commit=` from the
+  release tarball's `VERSION` file, else `git describe`, else `unknown`, plus
+  `deployed=` — and `test-gateway.sh` asserts it. (PR #42)
+- **ADR 0005** records the provenance check and retirement of the
+  2026-05-18 on-box backup directory under `/opt` (every file byte-identical
+  to git history; the old monolith deliberately not re-committed). (PR #42)
+
+#### Tests and CI
+
+- `test-gateway.sh`: a *Scheduled Jobs, Log Retention, Audit Coverage*
+  section — cron running and not rejecting the LoxProx files, `logrotate -d`
+  clean, journald cap, audit watches loaded, the Panel's deploy copy
+  root-only, and the AppArmor `ALLOWED` count since nginx started. (PR #44)
+- `test-gateway.sh` checks that `/opt/loxprox` is root-only and that the
+  LoxProx unit files are regular files. (PR #45)
+- CI now runs `deploy.sh`'s own functions against real services on
+  throwaway runners: cron (a `MAILTO=` file is rejected and its job never
+  runs; `MAILTO=""` runs), journald (reports the 300M ceiling), auditd
+  (watches load and fire), a Panel apply job outliving a stop of the Panel's
+  own unit (and, as control, the old child-process launch dying with it),
+  Debian 12 logrotate with the stock nginx stanza
+  present, Debian 12's `apparmor_parser` on the profile, and Debian 12
+  nginx-extras under the profile in complain and enforce mode (start,
+  reload, USR1, USR2 binary upgrade, TLS proxy request), plus the proxied
+  headers through the generated site. (PR #44)
+- CI: the pre-existing user-owned install directory (unit test in the root
+  Debian 12 container, and on a real host with a real login user and a
+  symlinked unit), every acme.sh call carrying `--home` with `HOME=/`,
+  `deploy.sh` under `systemd-run` with no HOME and `UMask=0077`, the HOME and
+  umask a Panel job sees, the real Panel stopped by `systemctl stop` (with a
+  pytest control showing the old handler never returns), and the pipefail
+  guard. (PR #45)
+- `tests/fixtures/cscli-decisions-list-1.8.1.json`: a masked real `cscli
+  decisions list -o json` sample (9 alerts, 8 decisions). Documentation
+  addresses only; machine id, UUIDs, AS data and coordinates replaced. The
+  Panel, progressive-ban, monitor and Grafana parsers are tested against it,
+  with a control showing the old Panel reader produced "?". (PR #46)
+- CI (`apparmor-nginx` job, new `host-integration.sh nginx-appsec` section):
+  real Debian 12 nginx-extras serves the `deploy.sh`-generated site with the
+  real AppSec include in front of an AppSec stand-in that answers like
+  CrowdSec (403 + JSON, no header). It checks four things:
+  - a blocked request lands in `appsec-detections.log` with client address,
+    scrubbed path and `appsec=403`, and an allowed request does not;
+  - no query string or credential blob reaches the file;
+  - the Panel's own readers count the result;
+  - control: the v4 header-based site logs nothing for the same 403. (PR #46)
+- `tests/test_geoip_monitor.sh`: `geoip-block.sh` against a fake `curl` and
+  `nft` (success, retry then success, the 2026-10-06 failure with the last
+  known-good list kept byte for byte, HTML / shrink / syntax rejection,
+  disabled marker), and the monitor's staleness alert (deduplication,
+  re-arming, pre-stamp installs, never loaded, disabled). (PR #46)
+- pytest guards for the front-end: every `/static/` reference resolves,
+  only allowlisted file types are shipped, no `vendor/` bundles, no
+  external URLs, no inline script/handlers/styles, no HTML-string sinks or
+  dynamic code in the JS, no emoji, DE/EN string parity, every editable
+  key has a DE/EN label; plus tests for the CSP string, the static cache
+  policy and the invite page. (PR #43)
+
+### Changed
+
+- **LoxProx Panel redesigned as a calm, status-first ops console.** The
+  overview now answers "is everything OK, and if not, what should I do?":
+  one plain-language summary, then a "what to do" list with the fixing
+  action on each item (restart a stopped service, renew an expiring
+  certificate, check the Miniserver address, open a failed job's log), then
+  dense status tiles and the 24h charts. Neutral light/dark themes with
+  Loxone green only as a restrained accent; no gradients, glass or glow;
+  status is always icon + word, never color alone. DE (default) / EN and the
+  light/dark/auto override carry over. It replaces the v2.2.0 tabbed
+  dashboard, including the interim plain-language tiles and SYSTEM
+  micro-bars that landed in between. (PR #43)
+- **Charts are legible and have text equivalents.** Hand-rolled SVG charts
+  plot real time (gaps stay gaps), show axis values, a one-sentence summary
+  and an hourly "values as a table" view; hover or arrow keys read single
+  values. AppSec hits are now shown per hour as bars. (PR #43)
+- **Real states everywhere.** Loading, "collecting data" (fresh history),
+  failed request vs. empty result, stale data with "last updated" and
+  automatic retry, and background jobs as running / ok / finished with
+  warnings / failed / result unknown (when the apply restarts the panel
+  mid-job). (PR #43)
+- **Config editor** is typed from the server schema with per-field format
+  hints, client-side checks plus server error mapping (error summary and
+  inline messages), a changed-field count, "discard changes", and secrets
+  that are never displayed (leave empty to keep, explicit "remove"). Save
+  sends only changed keys; Apply offers to save unsaved changes first. (PR #43)
+- **Navigation** is four hash-addressable views (`#overview`, `#security`,
+  `#config`, `#logs`) with focus moved to the view heading; on phones a
+  bottom tab bar that stops being fixed on short (zoomed) viewports. The
+  family-invite QR card moved to Configuration; the printable invite stays
+  one click away in the header. (PR #43)
+- **Password prompt** for `GUI_PASSWORD` is a proper dialog with a
+  wrong-password message instead of `window.prompt`; destructive and
+  impactful actions (unban, restart, apply, renew) confirm in a dialog and
+  report their result in place. (PR #43)
+- **`/invite`** renders `lang="en"` for the English page, uses real links
+  for the DE/EN switch (no buttons nested in links), keeps an explicit
+  `?host=` across the language switch, follows the panel theme, and says
+  "QR code could not be generated" instead of "no host" when qrencode fails. (PR #43)
+- **Accessibility (targets WCAG 2.2 AA):** skip link, landmarks and heading
+  order, visible focus, full keyboard operation (including chart readouts),
+  text contrast ≥ 4.5:1 and indicators/control boundaries ≥ 3:1 in both
+  themes, 44 px touch targets on touch screens, reflow at 320 px, labelled
+  fields with associated errors, and polite live-region announcements for
+  status changes and results.
+  - Checked in headless Chrome against a mock-API preview: contrast in both
+    themes, keyboard and focus order, and reflow at 320 px and 400 % zoom.
+  - Not yet tested: a screen reader, Safari, Firefox, and 200 % text-only
+    zoom. (PR #43)
+- **The Panel's apply job now reports a deploy that finished with degraded
+  optional steps (`deploy.sh` exit `3`) as a distinct warning, not a
+  failure.** (PR #41)
+
+### Removed
+
+- **three.js and anime.js removed.** The particle-shield scene and the
+  vendored `gui/static/vendor/` bundles (~870 KB) are gone; motion is
+  limited to short state transitions and a progress spinner, and
+  `prefers-reduced-motion` disables those. `deploy.sh` already replaces
+  the installed `static/` directory wholesale, so an upgrade deletes the
+  stale bundles (now covered by the deploy integration test, and
+  `test-gateway.sh` checks they are no longer served). (PR #43)
+- **The unconditional `aa-enforce` of any existing nginx profile.** A
+  soaking profile can no longer flip to enforce as a side effect of a
+  deploy (PR #42).
+
+### Fixed
+
+#### Protections that never ran
+
+- **HIGH — cron ignored `/etc/cron.d/loxprox` entirely.** The file carried a
+  bare `MAILTO=` since commit `9bc2fe3` (2026-05-18, the v1.3.0 sweep; first
+  tagged in v1.3.1). Debian's cron does not read an empty unquoted
+  assignment as an environment line: it parses it as a job, fails with
+  "bad minute" and drops the **whole file** ("Syntax error, this crontab
+  file will be ignored"). Progressive-ban escalation, the daily config
+  backup and the daily GeoIP refresh never ran from cron. The line is now
+  `MAILTO=""`. New guard: `deploy.sh` restarts cron after writing its cron
+  files, lints them, and its health check — like `test-gateway.sh` — fails
+  when cron has logged a rejection of the file since it was last written
+  (`journalctl -u cron --since @<mtime>`, so an old rejection never fails a
+  fixed file). (PR #44)
+- **HIGH — the Panel's ban table was unusable, and progressive ban never
+  escalated anything.** On the gateway's CrowdSec 1.8.1, `cscli decisions
+  list -o json` prints *alerts*, each with a nested `decisions` list. The
+  Panel read `value` / `origin` / `duration` at the top level of each alert,
+  so every row showed "?" (and Unban had no address to send), and the count
+  was the number of alerts, not of banned addresses. The Panel now flattens
+  the alerts into their active decisions: one row per address (deduplicated),
+  the scenario taken from the alert when the decision has none, simulated
+  decisions skipped, and a flat list still accepted. The row keys the front
+  end reads are unchanged. The 24-hour "active bans" series counts decisions
+  too. `progressive-ban.py` had the same assumption: it found no `value`
+  anywhere and dropped every entry, so its log read "Extended: 0, Skipped:
+  0" and no repeat offender was ever escalated. It now reads the nested
+  decisions, logs "Active decisions: N (from M listed entries)" and never
+  escalates a simulated decision. The Grafana collector's ban count
+  (`jq 'length'`, which counted alerts) now counts distinct banned addresses.
+  `gateway-monitor.sh`'s "New CrowdSec Ban" alert already searched the JSON
+  recursively and was correct; a test now pins that on the real shape. (PR #46)
+- **MED — "Attacks blocked today" and the AppSec chart were always 0.**
+  `/var/log/nginx/appsec-detections.log` had stayed empty since it was
+  introduced on 2026-05-26 (v1.5.0). nginx wrote a line only when the AppSec
+  subrequest's `X-Crowdsec-Action` response header said "ban" or similar, but
+  CrowdSec's AppSec component never sends that header: it answers 200
+  (allow) or 403 (blocked) with a JSON body. Site template v5 takes the
+  verdict from the subrequest's HTTP status (`auth_request_set $appsec_status
+  $upstream_status`) and logs every 401/403. Only blocked requests are
+  logged, not inspected ones. The request line in that log now uses the
+  scrubbed path (`$loxone_log_uri`, no query string, Loxone credential paths
+  redacted) instead of the raw `$request`. The Panel tile, the AppSec series
+  of the 24-hour chart, the monitor's "AppSec Detections" Discord alert and
+  Grafana all read this file and work without changes. The history file
+  format is unchanged. (PR #46)
+- **MED — a failed GeoIP refresh failed silently, without a reason.** On
+  2026-10-06 03:00, `cn` and `ru` failed and the last known-good list (22,249
+  ranges) was kept, which is correct. But `curl -s` with stderr discarded
+  logged only "failed countries: cn ru", there was a single attempt with a
+  30 s cap, and nothing reported a list that kept failing. A probe from the
+  gateway hours later fetched both lists in under half a second, so this was
+  a transient failure at the source. `geoip-block.sh` now:
+  - retries each list after 30 s, 120 s and 300 s (`GEOIP_RETRY_DELAYS`),
+    with a 120 s transfer limit (`GEOIP_MAX_TIME`);
+  - logs the reason per attempt (curl exit code, HTTP status, curl's
+    message);
+  - validates every list before it can replace the active one: IPv4 CIDR
+    lines only, so an HTML error page answered with 200 is rejected; at
+    least `GEOIP_MIN_RANGES`; and no shrink of more than
+    `GEOIP_MAX_SHRINK_PCT` (50 %) against the last known-good list;
+  - stamps `last-success` (epoch and range count) and `last-failure`
+    (epoch and reason) in `/var/lib/loxone-geoip/`.
+
+  When the list has not refreshed for 3 days (`GEOIP_STALE_DAYS`),
+  `gateway-monitor.sh` sends one Discord WARNING per stale episode. The
+  warning gives the age, the kept range count, the last error and the
+  command to run, and is re-armed only after a successful refresh. The
+  Panel's "what to do" list shows the same (DE/EN). The keep-last-known-good
+  behaviour is unchanged. `deploy.sh`'s own run uses a short retry schedule
+  so a deploy is not held up for minutes. No second download source was
+  added (reasoning in PR #46). (PR #46)
+- **Progressive ban counts attack incidents, not lifetime alerts (sweep-4
+  M9/M10).** `progressive-ban.py` now scores offenses inside a rolling
+  window (`PROGRESSIVE_BAN_WINDOW_DAYS`, default 30) instead of every alert
+  CrowdSec ever recorded — only local scenario/AppSec detections count
+  (CAPI/community entries, manual bans, and the script's own prior
+  extensions are excluded), and alerts within
+  `PROGRESSIVE_BAN_DEDUP_MINUTES` (default 60) of each other count once
+  **regardless of which scenario triggered them** — one multi-scenario burst
+  is one incident, not an instant 30-day ban. IPs covered by the CrowdSec
+  whitelist are never escalated. Defaults are deliberately forgiving for
+  households behind a single NAT/CGNAT address. (PR #41)
+- **AppSec "top offenders" now aggregates the client IP, not the timestamp
+  (sweep-4 M7).** The alert `awk` summed field 1 of the log line instead of
+  field 2 (`$remote_addr`), making the output useless. (PR #41)
+
+#### Deploy and nginx
+
+- **`--bootstrap-config` no longer tears down TLS or the tunnel (sweep-4
+  H1).** The generated `deploy.conf` omitted every `ENABLE_TLS`/`TLS_*`/
+  `ENABLE_TUNNEL`/`TUNNEL_*` key, so the first deploy after a bootstrap
+  reverted a live HTTPS site to cleartext on a WAN-forwarded `:1080`, or tore
+  down a live tunnel. Bootstrap now emits the full key set (TLS, tunnel,
+  panel, alerting) — an existing `deploy.conf` wins per key, then live host
+  state (nginx TLS marker, acme.sh state, `frpc.toml`, panel unit,
+  `config.env`). Secrets are written to the file but redacted from the
+  terminal review output. (PR #41)
+- **The nginx site is regenerated on upgrade instead of frozen forever
+  (sweep-4 H2).** The generated site now carries a template-version stamp and
+  a fingerprint of the `deploy.conf` values it renders; a deploy regenerates
+  it when the stamp is missing, older, or a rate limit / timeout / backend IP
+  changed. Upgraded installs finally receive the credential-scrubbing log
+  format, the `/ws/` location, the CSP, and the AppSec detection log.
+  Regeneration backs up the old file first, re-applies the TLS block if the
+  site was serving HTTPS, and reverts to the backup if `nginx -t` fails.
+  `LOXPROX_KEEP_NGINX_SITE=1` freezes a hand-maintained site;
+  `LOXPROX_FORCE_REGEN_NGINX=1` regenerates unconditionally. (PR #41)
+- **A failed AppSec bootstrap no longer serves 500 to every request (sweep-4
+  H3).** The include is now written as a pass-through stub (`return 204`,
+  fail-open) instead of being left empty, the degradation is recorded and
+  printed at the end of the run, and the deploy's health check performs a
+  real HTTP request against the gateway's own listener and fails on a
+  genuine 5xx. (PR #41)
+- **An optional feature failing no longer aborts the whole deploy (sweep-4
+  H12/M19).** TLS, tunnel, and CrowdSec setup now run through a wrapper that
+  warns, records, and continues on failure, so trouble in one of them can no
+  longer skip SSH hardening, monitoring, the watchdogs, or `config.env`.
+  Degraded steps are listed at the end of the run and the deploy now exits
+  `3` — `ALL CHECKS PASSED` can no longer print next to a step that silently
+  failed. (PR #41)
+- **HIGH — the persistent deploy copy was refused on real installs, so the
+  Panel's Apply/Renew stayed broken.** `/opt/loxprox` had been created by hand
+  before `deploy.sh` managed it and belonged to the SSH login user (uid 1000),
+  as did two hand-copied unit files in it; `install_deploy_source` correctly
+  refused to put root-run code there. `deploy.sh` now normalises the install
+  directory before installing anything into it — `root:root 0755`, nothing
+  below it owned by another user or group/world-writable (symlinks are never
+  followed) — and installs every root-run script
+  as new files (unlinked first, then `install -o root`) instead of `cp`, which
+  kept the previous owner of an existing file and rewrote it in place. Unit
+  files `deploy.sh` owns are written as regular root-owned files; a symlink in
+  their place (the `systemctl link` shape) is replaced instead of written
+  through into its target. A symlinked install directory aborts the deploy. (PR #45)
+- **HIGH — acme.sh depended on `$HOME`.** A deploy launched without HOME (a
+  `systemd-run` unit — which is also how the Panel runs Apply/Renew) made
+  acme.sh use `/.acme.sh`: a second Let's Encrypt account and a certificate
+  issued outside `/root/.acme.sh`. Every acme.sh call now passes
+  `--home "$ACME_HOME"`, `deploy.sh` sets `HOME` to root's home when it runs
+  as root without one, Panel jobs get `HOME=/root` and `UMask=0022`, and a
+  leftover `/.acme.sh` is named in the TLS step (not deleted — it holds key
+  material). (PR #45)
+- **MED — inherited umask.** `deploy.sh` ran with its launcher's `umask 077`
+  and created `/etc/systemd/journald.conf.d` as `0700`. It now sets
+  `umask 022` first thing, and the drop-in directories it owns are created
+  with an explicit mode, which also corrects an existing `0700` one. (PR #45)
+- **MED — false results under `pipefail`.** `cmd | grep -q …` returns 141
+  when grep exits at the first match and the writer dies of SIGPIPE, so a
+  match read as a miss: `test-gateway.sh` reported "Decision creation
+  failed" for a decision that existed and warned about SSH source
+  restrictions and the CrowdSec nftables table; `deploy.sh`'s
+  `dpkg -l | grep -q` re-ran `apt-get install`; the relay reported key-only
+  SSH as password-enabled. Every such pipeline in the shipped scripts now
+  captures first and matches the captured text (`grep -q … <<<"$out"`);
+  `head -1` became `awk '… && !n++'` / `sed -n 1p`. A static test rejects
+  `| grep -q`, `| grep -m`, `| head`, `| awk …exit` and `| sed …q` in every
+  shipped pipefail script. (PR #45)
+- **A wrong `GATEWAY_IP` is now rejected at preflight (sweep-4 H6)** —
+  checked against `ip -o -4 addr show` instead of just its format, closing
+  off a root cause of watchdog reboot loops. (PR #41)
+- **acme.sh now extracts and runs from `/var/tmp`, not `/tmp` (sweep-4
+  H8)**, which the CIS hardening step mounts `noexec`. (PR #41)
+- **`APPSEC_MODE=monitor` actually does something now (sweep-4 H11).** It
+  was documented as a false-positive escape hatch but was never wired to
+  CrowdSec. `monitor` now writes a local AppSec config carrying the hub's
+  virtual-patching rules with `default_remediation: allow` — matches raise a
+  CrowdSec alert, never block — and falls back to `enforce` with a loud
+  warning if CrowdSec won't start with it. An invalid value now aborts the
+  deploy instead of silently enforcing. Detections in monitor mode show up
+  in `cscli alerts list`, not in `/var/log/nginx/appsec-detections.log`
+  (which nginx only writes to on a BLOCK verdict). (PR #41)
+- **`ENABLE_*` toggles are compared case-insensitively (sweep-4 M5)** —
+  `True`/`Yes` no longer silently disabled the WAF. (PR #41)
+- **LOW — duplicate, conflicting security headers on proxied responses.**
+  The Miniserver's own `X-Frame-Options: deny` and `X-XSS-Protection`
+  passed through next to the gateway's headers. The site template (now v4 —
+  existing sites regenerate on the next deploy, TLS block re-applied) hides
+  the upstream copy of every header the gateway sets, plus
+  `X-XSS-Protection`. `test-gateway.sh` checks an HTTPS-proxied response, not
+  just the 301, for exactly one of each. (PR #44)
+
+#### Panel
+
+- **HIGH (latent) — the Panel's Apply killed its own `deploy.sh`.** The job
+  was a child process of the Panel, i.e. inside `loxprox-gui.service`'s
+  cgroup; `deploy.sh`'s `setup_gui` restarts that unit, and systemd's default
+  `KillMode=control-group` killed the deploy halfway (everything after the
+  Panel step, the health check included, never ran) while the restarted
+  Panel had forgotten the job. Apply and Renew-TLS now run as their own
+  transient unit (`systemd-run --unit loxprox-job-<id> --collect`), outside
+  the Panel's cgroup and its `PrivateTmp`; a wrapper records the exit code
+  next to the job log and the job's metadata is persisted, so the restarted
+  Panel reports the job as still running or finished with its real result.
+  `/api/job/<id>` keeps its JSON shape; job files are pruned to the newest 20. (PR #44)
+- **MED — the Panel's Apply and Renew-TLS buttons refused after a reboot.**
+  `config.env` recorded wherever `deploy.sh` had been run from — typically
+  under `/tmp`, which the tmpfs `/tmp` loses on reboot and which the Panel
+  (`PrivateTmp`) never saw anyway. `deploy.sh` now persists exactly the
+  files it reads at run time to `/opt/loxprox/deploy/` (root:root, `0750`,
+  nothing accessible to other users), swaps a new copy in by rename so a
+  running copy is never overwritten in place, and records
+  `/opt/loxprox/deploy/deploy.sh` in `config.env`. A re-run from that copy —
+  the Panel's apply — leaves it as is. The SOFT-SSH login banner now names
+  this path instead of a `/opt/loxprox/deploy.sh` that never existed. (PR #44)
+- **MED — stopping the Panel hung for 90 s and ended in SIGKILL.** Its
+  SIGTERM handler called `server.shutdown()` from the thread running
+  `serve_forever()`, which then waited for itself. Shutdown is requested
+  from another thread now; the Panel exits within a second and saves its
+  chart history. The Panel unit drops `After=nginx.service` (it made every
+  nginx stop wait for the Panel — during the reboot nginx answered 500 for
+  ~90 s after CrowdSec had already stopped) and gets `TimeoutStopSec=10`. (PR #45)
+
+#### Watchdogs
+
+- **Watchdog no longer reboots the gateway when the Miniserver is down
+  (sweep-4 H5).** `check_nginx_local` only accepted 2xx/3xx/401/403, so a
+  Miniserver outage produced a 502, escalated through the heal path, and
+  rebooted the VM twice an hour. A 502/504 proves the opposite of what it was
+  read as — nginx answered, so the listener is alive and only the Miniserver
+  behind it is down. Those codes now count as nginx-healthy; a Miniserver
+  outage instead raises its own alert-only condition ("Miniserver
+  Unreachable — Gateway Healthy", with a "Miniserver Reachable Again"
+  recovery notice) that never heals, restarts, or reboots anything. (PR #41)
+- **Tunnel watchdog no longer restarts frpc for a backend 502 (sweep-4
+  M11).** A public-path 502/504 is now cross-checked against the local
+  nginx: if the gateway itself answers 502, the relay is only forwarding it,
+  the tunnel transport is fine, and frpc is left alone instead of being
+  restarted — which used to kill every live WebSocket and send a misleading
+  CRITICAL. A genuine transport failure (no answer, 503) still restarts frpc
+  and still alerts. A probe bug in the same path — a failed curl producing a
+  two-line status string that matched no branch — used to report a fully
+  dead relay as healthy; fixed alongside it. (PR #41)
+
+#### Logs and journal
+
+- **LOW — LoxProx's own logs were never rotated** (`loxprox-monitor.log` had
+  reached 41 MB, `loxprox-network-watchdog.log` 25 MB). New
+  `/etc/logrotate.d/loxprox` covers `/var/log/loxprox-*.log`: weekly or at
+  10 MB, 8 compressed generations, `copytruncate` (the Panel's unit holds
+  its log open). (PR #44)
+- **The 2026-08-30 logrotate collision is fixed for good.** Debian's stock
+  `/etc/logrotate.d/nginx` (`/var/log/nginx/*.log`) also matches the
+  `loxone-*.log`/`appsec-detections.log` stanza; logrotate skipped the stock
+  file and the nightly run failed. `deploy.sh` now narrows the untouched
+  stock glob to `access.log` + `error.log` (in place, backed up first) — the
+  same yield that was applied by hand on the production gateway — so fresh
+  installs and a restored stock conffile no longer collide. (PR #44)
+- **LOW — journald could take 10 % of the disk.** New drop-in
+  `/etc/systemd/journald.conf.d/50-loxprox.conf` sets `SystemMaxUse=300M`;
+  journald is restarted only when the drop-in changes. (PR #44)
+
+#### Relay
+
+- **Relay re-runs no longer downgrade a live TLS relay to plain HTTP
+  (sweep-4 H9).** `install-relay.sh` now detects an existing, still-valid
+  certificate covering `RELAY_DOMAIN` alongside a live `:443` site and skips
+  the phase-1 `:80`-only rewrite; ACME renewals keep working through the
+  phase-2 site's own challenge block. (PR #41)
+- **Relay backups keep the original file instead of overwriting it (sweep-4
+  M18).** Backups now preserve the full path under
+  `/root/loxprox-relay-backup-<timestamp>/files/…` with a manifest, and a
+  file backed up twice in one run gets a timestamped copy instead of
+  clobbering the first — previously the phase-2 nginx-site backup overwrote
+  the pre-install one. (PR #41)
+- **Relay auto-renewal check works again (sweep-4 M13).** The acme.sh cron
+  probe matched a path-prefixed pattern `--install-cronjob` never writes, so
+  it was permanently false; it now matches the same invariant substring
+  `deploy.sh` was fixed to use in v2.0.1. (PR #41)
+
+#### `test-gateway.sh`
+
+- `test-gateway.sh`'s proxy test now speaks TLS to the gateway when
+  `ENABLE_TLS=true` (fixing a spurious failure against TLS-mode production
+  gateways) and additionally asserts the plain-HTTP-on-`:1080` 301 grace
+  redirect in that mode; the backup test now cleans up the tarball it
+  creates. (PR #41)
+- **`test-gateway.sh` read `ENABLE_TLS` from `config.env`, which never
+  carries it.** The TLS-mode proxy branch fell back to plain HTTP (a false
+  301 failure), and `test_tls()` had been skipped on every TLS-mode gateway
+  since v2.0.1. It now reads `deploy.conf`. (PR #42)
+- **`test-gateway.sh`'s CrowdSec counters.** It read field 2 of `cscli
+  metrics` table rows — the engine/source name, not a count — and cscli
+  rounds counts (`1.23k`), so "AppSec metrics did not increment" could never
+  clear; in TLS mode its test request also went to `http://` and was
+  answered by the 497 → 301 redirect before AppSec ran. Counts now come from
+  `cscli metrics -o json` (fallback: CrowdSec's Prometheus endpoint), the
+  request uses the listener's scheme, and an unreadable counter is reported
+  as such. The decision check reads the whole `ip crowdsec` table (newer
+  bouncers keep one set per origin). (PR #45)
+
+#### Documentation
+
+- **Docs:** SECURITY, README and ABOUT (EN + DE) no longer claim the AppArmor
+  profile is enforced — it runs in complain mode until the operator opts in. (PR #44)
+- **Docs:** `phase4-monitoring` (EN + DE) describes both logrotate files, the
+  stock-nginx yield and a full-config `logrotate -d` check. (PR #45)
+- **Docs:** `SECURITY` (EN + DE) described geo-blocking as "not enabled by
+  default". It is on, so the description moved to Layer 1 with the refresh,
+  validation and alerting behaviour. `GUI-PANEL` (EN + DE) describes the ban
+  count, the AppSec tile and the GeoIP item. (PR #46)
+
+### Upgrade notes — from v2.2.0
+
+Upgrade in place with `sudo bash deploy.sh` **over SSH**, not with the
+Panel's Apply button. The v2.2.0 Panel launches `deploy.sh` as its own child
+process and would kill it when the deploy restarts the Panel. The deploy
+then changes the following on the box.
+
+- **The nginx site is regenerated.** It moves to template version 5, either
+  from the unstamped v2.2.0 site or from v3/v4 on an install that tracked
+  `main`.
+  - The previous file is backed up first.
+  - The TLS block is re-applied when the site serves HTTPS.
+  - A site that fails `nginx -t` is reverted to the backup.
+  - Hand edits are replaced unless `LOXPROX_KEEP_NGINX_SITE=1` is set.
+- **`/opt/loxprox` is normalised.**
+  - It becomes `root:root 0755`, with nothing below it owned by another
+    user or writable by group/world. Each change is logged.
+  - Root-run scripts are installed as new root-owned files.
+  - Unit files that were symlinks become regular files.
+  - `/opt/loxprox/deploy/` is created, and `config.env` points the Panel
+    at it.
+- **cron finally runs the LoxProx jobs.** After a one-time cron restart,
+  `/etc/cron.d/loxprox` (now `MAILTO=""`) takes effect: progressive ban
+  every 15 minutes, the config backup at 02:00 and the GeoIP refresh at
+  03:00.
+- **Progressive ban escalation is active for the first time.** It now sees
+  the active decisions. Its first runs may escalate repeat offenders
+  (2 or more incidents within 30 days) to 24 h, 7 d or 30 d. Addresses in
+  the CrowdSec whitelist are never escalated.
+- **AppSec detections are logged and alerted.**
+  - Blocked requests appear in `/var/log/nginx/appsec-detections.log`.
+  - The monitor's "AppSec Detections" Discord WARNING starts firing, at
+    most once every 5 minutes.
+  - The Panel's "Attacks blocked today" tile and chart start counting.
+  - With `APPSEC_MODE=monitor`, nothing is blocked, so the file stays empty
+    by design.
+  - An invalid `APPSEC_MODE` now aborts the deploy instead of silently
+    enforcing.
+- **journald is capped.**
+  - The drop-in `/etc/systemd/journald.conf.d/50-loxprox.conf` sets
+    `SystemMaxUse=300M`.
+  - journald restarts once and trims the persistent journal.
+  - The drop-in directory becomes `0755`.
+- **LoxProx logs are rotated.**
+  - The new `/etc/logrotate.d/loxprox` rotates weekly or at 10 MB and keeps
+    8 compressed generations. Its first nightly run rotates oversized logs
+    right away.
+  - Debian's stock `/etc/logrotate.d/nginx` is narrowed to `access.log` and
+    `error.log`. It is backed up first.
+- **auditd** reloads its rules with three more watches: `/etc/loxprox`,
+  `/etc/apparmor.d` and `/opt/loxprox`. Expect events during deploys, Panel
+  saves and acme.sh renewals.
+- **AppArmor stays in complain mode by default.** The nginx profile is
+  loaded in complain mode on every deploy. It is enforced only with
+  `APPARMOR_NGINX_MODE="enforce"` after a soak (ADR 0006). The profile
+  changed in this release, so restart the soak clock.
+- **The Panel is replaced, and Apply no longer kills its own deploy.**
+  - The calm-console front end replaces the v2.2 dashboard. The installed
+    `static/` directory is replaced wholesale, which deletes the three.js
+    and anime.js bundles.
+  - The Panel unit is rewritten (no `After=nginx.service`,
+    `TimeoutStopSec=10`) and restarted. This one stop still runs the old
+    code, so it may take 10 s and end in SIGKILL.
+  - From then on, Apply and Renew TLS each run as their own transient unit
+    (`loxprox-job-<id>`), so a Panel restart no longer kills them. They use
+    the deploy copy in `/opt/loxprox/deploy/`, which survives a reboot.
+- **TLS.**
+  - acme.sh always uses `/root/.acme.sh`.
+  - A stray `/.acme.sh` from a run without `HOME` is reported, not deleted,
+    because it holds key material.
+  - Certificate-expiry alerts start: WARNING under 21 days, CRITICAL under 7
+    days.
+- **GeoIP.** The deploy runs the new `geoip-block.sh` once with a short retry
+  schedule, which writes the first `last-success` stamp.
+- **Exit code 3** now means the deploy finished with degraded optional
+  steps. The steps are listed at the end of the run, and the Panel shows
+  this as a warning, not a failure.
+- **`/etc/loxprox/VERSION`** records the deployed version and commit.
+- **Relay, if you run one.** It is upgraded separately, by re-running
+  `tunnel-relay/install-relay.sh` on the relay VPS.
+  - Set `RELAY_WHITELIST_IPS` to the household WAN address.
+  - `install-relay.sh --health-check` is new and safe to run from cron.
+
 ## [2.2.0] — 2026-07-30
 
 The v2.2 theme: the LoxProx Panel becomes a real dashboard. No gateway,
@@ -46,567 +639,8 @@ Panel and its install path; a v2.1.0 install upgrades in place.
   save; the validator now accepts it (and the editor displays the clean
   space-separated list).
 
-### 2026-07-30 follow-up — merged into the v2.2.0 line (PR #41)
-
-Landed on `main` after the v2.2.0 tag; no separate release was cut.
-
-Closes out the remaining HIGH/MED findings from the 2026-07-29 sweep-4 audit
-across `deploy.sh`, the watchdogs, `progressive-ban.py`, and the relay
-installer, plus a Panel readability pass. No new opt-in features change
-default behavior; every existing install upgrades in place.
-
-#### Fixed
-
-- **`--bootstrap-config` no longer tears down TLS or the tunnel (sweep-4
-  H1).** The generated `deploy.conf` omitted every `ENABLE_TLS`/`TLS_*`/
-  `ENABLE_TUNNEL`/`TUNNEL_*` key, so the first deploy after a bootstrap
-  reverted a live HTTPS site to cleartext on a WAN-forwarded `:1080`, or tore
-  down a live tunnel. Bootstrap now emits the full key set (TLS, tunnel,
-  panel, alerting) — an existing `deploy.conf` wins per key, then live host
-  state (nginx TLS marker, acme.sh state, `frpc.toml`, panel unit,
-  `config.env`). Secrets are written to the file but redacted from the
-  terminal review output.
-- **The nginx site is regenerated on upgrade instead of frozen forever
-  (sweep-4 H2).** The generated site now carries a template-version stamp and
-  a fingerprint of the `deploy.conf` values it renders; a deploy regenerates
-  it when the stamp is missing, older, or a rate limit / timeout / backend IP
-  changed. Upgraded installs finally receive the credential-scrubbing log
-  format, the `/ws/` location, the CSP, and the AppSec detection log.
-  Regeneration backs up the old file first, re-applies the TLS block if the
-  site was serving HTTPS, and reverts to the backup if `nginx -t` fails.
-  `LOXPROX_KEEP_NGINX_SITE=1` freezes a hand-maintained site;
-  `LOXPROX_FORCE_REGEN_NGINX=1` regenerates unconditionally.
-- **A failed AppSec bootstrap no longer serves 500 to every request (sweep-4
-  H3).** The include is now written as a pass-through stub (`return 204`,
-  fail-open) instead of being left empty, the degradation is recorded and
-  printed at the end of the run, and the deploy's health check performs a
-  real HTTP request against the gateway's own listener and fails on a
-  genuine 5xx.
-- **A wrong `GATEWAY_IP` is now rejected at preflight (sweep-4 H6)** —
-  checked against `ip -o -4 addr show` instead of just its format, closing
-  off a root cause of watchdog reboot loops.
-- **acme.sh now extracts and runs from `/var/tmp`, not `/tmp` (sweep-4
-  H8)**, which the CIS hardening step mounts `noexec`.
-- **`APPSEC_MODE=monitor` actually does something now (sweep-4 H11).** It
-  was documented as a false-positive escape hatch but was never wired to
-  CrowdSec. `monitor` now writes a local AppSec config carrying the hub's
-  virtual-patching rules with `default_remediation: allow` — matches raise a
-  CrowdSec alert, never block — and falls back to `enforce` with a loud
-  warning if CrowdSec won't start with it. An invalid value now aborts the
-  deploy instead of silently enforcing. Detections in monitor mode show up
-  in `cscli alerts list`, not in `/var/log/nginx/appsec-detections.log`
-  (which nginx only writes to on a BLOCK verdict).
-- **An optional feature failing no longer aborts the whole deploy (sweep-4
-  H12/M19).** TLS, tunnel, and CrowdSec setup now run through a wrapper that
-  warns, records, and continues on failure, so trouble in one of them can no
-  longer skip SSH hardening, monitoring, the watchdogs, or `config.env`.
-  Degraded steps are listed at the end of the run and the deploy now exits
-  `3` — `ALL CHECKS PASSED` can no longer print next to a step that silently
-  failed.
-- **`ENABLE_*` toggles are compared case-insensitively (sweep-4 M5)** —
-  `True`/`Yes` no longer silently disabled the WAF.
-- **Watchdog no longer reboots the gateway when the Miniserver is down
-  (sweep-4 H5).** `check_nginx_local` only accepted 2xx/3xx/401/403, so a
-  Miniserver outage produced a 502, escalated through the heal path, and
-  rebooted the VM twice an hour. A 502/504 proves the opposite of what it was
-  read as — nginx answered, so the listener is alive and only the Miniserver
-  behind it is down. Those codes now count as nginx-healthy; a Miniserver
-  outage instead raises its own alert-only condition ("Miniserver
-  Unreachable — Gateway Healthy", with a "Miniserver Reachable Again"
-  recovery notice) that never heals, restarts, or reboots anything.
-- **Tunnel watchdog no longer restarts frpc for a backend 502 (sweep-4
-  M11).** A public-path 502/504 is now cross-checked against the local
-  nginx: if the gateway itself answers 502, the relay is only forwarding it,
-  the tunnel transport is fine, and frpc is left alone instead of being
-  restarted — which used to kill every live WebSocket and send a misleading
-  CRITICAL. A genuine transport failure (no answer, 503) still restarts frpc
-  and still alerts. A probe bug in the same path — a failed curl producing a
-  two-line status string that matched no branch — used to report a fully
-  dead relay as healthy; fixed alongside it.
-- **AppSec "top offenders" now aggregates the client IP, not the timestamp
-  (sweep-4 M7).** The alert `awk` summed field 1 of the log line instead of
-  field 2 (`$remote_addr`), making the output useless.
-- **Progressive ban counts attack incidents, not lifetime alerts (sweep-4
-  M9/M10).** `progressive-ban.py` now scores offenses inside a rolling
-  window (`PROGRESSIVE_BAN_WINDOW_DAYS`, default 30) instead of every alert
-  CrowdSec ever recorded — only local scenario/AppSec detections count
-  (CAPI/community entries, manual bans, and the script's own prior
-  extensions are excluded), and alerts within
-  `PROGRESSIVE_BAN_DEDUP_MINUTES` (default 60) of each other count once
-  **regardless of which scenario triggered them** — one multi-scenario burst
-  is one incident, not an instant 30-day ban. IPs covered by the CrowdSec
-  whitelist are never escalated. Defaults are deliberately forgiving for
-  households behind a single NAT/CGNAT address.
-- **Relay re-runs no longer downgrade a live TLS relay to plain HTTP
-  (sweep-4 H9).** `install-relay.sh` now detects an existing, still-valid
-  certificate covering `RELAY_DOMAIN` alongside a live `:443` site and skips
-  the phase-1 `:80`-only rewrite; ACME renewals keep working through the
-  phase-2 site's own challenge block.
-- **Relay backups keep the original file instead of overwriting it (sweep-4
-  M18).** Backups now preserve the full path under
-  `/root/loxprox-relay-backup-<timestamp>/files/…` with a manifest, and a
-  file backed up twice in one run gets a timestamped copy instead of
-  clobbering the first — previously the phase-2 nginx-site backup overwrote
-  the pre-install one.
-- **Relay auto-renewal check works again (sweep-4 M13).** The acme.sh cron
-  probe matched a path-prefixed pattern `--install-cronjob` never writes, so
-  it was permanently false; it now matches the same invariant substring
-  `deploy.sh` was fixed to use in v2.0.1.
-- `test-gateway.sh`'s proxy test now speaks TLS to the gateway when
-  `ENABLE_TLS=true` (fixing a spurious failure against TLS-mode production
-  gateways) and additionally asserts the plain-HTTP-on-`:1080` 301 grace
-  redirect in that mode; the backup test now cleans up the tarball it
-  creates.
-- **Panel topbar icon buttons now sit dead-center in their circles** — a
-  `font: inherit` line-height leak was pushing the language/theme icons off
-  center.
-
-#### Added
-
-- **TLS certificate expiry monitoring, gateway and relay (sweep-4 H13).**
-  `gateway-monitor.sh` now reads the live certificate's expiry whenever the
-  nginx site is actually in TLS mode and alerts via the existing Discord
-  path — WARNING under 21 days, CRITICAL under 7 days or once expired — at
-  most one alert per day per level; acme.sh renewal failures were
-  previously silent (its cron mails a mailbox that doesn't exist on the
-  gateway). On the relay, new `install-relay.sh --health-check` (services +
-  cert expiry, no changes to the box — safe to cron) reports the same
-  thresholds and fails the run under 7 days.
-- **`RELAY_WHITELIST_IPS` (sweep-4 H10).** The relay's firewall bouncer
-  drops banned sources on every port, including the frp control port, so a
-  single ban of the shared household WAN IP used to sever both the tunnel
-  and operator SSH at once. Listed IPs/CIDRs are written to
-  `/etc/crowdsec/parsers/s02-enrich/whitelist-loxprox-relay.yaml`; an empty
-  list now warns loudly.
-
-#### Changed
-
-- **Panel: the SYSTEM tile shows storage/memory/load as labeled,
-  color-coded micro-bars instead of a raw text string.** Every status tile
-  gained a plain-language title and a short explanatory sublabel (German +
-  English), removing jargon (AppSec, "Sperren", "Modus tls") and wiring a
-  previously dead/untranslated "AppSec" label through i18n.
-- **The Panel's apply job now reports a deploy that finished with degraded
-  optional steps (`deploy.sh` exit `3`) as a distinct warning, not a
-  failure.**
-
-### 2026-08-30 follow-up — merged into the v2.2.0 line (PR #42)
-
-Landed on `main` after the v2.2.0 tag; no separate release was cut. Five
-commits from the 2026-08-30 maintenance session (the `test-gateway.sh` fix is
-dated 2026-07-30).
-
-#### Added
-
-- **AppArmor nginx profile, complain-first (ADR 0006).** Debian ships no
-  nginx profile, so `setup_apparmor()`'s enforce-if-present branch never
-  fired and the documented AppArmor layer did not exist (0 processes
-  confined). `apparmor/usr.sbin.nginx` is authored for exactly the gateway's
-  surface (proxy `:1080`, ACME `:80`, AppSec `auth_request` to
-  `127.0.0.1:7422`, USR1 log reopen, read-only `/etc/loxprox/tls/`,
-  `/var/lib/nginx` temp dirs, dynamic modules): a compromised nginx cannot
-  read `/etc/loxprox/` outside `tls/`, touch `/opt/loxprox/` or execute
-  anything. Every deploy loads it in **complain** mode; enforce happens only
-  behind `APPARMOR_NGINX_MODE="enforce"` in `deploy.conf`, after a soak that
-  covers an acme.sh renewal, a logrotate cycle and a full deploy. The old
-  unconditional `aa-enforce` of any existing profile is gone, so a soaking
-  profile cannot flip to enforce as a side effect.
-- **On-box version marker.** `write_runtime_config()` writes
-  `/etc/loxprox/VERSION` on every deploy — `version=`/`commit=` from the
-  release tarball's `VERSION` file, else `git describe`, else `unknown`, plus
-  `deployed=` — and `test-gateway.sh` asserts it.
-- **ADR 0005** records the provenance check and retirement of the
-  2026-05-18 on-box backup directory under `/opt` (every file byte-identical
-  to git history; the old monolith deliberately not re-committed).
-
-#### Fixed
-
-- **`test-gateway.sh` read `ENABLE_TLS` from `config.env`, which never
-  carries it.** The TLS-mode proxy branch fell back to plain HTTP (a false
-  301 failure), and `test_tls()` had been skipped on every TLS-mode gateway
-  since v2.0.1. It now reads `deploy.conf`.
-
-#### Security
-
-- **CI supply chain:** third-party actions are SHA-pinned
-  (`ludeeus/action-shellcheck` from a floating `@master` to `2.0.0`,
-  `lycheeverse/lychee-action` to `v2.9.0`) and the workflow runs with
-  `permissions: contents: read`.
-
-### 2026-10-05 follow-up — merged into the v2.2.0 line (PR #43)
-
-Lands on `main` without a new tag (merges ride the last release line). A
-front-end redesign of the LoxProx Panel; no gateway, firewall, proxy, or API
-behavior changes — every `/api/*` path, method and JSON shape is unchanged,
-and an existing install upgrades in place with a normal `deploy.sh` run.
-
-#### Changed
-
-- **LoxProx Panel redesigned as a calm, status-first ops console.** The
-  overview now answers "is everything OK, and if not, what should I do?":
-  one plain-language summary, then a "what to do" list with the fixing
-  action on each item (restart a stopped service, renew an expiring
-  certificate, check the Miniserver address, open a failed job's log), then
-  dense status tiles and the 24h charts. Neutral light/dark themes with
-  Loxone green only as a restrained accent; no gradients, glass or glow;
-  status is always icon + word, never color alone. DE (default) / EN and
-  the light/dark/auto override carry over.
-- **three.js and anime.js removed.** The particle-shield scene and the
-  vendored `gui/static/vendor/` bundles (~870 KB) are gone; motion is
-  limited to short state transitions and a progress spinner, and
-  `prefers-reduced-motion` disables those. `deploy.sh` already replaces
-  the installed `static/` directory wholesale, so an upgrade deletes the
-  stale bundles (now covered by the deploy integration test, and
-  `test-gateway.sh` checks they are no longer served).
-- **Charts are legible and have text equivalents.** Hand-rolled SVG charts
-  plot real time (gaps stay gaps), show axis values, a one-sentence summary
-  and an hourly "values as a table" view; hover or arrow keys read single
-  values. AppSec hits are now shown per hour as bars.
-- **Real states everywhere.** Loading, "collecting data" (fresh history),
-  failed request vs. empty result, stale data with "last updated" and
-  automatic retry, and background jobs as running / ok / finished with
-  warnings / failed / result unknown (when the apply restarts the panel
-  mid-job).
-- **Config editor** is typed from the server schema with per-field format
-  hints, client-side checks plus server error mapping (error summary and
-  inline messages), a changed-field count, "discard changes", and secrets
-  that are never displayed (leave empty to keep, explicit "remove"). Save
-  sends only changed keys; Apply offers to save unsaved changes first.
-- **Navigation** is four hash-addressable views (`#overview`, `#security`,
-  `#config`, `#logs`) with focus moved to the view heading; on phones a
-  bottom tab bar that stops being fixed on short (zoomed) viewports. The
-  family-invite QR card moved to Configuration; the printable invite stays
-  one click away in the header.
-- **Password prompt** for `GUI_PASSWORD` is a proper dialog with a
-  wrong-password message instead of `window.prompt`; destructive and
-  impactful actions (unban, restart, apply, renew) confirm in a dialog and
-  report their result in place.
-- **`/invite`** renders `lang="en"` for the English page, uses real links
-  for the DE/EN switch (no buttons nested in links), keeps an explicit
-  `?host=` across the language switch, follows the panel theme, and says
-  "QR code could not be generated" instead of "no host" when qrencode fails.
-
-#### Added
-
-- pytest guards for the front-end: every `/static/` reference resolves,
-  only allowlisted file types are shipped, no `vendor/` bundles, no
-  external URLs, no inline script/handlers/styles, no HTML-string sinks or
-  dynamic code in the JS, no emoji, DE/EN string parity, every editable
-  key has a DE/EN label; plus tests for the CSP string, the static cache
-  policy and the invite page.
-
-#### Accessibility
-
-- WCAG 2.2 AA pass: skip link, landmarks and heading order, visible focus,
-  full keyboard operation (including chart readouts), text contrast ≥ 4.5:1
-  and indicators/control boundaries ≥ 3:1 in both themes, 44 px touch
-  targets on touch screens, reflow at 320 px, labelled fields with
-  associated errors, and polite live-region announcements for status
-  changes and results.
-
-### 2026-10-05 follow-up — merged into the v2.2.0 line (PR #44)
-
-Fixes for the findings of the 2026-10-05 live health audit of a production
-gateway. No release was cut; every install upgrades in place — the upgrade
-notes at the end list what changes on the box.
-
-#### Fixed
-
-- **HIGH — cron ignored `/etc/cron.d/loxprox` entirely.** The file carried a
-  bare `MAILTO=` since commit `9bc2fe3` (2026-05-18, the v1.3.0 sweep; first
-  tagged in v1.3.1). Debian's cron does not read an empty unquoted
-  assignment as an environment line: it parses it as a job, fails with
-  "bad minute" and drops the **whole file** ("Syntax error, this crontab
-  file will be ignored"). Progressive-ban escalation, the daily config
-  backup and the daily GeoIP refresh never ran from cron. The line is now
-  `MAILTO=""`. New guard: `deploy.sh` restarts cron after writing its cron
-  files, lints them, and its health check — like `test-gateway.sh` — fails
-  when cron has logged a rejection of the file since it was last written
-  (`journalctl -u cron --since @<mtime>`, so an old rejection never fails a
-  fixed file).
-- **MED — the Panel's Apply and Renew-TLS buttons refused after a reboot.**
-  `config.env` recorded wherever `deploy.sh` had been run from — typically
-  under `/tmp`, which the tmpfs `/tmp` loses on reboot and which the Panel
-  (`PrivateTmp`) never saw anyway. `deploy.sh` now persists exactly the
-  files it reads at run time to `/opt/loxprox/deploy/` (root:root, `0750`,
-  nothing accessible to other users), swaps a new copy in by rename so a
-  running copy is never overwritten in place, and records
-  `/opt/loxprox/deploy/deploy.sh` in `config.env`. A re-run from that copy —
-  the Panel's apply — leaves it as is. The SOFT-SSH login banner now names
-  this path instead of a `/opt/loxprox/deploy.sh` that never existed.
-- **HIGH (latent) — the Panel's Apply killed its own `deploy.sh`.** The job
-  was a child process of the Panel, i.e. inside `loxprox-gui.service`'s
-  cgroup; `deploy.sh`'s `setup_gui` restarts that unit, and systemd's default
-  `KillMode=control-group` killed the deploy halfway (everything after the
-  Panel step, the health check included, never ran) while the restarted
-  Panel had forgotten the job. Apply and Renew-TLS now run as their own
-  transient unit (`systemd-run --unit loxprox-job-<id> --collect`), outside
-  the Panel's cgroup and its `PrivateTmp`; a wrapper records the exit code
-  next to the job log and the job's metadata is persisted, so the restarted
-  Panel reports the job as still running or finished with its real result.
-  `/api/job/<id>` keeps its JSON shape; job files are pruned to the newest 20.
-- **MED — the AppArmor profile was not enforce-ready.** In complain mode,
-  nginx-extras logged ~58 `ALLOWED` events on every start/reload, each of
-  them a denial in enforce mode: lua-resty-core under `/usr/share/lua/`, the
-  perl module's pragmas under `/usr/share/perl/<version>/`, a NUMA probe in
-  `/sys/devices/system/node/`, and the binary upgrade
-  (`/run/nginx.pid.oldbin`, re-exec of `/usr/sbin/nginx` under the same
-  profile). All are allowed now, read-only except the pid file. The
-  complain/enforce default is unchanged; the soak restarts with this deploy.
-- **LOW — duplicate, conflicting security headers on proxied responses.**
-  The Miniserver's own `X-Frame-Options: deny` and `X-XSS-Protection`
-  passed through next to the gateway's headers. The site template (now v4 —
-  existing sites regenerate on the next deploy, TLS block re-applied) hides
-  the upstream copy of every header the gateway sets, plus
-  `X-XSS-Protection`. `test-gateway.sh` checks an HTTPS-proxied response, not
-  just the 301, for exactly one of each.
-- **LOW — LoxProx's own logs were never rotated** (`loxprox-monitor.log` had
-  reached 41 MB, `loxprox-network-watchdog.log` 25 MB). New
-  `/etc/logrotate.d/loxprox` covers `/var/log/loxprox-*.log`: weekly or at
-  10 MB, 8 compressed generations, `copytruncate` (the Panel's unit holds
-  its log open).
-- **The 2026-08-30 logrotate collision is fixed for good.** Debian's stock
-  `/etc/logrotate.d/nginx` (`/var/log/nginx/*.log`) also matches the
-  `loxone-*.log`/`appsec-detections.log` stanza; logrotate skipped the stock
-  file and the nightly run failed. `deploy.sh` now narrows the untouched
-  stock glob to `access.log` + `error.log` (in place, backed up first) — the
-  same yield that was applied by hand on the production gateway — so fresh
-  installs and a restored stock conffile no longer collide.
-- **LOW — journald could take 10 % of the disk.** New drop-in
-  `/etc/systemd/journald.conf.d/50-loxprox.conf` sets `SystemMaxUse=300M`;
-  journald is restarted only when the drop-in changes.
-- **LOW — auditd now watches `/etc/loxprox`, `/etc/apparmor.d` and
-  `/opt/loxprox`** (keys `loxprox_config`, `apparmor_config`,
-  `loxprox_scripts`). Deploys, Panel config saves and acme.sh renewals write
-  there, so expect events in those windows.
-- **Docs:** SECURITY, README and ABOUT (EN + DE) no longer claim the AppArmor
-  profile is enforced — it runs in complain mode until the operator opts in.
-
-#### Added
-
-- `test-gateway.sh`: a *Scheduled Jobs, Log Retention, Audit Coverage*
-  section — cron running and not rejecting the LoxProx files, `logrotate -d`
-  clean, journald cap, audit watches loaded, the Panel's deploy copy
-  root-only, and the AppArmor `ALLOWED` count since nginx started.
-- CI now runs `deploy.sh`'s own functions against real services on
-  throwaway runners: cron (a `MAILTO=` file is rejected and its job never
-  runs; `MAILTO=""` runs), journald (reports the 300M ceiling), auditd
-  (watches load and fire), a Panel apply job outliving a stop of the Panel's
-  own unit (and, as control, the old child-process launch dying with it),
-  Debian 12 logrotate with the stock nginx stanza
-  present, Debian 12's `apparmor_parser` on the profile, and Debian 12
-  nginx-extras under the profile in complain and enforce mode (start,
-  reload, USR1, USR2 binary upgrade, TLS proxy request), plus the proxied
-  headers through the generated site.
-
-#### Upgrade notes — what the next `sudo bash deploy.sh` changes
-
-- Run this upgrade over SSH, not with the Panel's Apply button: the Panel
-  that is installed *before* the upgrade still launches deploy.sh as its own
-  child and would kill it when the deploy restarts the Panel.
-- The nginx site is regenerated (template v3 → v4): backed up first, TLS
-  block re-applied, nginx reloaded.
-- cron is restarted once; `/etc/cron.d/loxprox` takes effect — progressive
-  ban every 15 min, backup at 02:00, GeoIP refresh at 03:00.
-- journald is restarted once and trims the persistent journal to 300 MB.
-- auditd rules are reloaded (`augenrules --load`) with three more watches.
-- `/etc/logrotate.d/loxprox` is new; the first nightly run rotates the
-  oversized LoxProx logs right away (`maxsize`).
-- `/opt/loxprox/deploy/` is created and `config.env` points the Panel at it.
-- The AppArmor profile is reloaded, still in complain mode — restart the
-  soak clock.
-
-### 2026-10-05 deploy follow-up — merged into the v2.2.0 line (PR #45)
-
-Defects the first production deploy of PR #44 exposed. No release was cut.
-
-#### Fixed
-
-- **HIGH — the persistent deploy copy was refused on real installs, so the
-  Panel's Apply/Renew stayed broken.** `/opt/loxprox` had been created by hand
-  before `deploy.sh` managed it and belonged to the SSH login user (uid 1000),
-  as did two hand-copied unit files in it; `install_deploy_source` correctly
-  refused to put root-run code there. `deploy.sh` now normalises the install
-  directory before installing anything into it — `root:root 0755`, nothing
-  below it owned by another user or group/world-writable (symlinks are never
-  followed) — and installs every root-run script
-  as new files (unlinked first, then `install -o root`) instead of `cp`, which
-  kept the previous owner of an existing file and rewrote it in place. Unit
-  files `deploy.sh` owns are written as regular root-owned files; a symlink in
-  their place (the `systemctl link` shape) is replaced instead of written
-  through into its target. A symlinked install directory aborts the deploy.
-- **HIGH — acme.sh depended on `$HOME`.** A deploy launched without HOME (a
-  `systemd-run` unit — which is also how the Panel runs Apply/Renew) made
-  acme.sh use `/.acme.sh`: a second Let's Encrypt account and a certificate
-  issued outside `/root/.acme.sh`. Every acme.sh call now passes
-  `--home "$ACME_HOME"`, `deploy.sh` sets `HOME` to root's home when it runs
-  as root without one, Panel jobs get `HOME=/root` and `UMask=0022`, and a
-  leftover `/.acme.sh` is named in the TLS step (not deleted — it holds key
-  material).
-- **MED — inherited umask.** `deploy.sh` ran with its launcher's `umask 077`
-  and created `/etc/systemd/journald.conf.d` as `0700`. It now sets
-  `umask 022` first thing, and the drop-in directories it owns are created
-  with an explicit mode, which also corrects an existing `0700` one.
-- **MED — stopping the Panel hung for 90 s and ended in SIGKILL.** Its
-  SIGTERM handler called `server.shutdown()` from the thread running
-  `serve_forever()`, which then waited for itself. Shutdown is requested
-  from another thread now; the Panel exits within a second and saves its
-  chart history. The Panel unit drops `After=nginx.service` (it made every
-  nginx stop wait for the Panel — during the reboot nginx answered 500 for
-  ~90 s after CrowdSec had already stopped) and gets `TimeoutStopSec=10`.
-- **MED — false results under `pipefail`.** `cmd | grep -q …` returns 141
-  when grep exits at the first match and the writer dies of SIGPIPE, so a
-  match read as a miss: `test-gateway.sh` reported "Decision creation
-  failed" for a decision that existed and warned about SSH source
-  restrictions and the CrowdSec nftables table; `deploy.sh`'s
-  `dpkg -l | grep -q` re-ran `apt-get install`; the relay reported key-only
-  SSH as password-enabled. Every such pipeline in the shipped scripts now
-  captures first and matches the captured text (`grep -q … <<<"$out"`);
-  `head -1` became `awk '… && !n++'` / `sed -n 1p`. A static test rejects
-  `| grep -q`, `| grep -m`, `| head`, `| awk …exit` and `| sed …q` in every
-  shipped pipefail script.
-- **`test-gateway.sh`'s CrowdSec counters.** It read field 2 of `cscli
-  metrics` table rows — the engine/source name, not a count — and cscli
-  rounds counts (`1.23k`), so "AppSec metrics did not increment" could never
-  clear; in TLS mode its test request also went to `http://` and was
-  answered by the 497 → 301 redirect before AppSec ran. Counts now come from
-  `cscli metrics -o json` (fallback: CrowdSec's Prometheus endpoint), the
-  request uses the listener's scheme, and an unreadable counter is reported
-  as such. The decision check reads the whole `ip crowdsec` table (newer
-  bouncers keep one set per origin).
-- **Docs:** `phase4-monitoring` (EN + DE) describes both logrotate files, the
-  stock-nginx yield and a full-config `logrotate -d` check.
-
-#### Added
-
-- `test-gateway.sh` checks that `/opt/loxprox` is root-only and that the
-  LoxProx unit files are regular files.
-- CI: the pre-existing user-owned install directory (unit test in the root
-  Debian 12 container, and on a real host with a real login user and a
-  symlinked unit), every acme.sh call carrying `--home` with `HOME=/`,
-  `deploy.sh` under `systemd-run` with no HOME and `UMask=0077`, the HOME and
-  umask a Panel job sees, the real Panel stopped by `systemctl stop` (with a
-  pytest control showing the old handler never returns), and the pipefail
-  guard.
-
-#### Upgrade notes — what the next `sudo bash deploy.sh` changes
-
-- `/opt/loxprox` and everything in it becomes `root:root`, group/world write
-  bits are dropped (listed in the deploy log), and `/opt/loxprox/deploy/` is
-  created; `config.env` then points the Panel at it.
-- Unit files in `/etc/systemd/system` that were symlinks are replaced by
-  regular files (logged).
-- `/etc/systemd/journald.conf.d` becomes `0755`.
-- The Panel unit is rewritten (no `After=nginx.service`, `TimeoutStopSec=10`)
-  and restarted. The process being stopped is still the old code with the
-  deadlock, so this one stop should end in SIGKILL after the new 10 s
-  timeout instead of 90 s; every later stop is clean.
-- The TLS step re-uses `/root/.acme.sh`. It warns about `/.acme.sh` if that
-  directory is still there.
-
-### 2026-10-06 follow-up — merged into the v2.2.0 line (PR #46)
-
-Three defects found on the production gateway after the PR #45 deploy. No
-release was cut.
-
-#### Fixed
-
-- **HIGH — the Panel's ban table was unusable, and progressive ban never
-  escalated anything.** On the gateway's CrowdSec 1.8.1, `cscli decisions
-  list -o json` prints *alerts*, each with a nested `decisions` list. The
-  Panel read `value` / `origin` / `duration` at the top level of each alert,
-  so every row showed "?" (and Unban had no address to send), and the count
-  was the number of alerts, not of banned addresses. The Panel now flattens
-  the alerts into their active decisions: one row per address (deduplicated),
-  the scenario taken from the alert when the decision has none, simulated
-  decisions skipped, and a flat list still accepted. The row keys the front
-  end reads are unchanged. The 24-hour "active bans" series counts decisions
-  too. `progressive-ban.py` had the same assumption: it found no `value`
-  anywhere and dropped every entry, so its log read "Extended: 0, Skipped:
-  0" and no repeat offender was ever escalated. It now reads the nested
-  decisions, logs "Active decisions: N (from M listed entries)" and never
-  escalates a simulated decision. The Grafana collector's ban count
-  (`jq 'length'`, which counted alerts) now counts distinct banned addresses.
-  `gateway-monitor.sh`'s "New CrowdSec Ban" alert already searched the JSON
-  recursively and was correct; a test now pins that on the real shape.
-- **MED — "Attacks blocked today" and the AppSec chart were always 0.**
-  `/var/log/nginx/appsec-detections.log` had stayed empty since it was
-  introduced on 2026-05-26 (v1.5.0). nginx wrote a line only when the AppSec
-  subrequest's `X-Crowdsec-Action` response header said "ban" or similar, but
-  CrowdSec's AppSec component never sends that header: it answers 200
-  (allow) or 403 (blocked) with a JSON body. Site template v5 takes the
-  verdict from the subrequest's HTTP status (`auth_request_set $appsec_status
-  $upstream_status`) and logs every 401/403. Only blocked requests are
-  logged, not inspected ones. The request line in that log now uses the
-  scrubbed path (`$loxone_log_uri`, no query string, Loxone credential paths
-  redacted) instead of the raw `$request`. The Panel tile, the AppSec series
-  of the 24-hour chart, the monitor's "AppSec Detections" Discord alert and
-  Grafana all read this file and work without changes. The history file
-  format is unchanged.
-- **MED — a failed GeoIP refresh failed silently, without a reason.** On
-  2026-10-06 03:00, `cn` and `ru` failed and the last known-good list (22,249
-  ranges) was kept, which is correct. But `curl -s` with stderr discarded
-  logged only "failed countries: cn ru", there was a single attempt with a
-  30 s cap, and nothing reported a list that kept failing. A probe from the
-  gateway hours later fetched both lists in under half a second, so this was
-  a transient failure at the source. `geoip-block.sh` now:
-  - retries each list after 30 s, 120 s and 300 s (`GEOIP_RETRY_DELAYS`),
-    with a 120 s transfer limit (`GEOIP_MAX_TIME`);
-  - logs the reason per attempt (curl exit code, HTTP status, curl's
-    message);
-  - validates every list before it can replace the active one: IPv4 CIDR
-    lines only, so an HTML error page answered with 200 is rejected; at
-    least `GEOIP_MIN_RANGES`; and no shrink of more than
-    `GEOIP_MAX_SHRINK_PCT` (50 %) against the last known-good list;
-  - stamps `last-success` (epoch and range count) and `last-failure`
-    (epoch and reason) in `/var/lib/loxone-geoip/`.
-
-  When the list has not refreshed for 3 days (`GEOIP_STALE_DAYS`),
-  `gateway-monitor.sh` sends one Discord WARNING per stale episode. The
-  warning gives the age, the kept range count, the last error and the
-  command to run, and is re-armed only after a successful refresh. The
-  Panel's "what to do" list shows the same (DE/EN). The keep-last-known-good
-  behaviour is unchanged. `deploy.sh`'s own run uses a short retry schedule
-  so a deploy is not held up for minutes. No second download source was
-  added (reasoning in PR #46).
-- **Docs:** `SECURITY` (EN + DE) described geo-blocking as "not enabled by
-  default". It is on, so the description moved to Layer 1 with the refresh,
-  validation and alerting behaviour. `GUI-PANEL` (EN + DE) describes the ban
-  count, the AppSec tile and the GeoIP item.
-
-#### Added
-
-- `tests/fixtures/cscli-decisions-list-1.8.1.json`: a masked real `cscli
-  decisions list -o json` sample (9 alerts, 8 decisions). Documentation
-  addresses only; machine id, UUIDs, AS data and coordinates replaced. The
-  Panel, progressive-ban, monitor and Grafana parsers are tested against it,
-  with a control showing the old Panel reader produced "?".
-- CI (`apparmor-nginx` job, new `host-integration.sh nginx-appsec` section):
-  real Debian 12 nginx-extras serves the `deploy.sh`-generated site with the
-  real AppSec include in front of an AppSec stand-in that answers like
-  CrowdSec (403 + JSON, no header). It checks four things:
-  - a blocked request lands in `appsec-detections.log` with client address,
-    scrubbed path and `appsec=403`, and an allowed request does not;
-  - no query string or credential blob reaches the file;
-  - the Panel's own readers count the result;
-  - control: the v4 header-based site logs nothing for the same 403.
-- `tests/test_geoip_monitor.sh`: `geoip-block.sh` against a fake `curl` and
-  `nft` (success, retry then success, the 2026-10-06 failure with the last
-  known-good list kept byte for byte, HTML / shrink / syntax rejection,
-  disabled marker), and the monitor's staleness alert (deduplication,
-  re-arming, pre-stamp installs, never loaded, disabled).
-
-#### Upgrade notes — what the next `sudo bash deploy.sh` changes
-
-- The nginx site is regenerated (template v4 → v5; the previous file is
-  backed up, and the TLS block is re-applied when the site serves HTTPS).
-- Blocked requests start appearing in `appsec-detections.log`. The monitor's
-  "AppSec Detections" Discord WARNING now fires for real (at most one every
-  5 minutes, listing the top addresses), as do the Panel tile and chart.
-- `geoip-block.sh` runs once during the deploy with a short retry schedule
-  and writes the first `last-success` stamp. Until a stamp exists, the
-  monitor and Panel judge freshness by the modification time of
-  `/etc/nftables.d/99-geoip.conf`, which only a successful refresh rewrites.
+Everything merged to `main` after the v2.2.0 tag — the dated follow-ups of
+2026-07-30 to 2026-10-06, PRs #41 to #46 — is released in **[2.3.0]** above.
 
 > **v1.3.0 was withdrawn on 2026-05-18 — do not use.** The systemd unit change in v1.3.0 (moving `StartLimit*` from `[Service]` to `[Unit]`) activated a previously-silent `StartLimitBurst=3` that, combined with the watchdog's 60-second timer and `FailureAction=reboot`, caused an unbounded reboot loop on the 4th start. **v1.3.1 supersedes v1.3.0** and contains the same fixes plus the burst-value correction. Install v1.3.1 or later.
 

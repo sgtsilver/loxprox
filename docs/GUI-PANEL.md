@@ -1,6 +1,6 @@
 **Language:** [Deutsch](GUI-PANEL.de.md) · English
 
-# LoxProx Panel — LAN-Only Web GUI (v2.2)
+# LoxProx Panel — LAN-Only Web GUI (v2.3)
 
 > **Who this is for:** anyone who wants a point-and-click view of gateway
 > health, a one-tap way to onboard family phones, or a way to unban an IP
