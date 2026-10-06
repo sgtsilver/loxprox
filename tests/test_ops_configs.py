@@ -406,3 +406,116 @@ def test_journald_cap_and_audit_watches_wired():
                       ("/etc/apparmor.d/", "apparmor_config"),
                       ("/opt/loxprox/", "loxprox_scripts")):
         assert ("-w", path, "-p", "wa", "-k", key) in rules, (path, key)
+
+
+# ── 7. pipefail: no early-exit reader on the right of a pipe (2026-10) ────────
+#
+# `cmd | grep -q x` under `set -o pipefail`: grep exits at the first match, the
+# still-writing cmd dies of SIGPIPE, the pipeline returns 141 — a match reads
+# as a miss. Live: "Decision creation failed" for a decision that existed,
+# `dpkg -l | grep -q pkg` re-running apt-get. Same for `head`, `grep -m`,
+# `awk …exit` and `sed …q`. Allowed: the status explicitly discarded with a
+# trailing `|| true` / `|| :` (only the captured text is used then).
+
+_PIPE = r"(?<!\|)\|(?!\|)"
+EARLY_EXIT_READER = re.compile(_PIPE + r"""\s*(?:
+      grep\b[^|]*?\s(?:-[a-zA-Z]*q[a-zA-Z]*|-[a-zA-Z]*m\s*\d+|--quiet|--silent|--max-count\S*)(?=[\s;)]|$)
+    | head\b
+    | awk\b[^|]*\bexit\b
+    | sed\b(?:\s+-[a-zA-Z]+)*\s+['"]?[^'"|]*\bq\b
+)""", re.X)
+STATUS_DISCARDED = re.compile(r"\|\|\s*(?:true|:)\b[^|]*$")
+
+
+def logical_lines(text):
+    """(first_lineno, line) with backslash continuations joined."""
+    out, buf, start = [], "", None
+    for n, line in enumerate(text.splitlines(), 1):
+        if start is None:
+            start = n
+        if line.endswith("\\"):
+            buf += line[:-1] + " "
+            continue
+        out.append((start, buf + line))
+        buf, start = "", None
+    return out
+
+
+def early_exit_violations(text):
+    bad = []
+    for n, line in logical_lines(text):
+        s = line.strip()
+        if s.startswith("#"):
+            continue
+        if EARLY_EXIT_READER.search(s) and not STATUS_DISCARDED.search(s):
+            bad.append((n, s))
+    return bad
+
+
+def pipefail_scripts():
+    """Shipped shell scripts that enable pipefail (tests/ excluded)."""
+    out = []
+    for f in tracked_files():
+        if not f.endswith(".sh") or f.startswith("tests/"):
+            continue
+        if re.search(r"^\s*set\s+-[a-z]*o\s+pipefail|^\s*set\s+-o\s+pipefail", read(f), re.M):
+            out.append(f)
+    return out
+
+
+def test_pipefail_guard_detects_the_bug_class():
+    flagged = [
+        'if cscli decisions list 2>/dev/null | grep -q "$test_ip"; then',
+        'dpkg -l | grep -q "^ii  auditd " || apt-get install -y auditd',
+        "if nft list tables | grep -qE 'crowdsec'; then",
+        "x=$(ip route | awk '/default/ {print $5}' | head -1)",
+        "fpr=$(gpg --with-colons k | awk -F: '$1==\"fpr\" {print $10; exit}')",
+        "if sshd -T | grep -m1 passwordauthentication; then",
+    ]
+    clean = [
+        'if grep -q "$test_ip" <<<"$decisions"; then',
+        'if [[ "$m" =~ x ]] || grep -qF "$name" "$file"; then',
+        'cron_line=$(crontab -l 2>/dev/null | grep -F "acme.sh --cron" | head -1) || true',
+        "x=$(ip route | awk '/default/ && !n++ {print $5}')",
+        "out=$(cmd | sed -n 1p)",
+    ]
+    assert all(early_exit_violations(s) for s in flagged), [s for s in flagged if not early_exit_violations(s)]
+    assert not any(early_exit_violations(s) for s in clean), [s for s in clean if early_exit_violations(s)]
+
+
+def test_no_early_exit_reader_in_pipefail_scripts():
+    scripts = pipefail_scripts()
+    assert {"deploy.sh", "test-gateway.sh", "security-monitoring/gateway-monitor.sh",
+            "tunnel-relay/install-relay.sh"} <= set(scripts), scripts
+    bad = [f"{f}:{n}: {s[:140]}" for f in scripts for n, s in early_exit_violations(read(f))]
+    assert not bad, (
+        "early-exit reader on the right of a pipe in a pipefail script — a match "
+        "can read as a miss (SIGPIPE → 141). Capture first, then `grep -q … <<<\"$out\"`:\n  "
+        + "\n  ".join(bad)
+    )
+
+
+# ── 8. acme.sh never resolves its home from $HOME (2026-10) ───────────────────
+
+def test_every_acme_sh_call_passes_home():
+    calls = [(n, s) for n, s in logical_lines(read(DEPLOY))
+             if not s.strip().startswith("#")
+             and re.search(r'(?:"\$ACME_HOME/acme\.sh"|\./acme\.sh)\s+--', s)]
+    assert len(calls) >= 7, calls       # install, issue, install-cert, install-cronjob, remove ×2, renew, uninstall
+    missing = [f"deploy.sh:{n}: {s.strip()[:120]}" for n, s in calls if '--home "$ACME_HOME"' not in s]
+    assert not missing, "acme.sh call without --home (falls back to $HOME/.acme.sh):\n  " + "\n  ".join(missing)
+
+
+def test_panel_jobs_get_home_and_umask():
+    gui = read("gui/loxprox-gui.py")
+    assert 'f"--setenv=HOME={JOB_HOME}"' in gui
+    assert '"--property=UMask=0022"' in gui
+    assert re.search(r'^JOB_HOME = "/root"', gui, re.M)
+
+
+def test_deploy_sets_umask_and_home_before_anything_else():
+    text = read(DEPLOY)
+    first_func = re.search(r"^[a-z_]+\(\)\s*\{", text, re.M).start()
+    head = text[:first_func]
+    assert re.search(r"^umask 022$", head, re.M), "umask 022 must be set before any function runs"
+    assert re.search(r"^if \[\[ \$EUID -eq 0 && \( -z \"\$\{HOME:-\}\"", head, re.M), "HOME fallback missing"

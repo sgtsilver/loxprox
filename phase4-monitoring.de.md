@@ -163,13 +163,27 @@ sudo bash deploy.sh --remove-tls
 
 ## Log-Rotation
 
-Bereits von `deploy.sh` (`setup_logrotate`) konfiguriert. Funktion verifizieren:
+Bereits von `deploy.sh` (`setup_logrotate`) konfiguriert, in zwei Dateien:
+
+| Datei | Deckt ab | Regel |
+|-------|----------|-------|
+| `/etc/logrotate.d/loxone-nginx` | `/var/log/nginx/loxone-*.log`, `/var/log/nginx/appsec-detections.log` | täglich, 14 Generationen, komprimiert, nginx öffnet seine Logs neu (USR1) |
+| `/etc/logrotate.d/loxprox` | `/var/log/loxprox-*.log` (Monitor, Netzwerk- und Tunnel-Watchdog, Panel, Cron-Jobs, Deploy) | wöchentlich oder sobald eine Datei 10 MB überschreitet, 8 Generationen, komprimiert, `copytruncate` |
+
+`deploy.sh` schränkt außerdem Debians mitgelieferte `/etc/logrotate.d/nginx`
+auf `access.log` + `error.log` ein: Ihr Glob `/var/log/nginx/*.log` erfasst
+dieselben Dateien wie `loxone-nginx`, und logrotate überspringt dann eine
+komplette Datei und lässt den nächtlichen Lauf fehlschlagen. Prüf deshalb die
+gesamte Konfiguration — nicht nur eine Datei, denn die Kollision zeigt sich
+erst, wenn alle Dateien zusammen geparst werden:
 
 ```bash
-logrotate -d /etc/logrotate.d/loxone-nginx
+logrotate -d /etc/logrotate.conf 2>&1 | grep -iE '^error|duplicate'   # keine Ausgabe erwartet
+systemctl is-failed logrotate.service                                  # "inactive" erwartet
 ```
 
-Logs werden **14 Tage** aufbewahrt, danach komprimiert und ausrotiert.
+Das systemd-Journal ist separat auf 300 MB begrenzt
+(`/etc/systemd/journald.conf.d/50-loxprox.conf`; prüfen mit `journalctl --disk-usage`).
 
 ---
 
@@ -183,7 +197,7 @@ mkdir -p /root/gateway-backup
 cp /etc/nginx/sites-available/loxone /root/gateway-backup/
 cp /etc/crowdsec/acquis.d/nginx.yaml /root/gateway-backup/
 cp /etc/sysctl.d/99-security-gateway.conf /root/gateway-backup/
-cp /etc/logrotate.d/loxone-nginx /root/gateway-backup/
+cp /etc/logrotate.d/loxone-nginx /etc/logrotate.d/loxprox /root/gateway-backup/
 ```
 
 Außerdem die Proxmox-LXC-Config vom Host exportieren:

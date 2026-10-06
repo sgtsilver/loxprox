@@ -40,15 +40,15 @@ done
     || { echo "ERROR: TARGET_CIDR='$TARGET_CIDR' invalid (expect 1-32)."; exit 1; }
 
 # Detect primary interface (the one with the default route)
-IFACE=$(ip route show default 2>/dev/null | awk '/default/ {print $5}' | head -1)
+IFACE=$(ip route show default 2>/dev/null | awk '/default/ && !n++ {print $5}')
 if [[ -z "$IFACE" ]]; then
     # Fallback: first ethernet interface
-    IFACE=$(ip -o link show | awk -F': ' '/^[0-9]+: e/{print $2}' | head -1)
+    IFACE=$(ip -o link show | awk -F': ' '/^[0-9]+: e/ && !n++ {print $2}')
 fi
 [[ -z "$IFACE" ]] && { echo "ERROR: Cannot detect network interface. Check 'ip link'."; exit 1; }
 
 echo "Interface : $IFACE"
-echo "Current   : $(ip addr show "$IFACE" | awk '/inet /{print $2}' | head -1)"
+echo "Current   : $(ip addr show "$IFACE" | awk '/inet / && !n++ {print $2}')"
 echo "Target    : ${TARGET_IP}/${TARGET_CIDR} via ${TARGET_GW}"
 echo ""
 

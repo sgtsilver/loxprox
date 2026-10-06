@@ -54,9 +54,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DISCORD="${DISCORD_ALERT_PATH:-$SCRIPT_DIR/discord-alert.sh}"
 
 # Auto-detect network topology; allow env/config override
-IFACE="${WATCHDOG_IFACE:-$(ip route show default 2>/dev/null | awk '/default/ {print $5}' | head -1)}"
-IFACE="${IFACE:-$(ip -o link show | awk -F': ' '/^[0-9]+: e/{print $2}' | head -1)}"
-GATEWAY_IP="${WATCHDOG_GATEWAY:-$(ip route show default 2>/dev/null | awk '/default/ {print $3}' | head -1)}"
+# awk takes the first match itself (`!n++`) instead of `| head -1`: head exits
+# early, and under set -e + pipefail a SIGPIPE'd writer would abort the cycle.
+IFACE="${WATCHDOG_IFACE:-$(ip route show default 2>/dev/null | awk '/default/ && !n++ {print $5}')}"
+IFACE="${IFACE:-$(ip -o link show | awk -F': ' '/^[0-9]+: e/ && !n++ {print $2}')}"
+GATEWAY_IP="${WATCHDOG_GATEWAY:-$(ip route show default 2>/dev/null | awk '/default/ && !n++ {print $3}')}"
 GATEWAY_IP="${GATEWAY_IP:-192.168.1.1}"
 NGINX_LOCAL="${WATCHDOG_NGINX_URL:-http://127.0.0.1:1080/}"
 
@@ -227,8 +229,8 @@ collect_diagnostics() {
     diag+="Interface: ${IFACE}\n"
     diag+="Expected mode: $(detect_expected_mode "$IFACE")\n"
     diag+="Gateway: ${GATEWAY_IP}\n"
-    diag+="Current IP: $(ip addr show "$IFACE" 2>/dev/null | awk '/inet /{print $2}' | head -1)\n"
-    diag+="Default route: $(ip route show default 2>/dev/null | head -1)\n"
+    diag+="Current IP: $(ip addr show "$IFACE" 2>/dev/null | awk '/inet / && !n++ {print $2}')\n"
+    diag+="Default route: $(ip route show default 2>/dev/null | sed -n 1p)\n"
     diag+="dhclient PIDs: $(pgrep -x dhclient 2>/dev/null | tr '\n' ' ' || echo 'none')\n"
     diag+="nginx status: $(systemctl is-active nginx 2>/dev/null || echo 'unknown')\n"
     diag+="networking status: $(systemctl is-active networking 2>/dev/null || echo 'unknown')\n"

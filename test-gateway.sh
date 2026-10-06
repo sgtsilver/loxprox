@@ -36,6 +36,57 @@ warn() {
     echo -e "  ${YELLOW}!${NC} $1"
 }
 
+# 2026-10 — pipefail rule for this suite: never `cmd | grep -q …` (or head,
+# grep -m, awk …exit). grep -q exits at the first match, the still-writing
+# cmd (cscli, nft — large outputs) dies of SIGPIPE, and under pipefail the
+# pipeline returns 141: a match is reported as a miss. That produced the live
+# "Decision creation failed" (the decision existed) and the nftables / SSH
+# warnings. Capture the output first, then match the captured text.
+
+# The gateway's TLS mode lives in deploy.conf (write_runtime_config never puts
+# ENABLE_TLS into config.env). Echoes the scheme the :1080 listener speaks.
+_gateway_scheme() {
+    local tls=""
+    [[ -f /etc/loxprox/deploy.conf ]] && tls=$(awk -F'"' '/^ENABLE_TLS=/{print $2}' /etc/loxprox/deploy.conf)
+    if [[ "${tls,,}" == "true" ]]; then echo https; else echo http; fi
+}
+
+# Exact count of requests CrowdSec's AppSec engine has evaluated, or nothing
+# when it cannot be read. Not from the `cscli metrics` table: field 2 of its
+# row is the engine NAME (the table has a leading border column), and the
+# table rounds counts ("1.23k"), so one extra request is invisible there.
+# Sources: `cscli metrics -o json` ("appsec-engine" → <engine> → processed),
+# else CrowdSec's Prometheus endpoint (cs_appsec_reqs_total).
+_appsec_processed() {
+    local out n=""
+    out=$(cscli metrics -o json 2>/dev/null) || out=""
+    if [[ -n "$out" ]] && command -v jq >/dev/null 2>&1; then
+        n=$(jq -r '[(."appsec-engine" // {})[] | .processed? // empty] | if length > 0 then add else empty end' <<<"$out" 2>/dev/null) || n=""
+    fi
+    if [[ ! "$n" =~ ^[0-9]+$ ]]; then
+        out=$(curl -s --max-time 5 http://127.0.0.1:6060/metrics 2>/dev/null) || out=""
+        n=$(awk '/^cs_appsec_reqs_total[{ ]/ {s += $NF; f = 1} END {if (f) printf "%d", s}' <<<"$out")
+    fi
+    [[ "$n" =~ ^[0-9]+$ ]] && printf '%s' "$n"
+    return 0
+}
+
+# Lines CrowdSec has read from the gateway's nginx access log (same sources,
+# same reason as above).
+_nginx_lines_read() {
+    local out n="" src="file:/var/log/nginx/loxone-access.log"
+    out=$(cscli metrics -o json 2>/dev/null) || out=""
+    if [[ -n "$out" ]] && command -v jq >/dev/null 2>&1; then
+        n=$(jq -r --arg s "$src" '(.acquisition // {})[$s].reads // empty' <<<"$out" 2>/dev/null) || n=""
+    fi
+    if [[ ! "$n" =~ ^[0-9]+$ ]]; then
+        out=$(curl -s --max-time 5 http://127.0.0.1:6060/metrics 2>/dev/null) || out=""
+        n=$(awk '/^cs_filesource_hits_total[{ ]/ && /loxone-access\.log/ {s += $NF; f = 1} END {if (f) printf "%d", s}' <<<"$out")
+    fi
+    [[ "$n" =~ ^[0-9]+$ ]] && printf '%s' "$n"
+    return 0
+}
+
 # ── Service Tests ────────────────────────────────────────────────────────────
 
 test_services() {
@@ -74,21 +125,24 @@ test_network() {
     test_header "Network & Firewall"
 
     # Check listening ports
-    if ss -tlnp | grep -q ':1080 '; then
+    local listeners
+    listeners=$(ss -tlnp 2>/dev/null)
+    if grep -q ':1080 ' <<<"$listeners"; then
         pass "nginx listening on :1080"
     else
         fail "nginx NOT listening on :1080"
     fi
 
-    if ss -tlnp | grep -q ':22 '; then
+    if grep -q ':22 ' <<<"$listeners"; then
         pass "sshd listening on :22"
     else
         fail "sshd NOT listening on :22"
     fi
 
     # Check nftables input policy
-    local policy
-    policy=$(nft list chain inet filter input 2>/dev/null | grep -oP 'policy \K\w+')
+    local policy input_chain
+    input_chain=$(nft list chain inet filter input 2>/dev/null)
+    policy=$(grep -oP 'policy \K\w+' <<<"$input_chain")
     if [[ "$policy" == "drop" ]]; then
         pass "nftables input policy is DROP"
     else
@@ -96,14 +150,16 @@ test_network() {
     fi
 
     # Check SSH is restricted
-    if nft list chain inet filter input 2>/dev/null | grep -qE 'dport 22.*saddr|tcp dport 22'; then
+    if grep -qE 'dport 22.*saddr|tcp dport 22' <<<"$input_chain"; then
         pass "SSH port has source restrictions"
     else
         warn "SSH port may not have source restrictions"
     fi
 
     # Check CrowdSec table exists
-    if nft list tables 2>/dev/null | grep -qE 'crowdsec|crowdsec6'; then
+    local tables
+    tables=$(nft list tables 2>/dev/null)
+    if grep -qE 'crowdsec|crowdsec6' <<<"$tables"; then
         pass "CrowdSec nftables table exists"
     else
         warn "CrowdSec nftables table not found (bouncer may still be initializing)"
@@ -169,22 +225,22 @@ test_proxy() {
     # Test security headers
     local headers
     headers=$(curl -sI --connect-timeout 5 http://127.0.0.1:1080/jdev/cfg/api 2>/dev/null)
-    if echo "$headers" | grep -qi "X-Frame-Options"; then
+    if grep -qi "X-Frame-Options" <<<"$headers"; then
         pass "X-Frame-Options header present"
     else
         fail "X-Frame-Options header missing"
     fi
-    if echo "$headers" | grep -qi "Content-Security-Policy"; then
+    if grep -qi "Content-Security-Policy" <<<"$headers"; then
         pass "CSP header present"
     else
         fail "CSP header missing"
     fi
-    if echo "$headers" | grep -qi "Permissions-Policy"; then
+    if grep -qi "Permissions-Policy" <<<"$headers"; then
         pass "Permissions-Policy header present"
     else
         fail "Permissions-Policy header missing"
     fi
-    if echo "$headers" | grep -qi "X-XSS-Protection"; then
+    if grep -qi "X-XSS-Protection" <<<"$headers"; then
         fail "Deprecated X-XSS-Protection header still present (should be removed)"
     else
         pass "X-XSS-Protection correctly removed"
@@ -256,7 +312,7 @@ test_crowdsec() {
 
     # Check parsers are processing logs
     local nginx_lines
-    nginx_lines=$(cscli metrics 2>/dev/null | awk '/file:\/var\/log\/nginx\/loxone-access.log/ {print $2}')
+    nginx_lines=$(_nginx_lines_read)
     if [[ -n "$nginx_lines" && "$nginx_lines" != "0" ]]; then
         pass "Nginx logs parsed ($nginx_lines lines)"
     else
@@ -268,13 +324,21 @@ test_crowdsec() {
     cscli decisions add --ip "$test_ip" --duration 1m --reason "gateway-test" --type ban >/dev/null 2>&1
     sleep 5
 
-    if cscli decisions list 2>/dev/null | grep -q "$test_ip"; then
+    local decisions
+    decisions=$(cscli decisions list 2>/dev/null)
+    if grep -qF "$test_ip" <<<"$decisions"; then
         pass "Decision created successfully"
     else
         fail "Decision creation failed"
     fi
 
-    if nft list set ip crowdsec crowdsec-blacklists 2>/dev/null | grep -q "$test_ip"; then
+    # The whole table, not one set: newer bouncers keep one set per decision
+    # origin (crowdsec-blacklists-cscli, -CAPI, …) instead of a single
+    # crowdsec-blacklists. Captured in full — it holds tens of thousands of
+    # CAPI addresses, exactly the output size that SIGPIPEs a `| grep -q`.
+    local cs_table
+    cs_table=$(nft list table ip crowdsec 2>/dev/null)
+    if grep -qF "$test_ip" <<<"$cs_table"; then
         pass "Decision propagated to nftables"
     else
         warn "Decision not yet in nftables (bouncer pulls every 10s)"
@@ -289,7 +353,9 @@ test_appsec() {
     test_header "CrowdSec AppSec WAF"
 
     # Check AppSec listener
-    if ss -tlnp | grep -q ':7422 '; then
+    local listeners
+    listeners=$(ss -tlnp 2>/dev/null)
+    if grep -q ':7422 ' <<<"$listeners"; then
         pass "AppSec listening on 127.0.0.1:7422"
     else
         fail "AppSec NOT listening on :7422"
@@ -297,8 +363,10 @@ test_appsec() {
 
     # Check AppSec metrics show processed requests
     local processed
-    processed=$(cscli metrics 2>/dev/null | awk '/appsec-loxone/ {print $2}')
-    if [[ -n "$processed" && "$processed" != "0" && "$processed" != "-" ]]; then
+    processed=$(_appsec_processed)
+    if [[ -z "$processed" ]]; then
+        warn "Could not read AppSec counters (cscli metrics -o json / 127.0.0.1:6060)"
+    elif [[ "$processed" != "0" ]]; then
         pass "AppSec has processed $processed requests"
     else
         warn "AppSec has not processed requests yet (send traffic and retry)"
@@ -354,21 +422,22 @@ test_appsec() {
     fi
 
     # Verify end-to-end: proxy request should trigger AppSec
-    local appsec_before appsec_after
-    appsec_before=$(cscli metrics 2>/dev/null | awk '/appsec-loxone/ {print $2}')
-    appsec_before=${appsec_before:-0}
-
-    curl -s -o /dev/null --connect-timeout 5 http://127.0.0.1:1080/jdev/cfg/api 2>/dev/null
+    # 2026-10: the request must speak the listener's scheme. In TLS mode a
+    # plain-HTTP request is answered by the 497 → 301 redirect before any
+    # location runs, so it never reached the AppSec auth_request and the
+    # counter could not move (the live "did not increment" warning).
+    local appsec_before appsec_after scheme
+    scheme=$(_gateway_scheme)
+    appsec_before=$(_appsec_processed)
+    curl -sk -o /dev/null --connect-timeout 5 "${scheme}://127.0.0.1:1080/jdev/cfg/api" 2>/dev/null
     sleep 2
-
-    appsec_after=$(cscli metrics 2>/dev/null | awk '/appsec-loxone/ {print $2}')
-    appsec_after=${appsec_after:-0}
-
-    # Use string comparison to avoid bash arithmetic errors with empty vars
-    if [[ "$appsec_after" != "$appsec_before" ]]; then
-        pass "AppSec inspects proxy traffic end-to-end"
+    appsec_after=$(_appsec_processed)
+    if [[ -z "$appsec_before" || -z "$appsec_after" ]]; then
+        warn "Could not read AppSec counters — end-to-end inspection not verified"
+    elif (( appsec_after > appsec_before )); then
+        pass "AppSec inspects proxy traffic end-to-end ($appsec_before → $appsec_after)"
     else
-        warn "AppSec metrics did not increment (may be delayed)"
+        warn "AppSec counter did not move ($appsec_before → $appsec_after) after a ${scheme} request"
     fi
 
     # LOW-010: AppSec 401 error detection
@@ -383,7 +452,12 @@ test_appsec() {
     # LOW-010: CrowdSec whitelist syntax validation
     local whitelist_file="/etc/crowdsec/parsers/s02-enrich/whitelist-loxone.yaml"
     if [[ -f "$whitelist_file" ]]; then
-        if cscli parsers inspect whitelist-loxone 2>/dev/null | grep -qi "whitelist-loxone"; then
+        # Captured, not piped into grep -q: cscli keeps writing after the
+        # first match and the SIGPIPE'd pipeline read as "not registered".
+        local parser_info
+        parser_info=$(cscli parsers inspect whitelist-loxone 2>/dev/null)
+        [[ -n "$parser_info" ]] || parser_info=$(cscli parsers list -a 2>/dev/null)
+        if grep -qi "whitelist-loxone" <<<"$parser_info"; then
             pass "CrowdSec whitelist parser is registered"
         else
             warn "CrowdSec whitelist parser may not be registered yet"
@@ -483,7 +557,7 @@ test_backup() {
     # The archive is removed again below so the test leaves no side effect.
     local backup_output
     backup_output=$(/opt/loxprox/gateway-backup.sh 2>&1)
-    if echo "$backup_output" | grep -q "Backup created"; then
+    if grep -q "Backup created" <<<"$backup_output"; then
         pass "Backup creation succeeded"
     else
         fail "Backup creation failed"
@@ -542,7 +616,7 @@ test_tunnel() {
 
     # frpc must run unprivileged.
     local frpc_user
-    frpc_user=$(ps -o user= -C frpc 2>/dev/null | head -1 | tr -d ' ')
+    frpc_user=$(ps -o user= -C frpc 2>/dev/null | awk 'NR == 1 {print $1}')
     if [[ "$frpc_user" == "frpc" ]]; then
         pass "frpc runs as unprivileged user"
     elif [[ -n "$frpc_user" ]]; then
@@ -640,7 +714,9 @@ test_gui() {
         fail "loxprox-gui.service is NOT running"
     fi
 
-    if ss -tlnp | grep -q ":${gui_port} "; then
+    local listeners
+    listeners=$(ss -tlnp 2>/dev/null)
+    if grep -q ":${gui_port} " <<<"$listeners"; then
         pass "GUI listening on :${gui_port}"
     else
         fail "GUI NOT listening on :${gui_port}"
@@ -697,7 +773,7 @@ test_version() {
     # missing/empty file means the running install predates the marker or the
     # deploy was interrupted before write_runtime_config.
     if [[ -s /etc/loxprox/VERSION ]] && grep -q '^version=' /etc/loxprox/VERSION; then
-        pass "Version marker present: $(grep '^version=' /etc/loxprox/VERSION | head -1)"
+        pass "Version marker present: $(grep -m1 '^version=' /etc/loxprox/VERSION)"
     else
         fail "/etc/loxprox/VERSION missing or malformed — deployed release is not readable on-box (re-run deploy.sh)"
     fi
@@ -799,6 +875,29 @@ test_operations() {
         fi
     done
 
+    # 2026-10: everything under /opt/loxprox runs as root — nothing in it may
+    # belong to another user or be group/world-writable, and deploy.sh's units
+    # must be real files (a symlinked unit is written through into its target).
+    if [[ -d /opt/loxprox ]]; then
+        local strays
+        strays=$(find /opt/loxprox -xdev \( ! -user 0 -o ! -group 0 -o ! -type l -perm /022 \) -printf '%u:%g %m %p; ' 2>/dev/null)
+        if [[ -z "$strays" && "$(stat -c '%U:%G' /opt/loxprox)" == "root:root" ]]; then
+            pass "/opt/loxprox root-owned, nothing in it owned by another user or group/world-writable"
+        else
+            fail "/opt/loxprox not root-only ($(stat -c '%U:%G %a' /opt/loxprox)): ${strays:-dir itself} — re-run deploy.sh"
+        fi
+    fi
+    local unit links=""
+    for unit in network-watchdog.service network-watchdog.timer tunnel-watchdog.service tunnel-watchdog.timer \
+                loxprox-monitor.service loxprox-monitor.timer loxprox-gui.service; do
+        [[ -L "/etc/systemd/system/$unit" ]] && links+=" $unit -> $(readlink "/etc/systemd/system/$unit")"
+    done
+    if [[ -z "$links" ]]; then
+        pass "LoxProx unit files in /etc/systemd/system are regular files"
+    else
+        fail "symlinked LoxProx unit(s):$links — re-run deploy.sh"
+    fi
+
     # Panel apply/renew: config.env must point at a persisted, root-only copy.
     local deploy_sh=""
     [[ -f /etc/loxprox/config.env ]] && deploy_sh=$(awk -F'"' '/^LOXPROX_DEPLOY_SH=/{print $2}' /etc/loxprox/config.env)
@@ -821,7 +920,9 @@ test_operations() {
     # kernel hands AVC records to auditd, so ask ausearch first and the kernel
     # log second. Informational (warn), not a failure: complain mode is
     # exactly where these are supposed to surface.
-    if command -v aa-status >/dev/null 2>&1 && aa-status 2>/dev/null | grep -q '/usr/sbin/nginx'; then
+    local aa_out=""
+    command -v aa-status >/dev/null 2>&1 && aa_out=$(aa-status 2>/dev/null)
+    if grep -q '/usr/sbin/nginx' <<<"$aa_out"; then
         pass "AppArmor nginx profile loaded"
         local pid elapsed start_epoch allowed=0 n
         pid=$(systemctl show -p MainPID --value nginx 2>/dev/null)
