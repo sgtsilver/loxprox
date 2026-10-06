@@ -560,7 +560,8 @@ def test_grafana_ban_count_jq_counts_distinct_decisions():
 
 def test_appsec_log_writer_uses_the_subrequest_status():
     text = read(DEPLOY)
-    assert "upstream_http_x_crowdsec_action" not in text, "CrowdSec never sends that header"
+    code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))  # the history comment may name it
+    assert "upstream_http_x_crowdsec_action" not in code, "CrowdSec never sends that header"
     assert re.search(r"auth_request_set\s+\$appsec_status \$upstream_status;", text)
     assert re.search(r'map \$appsec_status \$appsec_blocked \{\s+default\s+0;\s+"401"\s+1;\s+"403"\s+1;', text)
     assert "access_log /var/log/nginx/appsec-detections.log appsec_evt if=$appsec_blocked;" in text
