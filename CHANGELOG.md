@@ -17,8 +17,10 @@ had never worked on a real gateway:
 - there was no nginx AppArmor profile at all;
 - the Panel's Apply killed its own deploy.
 
-All of these are fixed and tested in CI against real cron, journald,
-auditd, logrotate, nginx-extras and AppArmor.
+All of these are fixed and covered by CI tests. Fixes that touch cron,
+journald, auditd, logrotate, nginx-extras or AppArmor are tested against
+the real service. The ban handling is tested against a masked real
+CrowdSec 1.8.1 sample.
 
 This release bundles everything merged after the v2.2.0 tag:
 
@@ -180,12 +182,16 @@ read the upgrade notes at the end first.
   for the DE/EN switch (no buttons nested in links), keeps an explicit
   `?host=` across the language switch, follows the panel theme, and says
   "QR code could not be generated" instead of "no host" when qrencode fails. (PR #43)
-- **Accessibility:** WCAG 2.2 AA pass: skip link, landmarks and heading
+- **Accessibility (targets WCAG 2.2 AA):** skip link, landmarks and heading
   order, visible focus, full keyboard operation (including chart readouts),
   text contrast ≥ 4.5:1 and indicators/control boundaries ≥ 3:1 in both
   themes, 44 px touch targets on touch screens, reflow at 320 px, labelled
   fields with associated errors, and polite live-region announcements for
-  status changes and results. (PR #43)
+  status changes and results.
+  - Checked in headless Chrome against a mock-API preview: contrast in both
+    themes, keyboard and focus order, and reflow at 320 px and 400 % zoom.
+  - Not yet tested: a screen reader, Safari, Firefox, and 200 % text-only
+    zoom. (PR #43)
 - **The Panel's apply job now reports a deploy that finished with degraded
   optional steps (`deploy.sh` exit `3`) as a distinct warning, not a
   failure.** (PR #41)
@@ -562,16 +568,16 @@ then changes the following on the box.
   loaded in complain mode on every deploy. It is enforced only with
   `APPARMOR_NGINX_MODE="enforce"` after a soak (ADR 0006). The profile
   changed in this release, so restart the soak clock.
-- **The Panel is replaced and its Apply works.**
+- **The Panel is replaced, and Apply no longer kills its own deploy.**
   - The calm-console front end replaces the v2.2 dashboard. The installed
     `static/` directory is replaced wholesale, which deletes the three.js
     and anime.js bundles.
   - The Panel unit is rewritten (no `After=nginx.service`,
     `TimeoutStopSec=10`) and restarted. This one stop still runs the old
     code, so it may take 10 s and end in SIGKILL.
-  - From then on, Apply and Renew TLS work, including after a reboot.
-    Each runs as its own transient unit (`loxprox-job-<id>`), so a Panel
-    restart no longer kills it.
+  - From then on, Apply and Renew TLS each run as their own transient unit
+    (`loxprox-job-<id>`), so a Panel restart no longer kills them. They use
+    the deploy copy in `/opt/loxprox/deploy/`, which survives a reboot.
 - **TLS.**
   - acme.sh always uses `/root/.acme.sh`.
   - A stray `/.acme.sh` from a run without `HOME` is reported, not deleted,

@@ -4,7 +4,7 @@
 **Repo:** https://github.com/sgtsilver/loxprox  
 **Version:** 2.3.0 (released)  
 **Last updated:** 2026-10-06 (v2.3.0 — calm ops console Panel: status-first overview with plain-language
-action items, typed config editor, SVG charts with table equivalents, WCAG 2.2 AA, no third-party JS; the
+action items, typed config editor, SVG charts with table equivalents, designed to WCAG 2.2 AA, no third-party JS; the
 2026-10-05 health audit and its follow-ups: `/etc/cron.d/loxprox` no longer rejected by cron (`MAILTO=""`), Panel
 Apply/Renew as their own transient unit, root-only `/opt/loxprox`, logrotate/journald/auditd coverage, nginx
 AppArmor profile enforce-ready (complain by default); progressive ban reads CrowdSec 1.8.1's nested decisions;
