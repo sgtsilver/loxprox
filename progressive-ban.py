@@ -130,6 +130,32 @@ def run_cscli(args):
     return [] if parsed is None else parsed
 
 
+def flatten_decisions(data) -> list:
+    """The decision objects inside `cscli decisions list -o json`.
+
+    cscli prints ALERTS there (verified on CrowdSec 1.8.1), each with a nested
+    `decisions` list (`id`, `value`, `origin`, `type`, `scope`, `duration`,
+    `scenario`). Reading those keys at the top level of each alert — what
+    main() did — found no `value` anywhere, so every entry was dropped
+    silently ("Extended: 0, Skipped: 0") and no ban was ever escalated. A flat
+    list of decisions is accepted too. Every decision is kept (no dedupe):
+    escalation deletes the original by its decision id.
+    """
+    out = []
+    for item in data if isinstance(data, list) else []:
+        if not isinstance(item, dict):
+            continue
+        if isinstance(item.get("decisions"), list) or ("value" not in item and "source" in item):
+            for dec in item.get("decisions") or []:
+                if isinstance(dec, dict):
+                    if not dec.get("scenario") and item.get("scenario"):
+                        dec = dict(dec, scenario=item["scenario"])
+                    out.append(dec)
+        else:
+            out.append(item)
+    return out
+
+
 def cscli_decision_delete(decision_id: str) -> bool:
     """Delete a CrowdSec decision by ID. Returns True on success."""
     try:
@@ -300,10 +326,12 @@ def main():
     # currently-active decisions, so the old counter never reached 2. `-a` is dropped
     # entirely (it only un-hides CAPI/list decisions; it never returns expired ones).
 
-    # Get currently active decisions
-    active = run_cscli(["decisions", "list"])
-    if active is None:
+    # Get currently active decisions (flattened out of the alerts cscli prints)
+    listed = run_cscli(["decisions", "list"])
+    if listed is None:
         sys.exit(1)
+    active = flatten_decisions(listed)
+    logger.info("Active decisions: %d (from %d listed entries)", len(active), len(listed))
 
     # Prune stale state entries (IPs no longer with active cscli bans)
     active_cscli_ips = {
@@ -329,6 +357,9 @@ def main():
         id_ = str(d.get("id", ""))
 
         if not ip or not id_:
+            continue
+        if d.get("simulated"):
+            skipped += 1   # simulated decisions block nothing; never escalate them
             continue
 
         # H1: extend local scenario/AppSec bans (origin "crowdsec"); skip CAPI /

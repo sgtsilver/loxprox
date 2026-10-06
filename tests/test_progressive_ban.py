@@ -438,3 +438,81 @@ class TestEscalationTable:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ── 2026-10: the real `cscli decisions list -o json` shape (CrowdSec 1.8.1) ──
+#
+# The fixture is a masked live sample: 9 ALERTS, each with a nested
+# `decisions` list (8 decisions in total; one alert carries none because its
+# address is already banned by another). main() read value/origin/id at the
+# top level of each alert, found no value anywhere and dropped every entry —
+# the production log said "Extended: 0, Skipped: 0" every 15 minutes.
+
+FIXTURE = Path(__file__).parent / "fixtures" / "cscli-decisions-list-1.8.1.json"
+
+
+def _fixture():
+    return json.loads(FIXTURE.read_text())
+
+
+class TestFlattenDecisions:
+    def test_fixture_is_alert_shaped(self):
+        data = _fixture()
+        assert all("value" not in a and "decisions" in a for a in data)
+
+    def test_flattens_every_decision(self):
+        decs = pb.flatten_decisions(_fixture())
+        assert len(decs) == 8
+        assert all(d["value"] and d["id"] and d["origin"] == "crowdsec" for d in decs)
+        assert all(d["value"].startswith("203.0.113.") for d in decs)
+
+    def test_scenario_falls_back_to_the_alert(self):
+        alert = {"scenario": "crowdsecurity/ssh-bf", "source": {"ip": "203.0.113.9"},
+                 "decisions": [{"id": 1, "value": "203.0.113.9", "origin": "crowdsec"}]}
+        assert pb.flatten_decisions([alert])[0]["scenario"] == "crowdsecurity/ssh-bf"
+
+    def test_flat_list_and_null_shapes(self):
+        flat = [{"id": 3, "value": "203.0.113.3", "origin": "crowdsec"}]
+        assert pb.flatten_decisions(flat) == flat
+        assert pb.flatten_decisions([]) == []
+        assert pb.flatten_decisions(None) == []
+        assert pb.flatten_decisions([{"source": {}, "decisions": None}]) == []
+
+
+class TestMainOnRealShape:
+    def _run(self, offenses, tmp_path, monkeypatch, caplog):
+        monkeypatch.setattr(pb, "STATE_FILE", str(tmp_path / "state.json"))
+        caplog.set_level("INFO", logger="progressive-ban")
+        with patch.object(pb, "run_cscli", return_value=_fixture()), \
+             patch.object(pb, "count_offenses", return_value=offenses), \
+             patch.object(pb, "load_whitelist", return_value=[]), \
+             patch.object(pb, "cscli_decision_add", return_value=True) as add, \
+             patch.object(pb, "cscli_decision_delete", return_value=True) as dele:
+            pb.main()
+        return add, dele, caplog.text
+
+    def test_first_offenses_are_seen_and_skipped(self, tmp_path, monkeypatch, caplog):
+        add, dele, log = self._run(1, tmp_path, monkeypatch, caplog)
+        add.assert_not_called()
+        assert "Active decisions: 8 (from 9 listed entries)" in log
+        assert "Extended: 0, Skipped: 8" in log      # was "Skipped: 0": nothing seen
+
+    def test_repeat_offenders_are_escalated_by_decision_id(self, tmp_path, monkeypatch, caplog):
+        add, dele, log = self._run(2, tmp_path, monkeypatch, caplog)
+        assert add.call_count == 8 and dele.call_count == 8
+        ids = {str(d["id"]) for a in _fixture() for d in (a.get("decisions") or [])}
+        assert {c.args[0] for c in dele.call_args_list} == ids
+        assert all(c.args[1] == "24h" for c in add.call_args_list)
+        assert "Extended: 8, Skipped: 0" in log
+
+    def test_simulated_decisions_never_escalate(self, tmp_path, monkeypatch, caplog):
+        data = _fixture()
+        for a in data:
+            for d in a.get("decisions") or []:
+                d["simulated"] = True
+        monkeypatch.setattr(pb, "STATE_FILE", str(tmp_path / "state.json"))
+        with patch.object(pb, "run_cscli", return_value=data), \
+             patch.object(pb, "count_offenses", return_value=3), \
+             patch.object(pb, "cscli_decision_add") as add:
+            pb.main()
+        add.assert_not_called()

@@ -283,7 +283,8 @@ test_configure_nginx() {
     else
         pass "server-level proxy_hide_header is inherited (no location overrides it)"
     fi
-    grep -q "^# LOXPROX-SITE-TEMPLATE-VERSION: 4$" "$NGINX_SITE" && pass "site template stamped v4" || fail "site template not stamped v4"
+    grep -q "^# LOXPROX-SITE-TEMPLATE-VERSION: ${_LOXPROX_SITE_TEMPLATE_VERSION}$" "$NGINX_SITE" && [[ "$_LOXPROX_SITE_TEMPLATE_VERSION" -ge 5 ]] \
+        && pass "site template stamped v${_LOXPROX_SITE_TEMPLATE_VERSION} (≥ 5)" || fail "site template stamp wrong"
 
     # AppSec placeholder
     if [[ -f "$MOCK_ROOT/etc/nginx/crowdsec-appsec.conf" ]]; then pass "AppSec placeholder created"; else fail "AppSec placeholder missing"; fi
@@ -565,13 +566,21 @@ EOF
         || fail "regenerated site missing the template version marker"
     # v1.5.0 final shape: NO conf.d split — map + log_format stay inline in
     # the site config (nginx -t rejects the split because `auth_request_set`
-    # registers $appsec_action at parse time, and the variable must be
+    # registers $appsec_status (v1.5: $appsec_action) at parse time, and it must be
     # registered before any `if=$var` access_log reference). The conf.d file
     # must be cleaned up if it lingered from an earlier dev iteration.
     [[ ! -f "$NGINX_APPSEC_AUDIT_CONF" ]] && pass "conf.d/loxprox-appsec.conf is NOT written" \
                                           || fail "conf.d/loxprox-appsec.conf should not exist"
     grep -q 'log_format appsec_evt' "$NGINX_SITE"     && pass "log_format appsec_evt in regenerated site"    || fail "log_format missing from regenerated site"
-    grep -q 'map \$appsec_action' "$NGINX_SITE"       && pass "map \$appsec_action in regenerated site"     || fail "map missing from regenerated site"
+    grep -q 'map \$appsec_status \$appsec_blocked' "$NGINX_SITE" && pass "map \$appsec_status in regenerated site" || fail "map missing from regenerated site"
+    # 2026-10 (v5): the verdict is the AppSec subrequest's status — CrowdSec
+    # never sends the X-Crowdsec-Action header the v1.5 map waited for.
+    grep -qE 'auth_request_set +\$appsec_status \$upstream_status;' "$NGINX_SITE" \
+        && pass "AppSec verdict taken from the subrequest status" || fail "auth_request_set does not capture \$upstream_status"
+    grep -q 'x_crowdsec_action' "$NGINX_SITE" && fail "site still waits for the X-Crowdsec-Action header" || pass "no dependency on an X-Crowdsec-Action header"
+    grep -qE '"403" +1;' "$NGINX_SITE" && pass "HTTP 403 from AppSec counts as blocked" || fail "403 not mapped to blocked"
+    grep -q '\$request_method \$loxone_log_uri \$server_protocol" '"'"'' "$NGINX_SITE" && ! grep -q 'appsec_evt .*"\$request"' "$NGINX_SITE" \
+        && pass "detection log uses the F3-scrubbed path (no raw request line)" || fail "detection log format logs the raw request"
     grep -q 'if=\$appsec_blocked' "$NGINX_SITE"       && pass "conditional access_log in regenerated site" || fail "conditional access_log missing"
     # F3 — access log scrubbed of query string (combined-shaped for CrowdSec)
     grep -q 'log_format loxone_scrubbed' "$NGINX_SITE" && pass "F3: scrubbed log_format defined"          || fail "F3: scrubbed log_format missing"
@@ -1464,13 +1473,13 @@ test_site_template_v3_upgrade() {
     configure_nginx >/dev/null 2>&1
     _loxprox_site_enable_tls >/dev/null 2>&1
     # Turn it into what a v3 install has on disk: same params, older stamp, no hides.
-    sed -i -e 's/^# LOXPROX-SITE-TEMPLATE-VERSION: 4$/# LOXPROX-SITE-TEMPLATE-VERSION: 3/' \
+    sed -i -e "s/^# LOXPROX-SITE-TEMPLATE-VERSION: ${_LOXPROX_SITE_TEMPLATE_VERSION}\$/# LOXPROX-SITE-TEMPLATE-VERSION: 3/" \
            -e '/proxy_hide_header \(X-Frame-Options\|X-Content-Type-Options\|Referrer-Policy\|Content-Security-Policy\|Permissions-Policy\|Strict-Transport-Security\|X-XSS-Protection\);/d' "$NGINX_SITE"
     rm -f "$backup_path"
     grep -q 'proxy_hide_header X-Frame-Options' "$NGINX_SITE" && fail "fixture still has the v4 hides" || pass "fixture is a v3 TLS site"
 
     configure_nginx >/dev/null 2>&1
-    grep -q '^# LOXPROX-SITE-TEMPLATE-VERSION: 4$' "$NGINX_SITE" && pass "v3 site regenerated to v4" || fail "v3 site not regenerated"
+    grep -q "^# LOXPROX-SITE-TEMPLATE-VERSION: ${_LOXPROX_SITE_TEMPLATE_VERSION}\$" "$NGINX_SITE" && pass "v3 site regenerated to v${_LOXPROX_SITE_TEMPLATE_VERSION}" || fail "v3 site not regenerated"
     grep -q 'proxy_hide_header X-Frame-Options;' "$NGINX_SITE" && pass "regenerated site hides the upstream X-Frame-Options" || fail "hides missing after regeneration"
     grep -q '^[[:space:]]*listen 1080 ssl;' "$NGINX_SITE" && grep -q '# LOXPROX-TLS-BEGIN' "$NGINX_SITE" \
         && pass "TLS block re-applied after regeneration" || fail "regeneration dropped the TLS listener"

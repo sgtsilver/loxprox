@@ -427,6 +427,17 @@ function evaluate(s) {
         items.push({ id: "backup", level: "warn", title: t("att_backup_old_title", { h: num(Math.round(s.backup.age_hours)) }),
             text: t("att_backup_old_text") });
     }
+    // GeoIP blocklist: a failed refresh keeps the last known-good list (safe),
+    // but must not go unnoticed for days.
+    const g = s.geoip;
+    if (g && g.enabled && g.stale) {
+        items.push({ id: "geoip", level: "warn",
+            title: g.last_ok ? tn("att_geoip_stale_title", Math.max(1, Math.floor((g.age_hours || 0) / 24)))
+                             : t("att_geoip_never_title"),
+            text: sentences(g.ranges ? t("att_geoip_kept_n", { n: num(g.ranges) }) : t("att_geoip_kept"),
+                g.last_error ? t("att_geoip_error", { err: g.last_error }) : "", t("att_geoip_hint")),
+            action: { type: "ssh", cmd: "sudo bash /opt/loxprox/geoip-block.sh" } });
+    }
     const sys = s.system || {};
     if (sys.disk_pct > 85) {
         items.push({ id: "disk", level: sys.disk_pct > 90 ? "bad" : "warn",

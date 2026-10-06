@@ -44,7 +44,9 @@ erreichst (`cscli`, `systemctl`, `openssl`, `deploy.sh`).
   Dienst neu starten, ablaufendes Zertifikat erneuern, Miniserver-Adresse
   prüfen, Protokoll eines fehlgeschlagenen Anwendens öffnen. Für
   zeitgesteuerte Units, die das Panel nicht neu starten kann, steht der
-  passende `systemctl status …`-Befehl für SSH da.
+  passende `systemctl status …`-Befehl für SSH da. Ist die GeoIP-Sperrliste
+  seit 3 Tagen nicht aktualisiert, stehen dort ihr Alter, der letzte Fehler
+  und der Befehl, um sie von Hand zu aktualisieren.
 - **Zustand im Detail** — kompakte Kacheln:
 
 | Kachel | Zeigt |
@@ -52,8 +54,8 @@ erreichst (`cscli`, `systemctl`, `openssl`, `deploy.sh`).
 | Dienste | Jede Unit mit Zustand: nginx, CrowdSec, Firewall-Bouncer, `loxprox-monitor.timer`, `network-watchdog.timer`, dazu frpc und `tunnel-watchdog.timer`, wenn der Tunnel an ist |
 | Miniserver | Live-TCP-Check gegen `LOXONE_IP:LOXONE_PORT` |
 | TLS-Zertifikat | Verbleibende Tage von `/etc/loxprox/tls/fullchain.pem` — Warnung unter 21 Tagen, Problem unter 7 |
-| Gesperrte Adressen | Anzahl aktiver CrowdSec-Decisions (zur Info — Sperren heißen: der Schutz arbeitet) |
-| Abgewehrte Angriffe heute | AppSec-Detections heute und von wie vielen Adressen |
+| Gesperrte Adressen | Anzahl der Adressen mit aktiver CrowdSec-Decision (zur Info — Sperren heißen: der Schutz arbeitet) |
+| Abgewehrte Angriffe heute | Anfragen, die die AppSec-WAF heute blockiert hat (`/var/log/nginx/appsec-detections.log`), und von wie vielen Adressen |
 | Letztes Backup | Alter und Größe des neuesten `/root/loxprox-backups/*.tar.gz` — Warnung, wenn älter als 26 Stunden oder keins da ist |
 | System | Speicherplatz, Arbeitsspeicher und Auslastung als beschriftete Balken |
 | Verbindungsart | TLS, Tunnel (mit frpc-Zustand) oder direktes HTTP |
