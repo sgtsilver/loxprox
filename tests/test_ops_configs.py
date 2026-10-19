@@ -167,6 +167,35 @@ def test_cron_mailto_is_quoted_empty():
     raise AssertionError("/etc/cron.d/loxprox heredoc not found")
 
 
+def test_hub_refresh_runs_daily_at_0430():
+    """2026-10: the package's nightly crowdsec-hubupdate.timer is masked, so
+    hub-refresh.sh is the only refresh of the hub items — it has to run
+    daily, not weekly, to keep them as fresh."""
+    for _, target, body, _ in cron_heredocs():
+        if target == "/etc/cron.d/loxprox":
+            jobs = [line for line in body if "hub-refresh.sh" in line and not line.lstrip().startswith("#")]
+            assert jobs == ["30 4 * * * root /opt/loxprox/hub-refresh.sh >> /var/log/loxprox-cron.log 2>&1"], jobs
+            return
+    raise AssertionError("/etc/cron.d/loxprox heredoc not found")
+
+
+def test_package_hubupdate_timer_masked_only_once_hub_refresh_is_scheduled():
+    """Masking the package timer before hub-refresh.sh is installed and its
+    cron file passed the lint would leave the rules with no refresh at all."""
+    text = read(DEPLOY)
+    body = text.split("\nsetup_security_monitoring() {", 1)[1].split("\n}\n", 1)[0]
+    i_install = body.index('"$src_dir/security-monitoring/hub-refresh.sh"')
+    i_cron = body.index("\n    _loxprox_write_security_cron\n")
+    i_lint = body.index("(( cron_bad == 0 )) || return 1")
+    i_mask = body.index("\n    _loxprox_mask_package_hubupdate\n")
+    assert i_install < i_cron < i_lint < i_mask
+    fn = text.split("\n_loxprox_mask_package_hubupdate() {", 1)[1].split("\n}\n", 1)[0]
+    assert 'systemctl mask --now "$unit"' in fn
+    assert 'hub-refresh.sh" ]]' in fn, "must check that hub-refresh.sh is installed first"
+    assert "return 1" not in fn, "an absent or unmaskable unit must not fail the deploy step"
+    assert 'CROWDSEC_HUBUPDATE_TIMER="${CROWDSEC_HUBUPDATE_TIMER:-crowdsec-hubupdate.timer}"' in text
+
+
 # ── 2. logrotate: every LoxProx log rotated exactly once ──────────────────────
 
 def logrotate_stanzas(lines):

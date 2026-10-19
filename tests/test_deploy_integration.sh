@@ -1160,8 +1160,10 @@ test_cron_file_generation() {
     # 2026-10 breach hardening
     grep -qx '\*/15 \* \* \* \* root flock -n /run/loxprox-progressive-ban.lock /opt/loxprox/progressive-ban.py >> /var/log/loxprox-cron.log 2>&1' "$LOXPROX_CRON_FILE" \
         && pass "progressive ban runs under flock -n /run/loxprox-progressive-ban.lock" || fail "progressive-ban line without the flock"
-    grep -qx '30 4 \* \* 0 root /opt/loxprox/hub-refresh.sh >> /var/log/loxprox-cron.log 2>&1' "$LOXPROX_CRON_FILE" \
-        && pass "hub refresh weekly, Sunday 04:30" || fail "hub-refresh line missing or wrong schedule"
+    # Daily since the package's nightly crowdsec-hubupdate.timer is masked.
+    grep -qx '30 4 \* \* \* root /opt/loxprox/hub-refresh.sh >> /var/log/loxprox-cron.log 2>&1' "$LOXPROX_CRON_FILE" \
+        && pass "hub refresh daily, 04:30" || fail "hub-refresh line missing or wrong schedule: $(grep hub-refresh "$LOXPROX_CRON_FILE")"
+    [[ "$(grep -c 'hub-refresh' "$LOXPROX_CRON_FILE")" -eq 1 ]] && pass "exactly one hub-refresh job" || fail "hub-refresh jobs: $(grep -c hub-refresh "$LOXPROX_CRON_FILE")"
     # geoip-block.sh loads config.env itself — the cron line stays a plain call.
     grep -qx '0 3 \* \* \* root /opt/loxprox/geoip-block.sh >> /var/log/loxprox-cron.log 2>&1' "$LOXPROX_CRON_FILE" \
         && pass "GeoIP cron line is a plain call (no sourcing inside the crontab)" || fail "GeoIP cron line changed: $(grep geoip "$LOXPROX_CRON_FILE")"
@@ -1202,6 +1204,76 @@ test_cron_file_generation() {
     [[ -z "$tg_good" ]] && pass "test-gateway.sh lint accepts the valid fixture" || fail "test-gateway.sh lint rejects valid syntax: $tg_good"
     tg_good=$( (source "$PROJECT_DIR/test-gateway.sh"; _cron_file_problems "$LOXPROX_CRON_FILE") 2>&1)
     [[ -z "$tg_good" ]] && pass "test-gateway.sh lint accepts the generated cron file" || fail "test-gateway.sh lint rejects the generated file: $tg_good"
+}
+
+# 2026-10: the CrowdSec package's crowdsec-hubupdate.timer upgrades EVERY hub
+# item nightly with no snapshot or rollback; deploy masks it once hub-refresh.sh
+# is installed. systemctl is a stateful mock: the state file holds what
+# `is-enabled` prints ("" = a unit systemd does not know), `mask` sets "masked".
+test_mask_package_hubupdate() {
+    echo ""
+    echo "━━━ _loxprox_mask_package_hubupdate() — package timer masked (2026-10) ━━━"
+
+    local calls="$MOCK_ROOT/hubupdate-systemctl.calls" state="$MOCK_ROOT/hubupdate.state" out rc
+    local LOXPROX_INSTALL_DIR="$MOCK_ROOT/hubupdate-install"
+    mkdir -p "$LOXPROX_INSTALL_DIR"
+    printf '#!/bin/bash\n' > "$LOXPROX_INSTALL_DIR/hub-refresh.sh"
+    chmod 0755 "$LOXPROX_INSTALL_DIR/hub-refresh.sh"
+    systemctl() {
+        printf '%s\n' "$*" >> "$MOCK_ROOT/hubupdate-systemctl.calls"
+        local s
+        case "$1" in
+            is-enabled)
+                s=$(cat "$MOCK_ROOT/hubupdate.state" 2>/dev/null)
+                [[ -z "$s" ]] || echo "$s"
+                [[ "$s" == enabled ]] ;;    # masked / unknown: non-zero, as systemd does
+            mask)
+                [[ -z "${MOCK_MASK_RC:-}" ]] || return "$MOCK_MASK_RC"
+                echo masked > "$MOCK_ROOT/hubupdate.state" ;;
+            *) return 0 ;;
+        esac
+    }
+
+    echo enabled > "$state"; : > "$calls"
+    out=$(_loxprox_mask_package_hubupdate 2>&1); rc=$?
+    [[ $rc -eq 0 ]] && grep -qx 'mask --now crowdsec-hubupdate.timer' "$calls" \
+        && pass "enabled package timer → systemctl mask --now crowdsec-hubupdate.timer" || fail "rc=$rc calls: $(cat "$calls")"
+    [[ "$(cat "$state")" == masked ]] && grep -q 'masked (was: enabled)' <<<"$out" \
+        && pass "…verified masked afterwards and logged" || fail "state=$(cat "$state") out: $out"
+
+    : > "$calls"
+    out=$(_loxprox_mask_package_hubupdate 2>&1); rc=$?
+    [[ $rc -eq 0 && "$(cat "$state")" == masked ]] && ! grep -q 'Could not mask' <<<"$out" \
+        && pass "idempotent: a second deploy run keeps it masked, no warning" || fail "re-run rc=$rc out: $out"
+
+    local absent
+    for absent in "" not-found; do
+        printf '%s' "$absent" > "$state"; : > "$calls"
+        out=$(_loxprox_mask_package_hubupdate 2>&1); rc=$?
+        if [[ $rc -eq 0 ]] && ! grep -q '^mask' "$calls" && grep -q 'not present' <<<"$out" && ! grep -q 'WARN' <<<"$out"; then
+            pass "unit absent (is-enabled prints '${absent:-nothing}') → returns 0, nothing masked, no warning"
+        else
+            fail "absent unit ('$absent'): rc=$rc calls=$(cat "$calls") out: $out"
+        fi
+    done
+
+    echo enabled > "$state"; : > "$calls"
+    out=$(MOCK_MASK_RC=1 _loxprox_mask_package_hubupdate 2>&1); rc=$?
+    if [[ $rc -eq 0 ]] && grep -q 'Could not mask crowdsec-hubupdate.timer' <<<"$out" \
+            && grep -q 'sudo systemctl mask --now crowdsec-hubupdate.timer' <<<"$out"; then
+        pass "mask fails → warning with the manual command, the deploy step does not fail"
+    else
+        fail "mask failure: rc=$rc out: $out"
+    fi
+
+    rm -f "$LOXPROX_INSTALL_DIR/hub-refresh.sh"
+    echo enabled > "$state"; : > "$calls"
+    out=$(_loxprox_mask_package_hubupdate 2>&1); rc=$?
+    [[ $rc -eq 0 && "$(cat "$state")" == enabled ]] && ! grep -q '^mask' "$calls" && grep -q 'not installed' <<<"$out" \
+        && pass "hub-refresh.sh not installed → the package timer is left running (the rules keep a refresh path)" \
+        || fail "without hub-refresh.sh: rc=$rc state=$(cat "$state") calls=$(cat "$calls")"
+
+    systemctl() { true; }
 }
 
 # Fix 1: the health check consults cron's own journal, scoped to the file's
@@ -2653,6 +2725,7 @@ test_restore_refuses_missing_archive
 
 # 2026-10 health-audit fixes
 test_cron_file_generation
+test_mask_package_hubupdate
 test_cron_health_check
 test_logrotate_loxprox
 test_setup_journald

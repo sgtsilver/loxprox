@@ -149,14 +149,39 @@ first.
   `repeat-offender-hard-<n>` (HARD) or `repeat-offender-<n>` (SOFT). The session alert learns provider networks
   silently for `ASN_LEARNING_DAYS` days first. `mmdb-bin` and `jq` are
   installed for these checks.
-- **Weekly CrowdSec hub refresh** (`security-monitoring/hub-refresh.sh`,
-  Sunday 04:30). It upgrades only `crowdsecurity/appsec-virtual-patching`,
-  reloads CrowdSec only if that collection changed, and reports every other
-  outdated hub item on Discord without upgrading it. It snapshots the hub
-  first (4 kept in `/var/lib/loxprox/hub-snapshots/`) and rolls back if
-  CrowdSec does not come back (CRITICAL *CrowdSec Rule Update Rolled Back*,
+- **Daily CrowdSec hub refresh** (`security-monitoring/hub-refresh.sh`,
+  04:30), the only unattended hub update. It upgrades **every installed hub
+  item** (`cscli hub upgrade`, never `--force`, so locally modified
+  "tainted" items and the LoxProx local scenarios and whitelist stay as
+  they are). This keeps the freshness of the package timer it replaces:
+  new ban scenarios and virtual patches keep arriving every night. The
+  accepted risk is that an upstream parser or scenario change can alter
+  what is banned without a review. CrowdSec reloads only if an item's
+  version changed; the changed items are logged, and a successful upgrade
+  sends no alert. Before the upgrade it snapshots the hub (7 kept in
+  `/var/lib/loxprox/hub-snapshots/`). If CrowdSec does not come back, it
+  rolls back and sends a CRITICAL *CrowdSec Rule Update Rolled Back*,
   *CrowdSec Down — Gateway Serving Errors* or *CrowdSec Rule Rollback
-  Failed*; WARNING *CrowdSec Hub Snapshot Failed* skips the upgrade).
+  Failed* that names the changed items. *CrowdSec Hub Items Not Upgraded*
+  (INFO) lists the items left behind (tainted, or still update-available)
+  and how to resolve them; it is sent again only when that list changes.
+  **It finds the hub where CrowdSec says it is** (`cscli config show`, then
+  `config.yaml`; the Debian package uses `/etc/crowdsec/hub`), and it
+  upgrades nothing unless the snapshot provably holds the hub index and
+  the file behind every installed hub item (WARNING *CrowdSec Hub Snapshot
+  Failed* otherwise). As first merged, it looked in `/var/lib/crowdsec/hub`,
+  which the package does not use: its snapshot held only the installed-item
+  links, so a rollback could not have undone an upgrade. It never ran on a
+  gateway. Data files that `cscli hub upgrade` refreshes under `data_dir`
+  are not part of the snapshot, because that directory also holds the
+  CrowdSec database.
+  **The CrowdSec package's own nightly hub upgrade is now disabled.** The
+  package ships and enables `crowdsec-hubupdate.timer`, which ran `cscli hub
+  update && cscli hub upgrade` every night: every installed hub item
+  upgraded and CrowdSec reloaded, with no snapshot and no rollback, so the
+  protection above was bypassed. `deploy.sh` masks the timer
+  (`systemctl mask --now`) once `hub-refresh.sh` and its cron line are in
+  place; `test-gateway.sh` checks that it stays masked.
 - **`test-gateway.sh`** gets an *Edge filtering, bans & host config*
   section; the new checks and scripts have CI tests.
 - **New configuration keys** (all optional, documented in

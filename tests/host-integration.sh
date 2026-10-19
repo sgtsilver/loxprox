@@ -1259,9 +1259,195 @@ t_crowdsec() {
     rm -rf "$dir"
 }
 
+# The package's crowdsec-hubupdate.timer runs `cscli hub upgrade` on EVERY
+# installed item nightly, with no snapshot and no rollback. deploy.sh's
+# _loxprox_mask_package_hubupdate against the real unit and the real systemd:
+# masked, stopped, idempotent, and still masked after what the package itself
+# does — its postinst's `systemctl enable --now` and a package reinstall.
+t_crowdsec_hubupdate() {
+    section "CrowdSec — the package's crowdsec-hubupdate.timer is masked (2026-10)"
+    local unit=crowdsec-hubupdate.timer inst out rc ver
+    if [[ -z "$(systemctl list-unit-files --no-legend "$unit" 2>/dev/null)" ]]; then
+        fail "$unit is not shipped by this CrowdSec package — the real-unit checks cannot run"
+        return
+    fi
+    out=$(systemctl is-enabled "$unit" 2>/dev/null)
+    [[ "$out" == enabled ]] && pass "the package enabled $unit (the blanket nightly upgrade)" || note "$unit was '$out' before the mask step"
+
+    inst=$(mktemp -d /var/tmp/loxprox-hubupdate.XXXXXX)
+    install -m 0755 "$REPO/security-monitoring/hub-refresh.sh" "$inst/hub-refresh.sh"
+    if (LOXPROX_INSTALL_DIR="$inst"; _loxprox_mask_package_hubupdate) >>"$LOG_FILE" 2>&1; then
+        pass "_loxprox_mask_package_hubupdate returns 0"
+    else
+        fail "_loxprox_mask_package_hubupdate returned non-zero"
+    fi
+    out=$(systemctl is-enabled "$unit" 2>/dev/null)
+    [[ "$out" == masked ]] && pass "$unit is masked" || fail "$unit is '$out' after the mask step"
+    [[ "$(readlink "/etc/systemd/system/$unit")" == /dev/null ]] \
+        && pass "persistent mask: /etc/systemd/system/$unit → /dev/null" || fail "no persistent mask link: $(ls -l "/etc/systemd/system/$unit" 2>&1)"
+    systemctl is-active --quiet "$unit" && fail "$unit is still active (scheduled)" || pass "$unit stopped — no longer scheduled"
+    if (LOXPROX_INSTALL_DIR="$inst"; _loxprox_mask_package_hubupdate) >>"$LOG_FILE" 2>&1 \
+            && [[ "$(systemctl is-enabled "$unit" 2>/dev/null)" == masked ]]; then
+        pass "a second deploy run: still masked, returns 0"
+    else
+        fail "second run: $(systemctl is-enabled "$unit" 2>&1)"
+    fi
+
+    # The line the package's postinst runs on every configure (with || true).
+    systemctl enable --now "$unit" >/dev/null 2>&1 \
+        && fail "systemctl enable --now succeeded on the masked timer" \
+        || pass "the postinst's 'systemctl enable --now $unit' is refused while masked"
+    [[ "$(systemctl is-enabled "$unit" 2>/dev/null)" == masked ]] && ! systemctl is-active --quiet "$unit" \
+        && pass "…and it stays masked and inactive" || fail "after enable --now: $(systemctl is-enabled "$unit" 2>&1)"
+    # The whole maintainer-script path of a package upgrade, same version.
+    ver=$(dpkg-query -W -f='${Version}' crowdsec 2>/dev/null)
+    DEBIAN_FRONTEND=noninteractive timeout 600 apt-get install -y -qq --reinstall "crowdsec=$ver" >>"$LOG_FILE" 2>&1; rc=$?
+    if (( rc == 0 )); then
+        pass "package reinstall (crowdsec $ver) ran its maintainer scripts"
+    else
+        fail "apt-get install --reinstall crowdsec=$ver exited $rc — log below"
+        tail -15 "$LOG_FILE" | sed 's/^/    /'
+    fi
+    out=$(systemctl is-enabled "$unit" 2>/dev/null)
+    [[ "$out" == masked ]] && ! systemctl is-active --quiet "$unit" \
+        && pass "…and $unit is still masked and inactive afterwards" || fail "after the package reinstall $unit is '$out'"
+
+    # A unit this systemd does not know: nothing to mask, nothing created.
+    note "systemd's is-enabled for an unknown unit prints: '$(systemctl is-enabled loxprox-ci-absent.timer 2>/dev/null)'"
+    # shellcheck disable=SC2034  # read by deploy.sh's _loxprox_mask_package_hubupdate
+    out=$( (LOXPROX_INSTALL_DIR="$inst" CROWDSEC_HUBUPDATE_TIMER=loxprox-ci-absent.timer; _loxprox_mask_package_hubupdate) 2>&1 ); rc=$?
+    if [[ $rc -eq 0 ]] && grep -q 'not present' <<<"$out" \
+            && [[ ! -e /etc/systemd/system/loxprox-ci-absent.timer && ! -L /etc/systemd/system/loxprox-ci-absent.timer ]]; then
+        pass "an absent unit → 'not present', returns 0, no mask link created"
+    else
+        fail "absent unit: rc=$rc out: $out"
+    fi
+    rm -rf "$inst"
+}
+
+# hub-refresh.sh against the real CrowdSec (installed by the CI step, after
+# t_crowdsec): where this install keeps its hub, a full daily run with Discord
+# stubbed, what the snapshot holds, a tamper → restore round trip, and the
+# fail-safe for a hub_dir that does not exist (the first version assumed
+# /var/lib/crowdsec/hub). cscli is wrapped to record its calls.
+t_crowdsec_hub_refresh() {
+    section "CrowdSec — hub-refresh.sh on the real hub: layout, full run, snapshot, restore (2026-10)"
+    command -v cscli >/dev/null || { fail "cscli missing — install crowdsec first"; return; }
+    local hr="$REPO/security-monitoring/hub-refresh.sh" real w hub index link item snap x rc line
+    real=$(command -v cscli)
+    hub=$(cscli config show --key Config.ConfigPaths.HubDir 2>/dev/null)
+    index=$(cscli config show --key Config.ConfigPaths.HubIndexFile 2>/dev/null)
+    note "cscli config show: HubDir='$hub' HubIndexFile='$index' ConfigDir='$(cscli config show --key Config.ConfigPaths.ConfigDir 2>/dev/null)'"
+    note "config.yaml: $(grep -E '^[[:space:]]+(config_dir|hub_dir|index_path):' /etc/crowdsec/config.yaml 2>/dev/null | tr -s ' ' | tr '\n' ';')"
+    if [[ -d /var/lib/crowdsec/hub ]]; then note "/var/lib/crowdsec/hub exists"; else note "/var/lib/crowdsec/hub does not exist"; fi
+    hub="${hub%/}"
+    if [[ -d "$hub" && -s "$index" ]]; then
+        pass "this install's hub: $hub, index $index"
+    else
+        fail "hub_dir '$hub' / index '$index' not found"
+        return
+    fi
+
+    # Production runs AppSec; t_crowdsec configured CrowdSec without it.
+    cscli collections install crowdsecurity/appsec-virtual-patching --error >>"$LOG_FILE" 2>&1 \
+        || note "installing crowdsecurity/appsec-virtual-patching returned non-zero"
+    link=/etc/crowdsec/collections/http-cve.yaml
+    item=$(readlink -f "$link" 2>/dev/null)
+    if [[ -L "$link" && -f "$item" && "$item" == "$hub"/* ]]; then
+        pass "installed item $link → $item (a link into hub_dir)"
+    else
+        fail "http-cve is not a link into hub_dir: $(ls -l "$link" 2>&1)"
+        return
+    fi
+    note "hub item states: $(cscli hub list -o json 2>/dev/null | jq -r '[.. | objects | select(has("status")) | .status] | group_by(.) | map("\(.[0]) ×\(length)") | join(", ")' 2>/dev/null)"
+
+    w=$(mktemp -d /var/tmp/loxprox-hubrefresh.XXXXXX)
+    mkdir -p "$w/bin"
+    cat > "$w/discord.sh" <<EOF
+#!/bin/bash
+printf '%s|%s|%s\n' "\$1" "\$2" "\$3" >> "$w/discord.log"
+EOF
+    cat > "$w/bin/cscli" <<EOF
+#!/bin/bash
+echo "\$*" >> "$w/cscli.calls"
+exec "$real" "\$@"
+EOF
+    chmod +x "$w/discord.sh" "$w/bin/cscli"
+    : > "$w/discord.log"; : > "$w/cscli.calls"
+    # hub-refresh.sh with Discord stubbed and its state under $w; "$@" = extra VAR=value.
+    hr_run() {
+        env LOXPROX_CONFIG=/nonexistent DISCORD_ALERT_PATH="$w/discord.sh" LOXPROX_HUB_LOG="$w/hub.log" \
+            LOXPROX_HUB_LOCK="$w/lock" LOXPROX_HUB_SNAPSHOT_DIR="$w/snapshots" LOXPROX_HUB_OUTDATED_STATE="$w/outdated" \
+            PATH="$w/bin:$PATH" "$@" timeout 900 bash "$hr" >>"$LOG_FILE" 2>&1
+    }
+
+    # 1. The full daily run.
+    hr_run; rc=$?
+    note "hub-refresh.sh log:"
+    grep -E 'layout|snapshot|Upgraded|eload|not upgraded|unreadable|failed|FAILED|active|finished' "$w/hub.log" | sed 's/^/      /'
+    if [[ $rc -eq 0 ]] && systemctl is-active --quiet crowdsec; then
+        pass "full run of hub-refresh.sh against CrowdSec $(cscli version 2>&1 | awk '/version:/ {print $2; exit}'): exit 0, crowdsec active"
+    else
+        fail "full run: rc=$rc, crowdsec $(systemctl is-active crowdsec); Discord: $(tr '\n' ';' < "$w/discord.log")"
+    fi
+    grep -qF "CrowdSec layout: hub_dir=$hub index=$index" "$w/hub.log" \
+        && pass "it used the hub_dir CrowdSec reports" || fail "layout: $(grep layout "$w/hub.log")"
+    line=$(grep -o 'index + [0-9]* installed hub items verified' "$w/hub.log" || true)
+    [[ -n "$line" ]] && pass "snapshot checked before the upgrade: $line" || fail "no verified snapshot in the log"
+    grep -qx 'hub upgrade' "$w/cscli.calls" && ! grep -q -- '--force' "$w/cscli.calls" \
+        && pass "it ran 'cscli hub upgrade', without --force" || fail "cscli calls: $(tr '\n' ';' < "$w/cscli.calls")"
+    grep -qE '^(WARNING|CRITICAL)\|' "$w/discord.log" && fail "WARNING/CRITICAL alert: $(cat "$w/discord.log")" || pass "no WARNING or CRITICAL alert"
+    note "Discord stub got: $(cut -d'|' -f1,2 "$w/discord.log" | tr '\n' ';')"
+
+    # 2. What the snapshot holds.
+    snap=$(find "$w/snapshots" -name 'hub-*.tar.gz' 2>/dev/null | sort | tail -n 1)
+    x="$w/x"; mkdir -p "$x"
+    if [[ -n "$snap" ]] && tar -xzf "$snap" -C "$x" 2>/dev/null; then
+        [[ -f "$x$index" && ! -L "$x$index" ]] \
+            && pass "the tarball holds the hub index $index (regular file, $(stat -c %s "$x$index") bytes)" || fail "index not in the tarball"
+        [[ -s "$x$item" && ! -L "$x$item" ]] \
+            && pass "…the real item file $item (not a link)" || fail "item file not in the tarball: $(ls -l "$x$item" 2>&1)"
+        [[ -L "$x$link" ]] && pass "…and the installed-item link $link" || fail "link not in the tarball"
+        note "tar -tv: $(tar -tvzf "$snap" 2>/dev/null | grep -E 'http-cve|\.index\.json' | tr -s ' ' | tr '\n' ';')"
+    else
+        fail "no snapshot tarball under $w/snapshots"
+    fi
+
+    # 3. Tamper with an installed item and add a file, then the rollback's restore.
+    printf '\n# loxprox-ci-tamper\n' >> "$item"
+    echo stray > "$hub/loxprox-ci-stray.yaml"
+    cmp -s "$item" "$x$item" && fail "the tamper did not change $item"
+    env LOXPROX_CONFIG=/nonexistent PATH="$w/bin:$PATH" LOXPROX_HUB_LOG="$w/hub.log" LOXPROX_HUB_SNAPSHOT_DIR="$w/snapshots" \
+        bash -c 'source "$1" && set +e && resolve_layout && restore_snapshot "$2"' _ "$hr" "$snap" >>"$LOG_FILE" 2>&1; rc=$?
+    [[ $rc -eq 0 ]] && pass "restore_snapshot (the rollback's restore) returns 0" || fail "restore_snapshot returned $rc"
+    cmp -s "$item" "$x$item" && pass "the tampered $item has the snapshot's content back" || fail "item content not restored"
+    [[ ! -e "$hub/loxprox-ci-stray.yaml" ]] && pass "a file added to hub_dir after the snapshot is gone" || fail "stray file survived the restore"
+    [[ "$(readlink -f "$link")" == "$item" ]] && pass "$link still resolves to it" || fail "$link → $(readlink -f "$link")"
+    systemctl restart crowdsec >/dev/null 2>&1
+    for _ in $(seq 1 30); do systemctl is-active --quiet crowdsec && break; sleep 1; done
+    if systemctl is-active --quiet crowdsec; then
+        pass "crowdsec active after the restore and a restart"
+    else
+        fail "crowdsec not active after the restore — journal below"
+        journalctl -u crowdsec -n 25 --no-pager -o cat | sed 's/^/    /'
+    fi
+
+    # 4. Fail-safe: the first version's hub_dir.
+    : > "$w/discord.log"; : > "$w/cscli.calls"
+    hr_run LOXPROX_CROWDSEC_HUB_DIR=/var/lib/crowdsec/hub; rc=$?
+    line=$(grep '^WARNING|CrowdSec Hub Snapshot Failed|' "$w/discord.log" || true)
+    if [[ $rc -eq 1 && -n "$line" ]] && ! grep -qE '^hub (update|upgrade)' "$w/cscli.calls"; then
+        line="${line#*|*|}"
+        pass "hub_dir /var/lib/crowdsec/hub → no hub update, no upgrade, WARNING: ${line:0:160}"
+    else
+        fail "fail-safe: rc=$rc Discord: $(cat "$w/discord.log") cscli: $(tr '\n' ';' < "$w/cscli.calls")"
+    fi
+    rm -rf "$w"
+}
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
-(( $# > 0 )) || { echo "usage: $0 <cron|journald|auditd|logrotate|nginx-apparmor|nginx-appsec|nginx-edge|nft-check|debian12-host|crowdsec> ..." >&2; exit 2; }
+(( $# > 0 )) || { echo "usage: $0 <cron|journald|auditd|logrotate|nginx-apparmor|nginx-appsec|nginx-edge|nft-check|debian12-host|crowdsec|crowdsec-hubupdate|crowdsec-hub-refresh> ..." >&2; exit 2; }
 for s in "$@"; do
     case "$s" in
         cron)                      t_cron ;;
@@ -1286,6 +1472,8 @@ for s in "$@"; do
         debian12-host)             t_debian12_host ;;
         debian12-host-inner)       t_debian12_host_inner; exit $(( FAILED > 0 )) ;;
         crowdsec)                  t_crowdsec ;;
+        crowdsec-hubupdate)        t_crowdsec_hubupdate ;;
+        crowdsec-hub-refresh)      t_crowdsec_hub_refresh ;;
         *) echo "unknown section: $s" >&2; exit 2 ;;
     esac
 done
