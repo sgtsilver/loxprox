@@ -110,6 +110,25 @@ TUNNEL_PUBLIC_HOST="${TUNNEL_PUBLIC_HOST-}"
 ENABLE_GUI="${ENABLE_GUI-true}"
 GUI_PORT="${GUI_PORT-1081}"
 GUI_PASSWORD="${GUI_PASSWORD-}"
+# 2026-10 breach hardening — edge gating, ban ladders, SSH. Meanings in
+# deploy.conf.example; every key is carried into config.env.
+EXTRA_SERVER_NAMES="${EXTRA_SERVER_NAMES-}"
+UNKNOWN_PATH_MODE="${UNKNOWN_PATH_MODE-log}"
+TRAP_BAN_MODE="${TRAP_BAN_MODE-ban}"
+REMOTE_ADMIN_PATHS="${REMOTE_ADMIN_PATHS-deny}"
+BAN_HARD_LADDER="${BAN_HARD_LADDER-168h 2160h 8760h}"
+BAN_SOFT_LADDER="${BAN_SOFT_LADDER-24h 168h 720h 2160h}"
+# Must compile under Go RE2 (CrowdSec's `matches`) AND Python re: no lookarounds.
+_LOXPROX_HARD_SCENARIOS_DEFAULT='^(loxprox/scanner-trap|crowdsecurity/(appsec-vpatch|vpatch-.+|http-cve-.+|CVE-.+|[A-Za-z0-9_]+-cve-.+|http-sensitive-files|http-backdoors-attempts|http-path-traversal-probing|http-admin-interface-probing|http-open-proxy))$'
+BAN_HARD_SCENARIOS="${BAN_HARD_SCENARIOS-$_LOXPROX_HARD_SCENARIOS_DEFAULT}"
+PROGRESSIVE_BAN_WINDOW_DAYS="${PROGRESSIVE_BAN_WINDOW_DAYS-365}"
+SESSION_ALERT_ENABLED="${SESSION_ALERT_ENABLED-true}"
+AUTH_RATE_ALERT_PER_CYCLE="${AUTH_RATE_ALERT_PER_CYCLE-20}"
+SSH_ALLOW_USERS="${SSH_ALLOW_USERS-}"
+GEOIP_IPV6_ENABLED="${GEOIP_IPV6_ENABLED-true}"
+GEOIP_URL_BASE6="${GEOIP_URL_BASE6-}"
+ASN_LEARNING_DAYS="${ASN_LEARNING_DAYS-7}"
+SEC_UPDATE_MAX_AGE_DAYS="${SEC_UPDATE_MAX_AGE_DAYS-2}"
 
 # Operator config file path. Override via env (LOXPROX_DEPLOY_CONF=/path) for
 # testing only — production callers should use the default.
@@ -204,6 +223,17 @@ LOXPROX_CRON_FILE="${LOXPROX_CRON_FILE:-/etc/cron.d/loxprox}"
 LOXPROX_ALERT_CRON_FILE="${LOXPROX_ALERT_CRON_FILE:-/etc/cron.d/loxprox-alert}"
 GATEWAY_CONFIG_DIR="${GATEWAY_CONFIG_DIR:-/etc/loxprox}"
 GATEWAY_CONFIG_FILE="${GATEWAY_CONFIG_FILE:-$GATEWAY_CONFIG_DIR/config.env}"
+# 2026-10 breach hardening — files deploy.sh now owns (overridable for tests).
+NGINX_MAIN_CONF="${NGINX_MAIN_CONF:-/etc/nginx/nginx.conf}"
+NFTABLES_D_DIR="${NFTABLES_D_DIR:-/etc/nftables.d}"
+SSHD_DROPIN="${SSHD_DROPIN:-/etc/ssh/sshd_config.d/99-loxprox.conf}"
+UNATTENDED_UPGRADES_CONF="${UNATTENDED_UPGRADES_CONF:-/etc/apt/apt.conf.d/50unattended-upgrades}"
+CROWDSEC_DIR="${CROWDSEC_DIR:-/etc/crowdsec}"
+CROWDSEC_LOXPROX_ACQUIS="${CROWDSEC_LOXPROX_ACQUIS:-$CROWDSEC_DIR/acquis.d/loxprox.yaml}"
+CROWDSEC_SCENARIO_DIR="${CROWDSEC_SCENARIO_DIR:-$CROWDSEC_DIR/scenarios}"
+CROWDSEC_PROFILES="${CROWDSEC_PROFILES:-$CROWDSEC_DIR/profiles.yaml}"
+CROWDSEC_CONFIG_LOCAL="${CROWDSEC_CONFIG_LOCAL:-$CROWDSEC_DIR/config.yaml.local}"
+LOXPROX_PASSWD_FILE="${LOXPROX_PASSWD_FILE:-/etc/passwd}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
@@ -406,6 +436,76 @@ validate_network() {
     fi
     error "Invalid CIDR: $cidr"
     return 1
+}
+
+# 2026-10 breach hardening: the new keys fail loudly on a typo instead of
+# silently selecting the other behaviour. Modes are normalised in place.
+_loxprox_validate_hardening_config() {
+    local fail=0 tok key norm
+    local -a toks=()
+    case "${UNKNOWN_PATH_MODE,,}" in
+        log|deny) UNKNOWN_PATH_MODE="${UNKNOWN_PATH_MODE,,}" ;;
+        *) error "Invalid UNKNOWN_PATH_MODE '$UNKNOWN_PATH_MODE' (expected log/deny)."; fail=1 ;;
+    esac
+    case "${TRAP_BAN_MODE,,}" in
+        ban|observe) TRAP_BAN_MODE="${TRAP_BAN_MODE,,}" ;;
+        *) error "Invalid TRAP_BAN_MODE '$TRAP_BAN_MODE' (expected ban/observe)."; fail=1 ;;
+    esac
+    case "${REMOTE_ADMIN_PATHS,,}" in
+        deny|allow) REMOTE_ADMIN_PATHS="${REMOTE_ADMIN_PATHS,,}" ;;
+        *) error "Invalid REMOTE_ADMIN_PATHS '$REMOTE_ADMIN_PATHS' (expected deny/allow)."; fail=1 ;;
+    esac
+    # read -a, not an unquoted loop: "*.example.com" must not glob. Only the
+    # server_name forms nginx accepts: a dotted name (an IP address too),
+    # "*.example.com", ".example.com" (the name and every subdomain) and
+    # "www.example.*" — never a bare "*" or a wildcard inside a label.
+    local label='[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?'
+    local dotted="${label}(\.${label})+" name1="${label}(\.${label})*"
+    local re_name="^(${dotted}|\*\.${dotted}|\.${dotted}|${name1}\.\*)$"
+    read -r -a toks <<<"$EXTRA_SERVER_NAMES"
+    for tok in "${toks[@]}"; do
+        [[ "$tok" =~ $re_name ]] \
+            || { error "EXTRA_SERVER_NAMES entry '$tok' is not a host name nginx accepts (name.tld, *.name.tld, .name.tld, name.*)."; fail=1; }
+    done
+    for key in BAN_HARD_LADDER BAN_SOFT_LADDER; do
+        read -r -a toks <<<"${!key}"
+        (( ${#toks[@]} > 0 )) || { error "$key is empty."; fail=1; continue; }
+        for tok in "${toks[@]}"; do
+            [[ "$tok" =~ ^[1-9][0-9]*[mhd]$ ]] \
+                || { error "$key entry '$tok' is not a duration like 24h or 7d."; fail=1; }
+        done
+    done
+    # The pattern lands in profiles.yaml (single-quoted YAML around a
+    # double-quoted expr string) and in config.env (a double-quoted shell
+    # value): no quote, backslash or backtick, no "$name"/"$(" expansion, no
+    # lookaround (Go RE2 has none). Python re must accept it as well.
+    local re_chars='^[][A-Za-z0-9_./|()^$+*?:{},-]+$' re_expand='\$[A-Za-z0-9_({]' re_look='\(\?(=|!|<)'
+    if [[ ! "$BAN_HARD_SCENARIOS" =~ $re_chars || "$BAN_HARD_SCENARIOS" =~ $re_expand || "$BAN_HARD_SCENARIOS" =~ $re_look ]]; then
+        error "BAN_HARD_SCENARIOS contains characters or constructs deploy.sh cannot carry safely: $BAN_HARD_SCENARIOS"
+        fail=1
+    elif command -v python3 >/dev/null 2>&1 \
+            && ! python3 -c 'import re, sys; re.compile(sys.argv[1])' "$BAN_HARD_SCENARIOS" 2>/dev/null; then
+        error "BAN_HARD_SCENARIOS is not a valid regular expression: $BAN_HARD_SCENARIOS"
+        fail=1
+    fi
+    for key in PROGRESSIVE_BAN_WINDOW_DAYS AUTH_RATE_ALERT_PER_CYCLE ASN_LEARNING_DAYS SEC_UPDATE_MAX_AGE_DAYS; do
+        [[ "${!key}" =~ ^[1-9][0-9]*$ ]] || { error "$key='${!key}' is not a positive number."; fail=1; }
+    done
+    for key in SESSION_ALERT_ENABLED GEOIP_IPV6_ENABLED; do
+        norm=$(_loxprox_normalize_bool "${!key}")
+        if [[ -z "$norm" ]]; then error "Invalid $key value: '${!key}' (expected true/false)."; fail=1
+        else printf -v "$key" '%s' "$norm"; fi
+    done
+    read -r -a toks <<<"$SSH_ALLOW_USERS"
+    for tok in "${toks[@]}"; do
+        [[ "$tok" =~ ^[A-Za-z0-9._*?@/:-]+$ ]] \
+            || { error "SSH_ALLOW_USERS entry '$tok' is not a user or user@host pattern."; fail=1; }
+    done
+    if [[ -n "$GEOIP_URL_BASE6" && ! "$GEOIP_URL_BASE6" =~ ^https://[A-Za-z0-9./_:-]+$ ]]; then
+        error "GEOIP_URL_BASE6 must be an https:// URL without quotes or spaces."
+        fail=1
+    fi
+    return "$fail"
 }
 
 # ─── Configuration loader ────────────────────────────────────────────────────
@@ -938,6 +1038,7 @@ preflight() {
             exit 1
             ;;
     esac
+    _loxprox_validate_hardening_config || exit 1
 
     # H6: a GATEWAY_IP that is not actually configured on this host makes the
     # network watchdog believe the address was lost and reboot the VM on every
@@ -1216,8 +1317,8 @@ table inet filter
 flush table inet filter
 
 table inet filter {
-    # GeoIP blocklist — populated by geoip-block.sh cron
-    include "/etc/nftables.d/*.conf"
+    # GeoIP blocklists (geoip_blocklist + geoip_blocklist6) — populated by geoip-block.sh cron
+    include "${NFTABLES_D_DIR}/*.conf"
 
     chain input {
         type filter hook input priority filter; policy drop;
@@ -1235,6 +1336,7 @@ table inet filter {
 
         # GeoIP block — drop high-risk countries before they reach the proxy
         ip saddr @geoip_blocklist drop
+        ip6 saddr @geoip_blocklist6 drop
 
         # SSH — LAN and site-to-site only
         # Note: CIDR notation in anonymous sets requires nftables >= 1.0.6
@@ -1251,8 +1353,18 @@ ${tls_port_rule}${gui_port_rule}
         type filter hook forward priority filter; policy drop;
     }
 
+    # 2026-10 (loxprox-egress): policy stays accept — root needs egress for
+    # acme.sh, apt, the CrowdSec CAPI and Discord alerts. nginx's worker
+    # (www-data) is the internet-facing process; it may reach loopback (the
+    # AppSec component on 127.0.0.1:7422) and the Miniserver, nothing else. A
+    # compromised worker cannot pivot into the LAN or call home.
     chain output {
         type filter hook output priority filter; policy accept;
+        oifname "lo" accept comment "loxprox-egress"
+        ct state established,related accept comment "loxprox-egress"
+        meta skuid "www-data" ip daddr ${LOXONE_IP} tcp dport ${LOXONE_PORT} accept comment "loxprox-egress"
+        meta skuid "www-data" limit rate 6/minute log prefix "loxprox-egress-drop: " comment "loxprox-egress"
+        meta skuid "www-data" counter drop comment "loxprox-egress"
     }
 }
 EOF
@@ -1265,15 +1377,19 @@ After=nftables.service
 Wants=nftables.service
 EOF
 
-    _loxprox_mkdir_mode 0755 /etc/nftables.d
+    _loxprox_mkdir_mode 0755 "$NFTABLES_D_DIR"
 
-    # Pre-seed an empty geoip set so the include glob resolves to a real
-    # set definition. Without this, the `@geoip_blocklist` reference in
-    # /etc/nftables.conf is undefined on first deploy (geoip-block.sh runs
-    # later in main()), and `systemctl restart nftables` fails → set -e aborts.
-    # geoip-block.sh overwrites this file with real CIDRs when it runs.
-    if [[ ! -s /etc/nftables.d/99-geoip.conf ]]; then
-        cat > /etc/nftables.d/99-geoip.conf <<'EOF'
+    # Pre-seed empty geoip sets so the include glob resolves to real set
+    # definitions. Without this, the `@geoip_blocklist` / `@geoip_blocklist6`
+    # references in /etc/nftables.conf are undefined on first deploy
+    # (geoip-block.sh runs later in main()), and `systemctl restart nftables`
+    # fails → set -e aborts. geoip-block.sh overwrites this file with both sets
+    # when it runs. 2026-10: an include written by an older geoip-block.sh
+    # declares the v4 set only — the v6 set is appended to it, or the ruleset
+    # (and the whole firewall at the next boot) would not load.
+    local geoip_inc="$NFTABLES_D_DIR/99-geoip.conf"
+    if [[ ! -s "$geoip_inc" ]]; then
+        cat > "$geoip_inc" <<'EOF'
 # Placeholder — overwritten by geoip-block.sh on first run
 set geoip_blocklist {
     type ipv4_addr
@@ -1281,10 +1397,19 @@ set geoip_blocklist {
 }
 EOF
     fi
+    if ! grep -qsE '^[[:space:]]*set[[:space:]]+geoip_blocklist6[[:space:]]*\{' "$NFTABLES_D_DIR"/*.conf; then
+        cat >> "$geoip_inc" <<'EOF'
+# Placeholder (deploy.sh) — IPv6 set, filled by geoip-block.sh
+set geoip_blocklist6 {
+    type ipv6_addr
+    flags interval
+}
+EOF
+    fi
 
     systemctl enable nftables
     systemctl restart nftables
-    ok "nftables firewall active — input policy: drop, allowed: SSH (LAN), :1080 (any)."
+    ok "nftables firewall active — input policy: drop, allowed: SSH (LAN), :1080 (any); nginx egress: Miniserver only."
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1315,7 +1440,11 @@ install_nginx() {
 #                 itself, so the Miniserver's own copies stop being duplicated.
 #   v5 (2026-10): AppSec verdict from the subrequest's status, not a header
 #                 CrowdSec never sends — appsec-detections.log gets written.
-_LOXPROX_SITE_TEMPLATE_VERSION=5
+#   v6 (2026-10): breach hardening — server_tokens off, path classes (trap /
+#                 admin / app / unknown) with their logs, auth + WebSocket
+#                 limits, token commands scrubbed; the TLS block adds the
+#                 Host/SNI gate (real server names + trap default servers).
+_LOXPROX_SITE_TEMPLATE_VERSION=6
 _LOXPROX_SITE_VERSION_MARKER="# LOXPROX-SITE-TEMPLATE-VERSION:"
 _LOXPROX_SITE_PARAMS_MARKER="# LOXPROX-SITE-PARAMS:"
 
@@ -1347,14 +1476,83 @@ _loxprox_site_params_fingerprint() {
     # limit, timeout or backend IP and regenerates the site — those edits used
     # to be accepted in deploy.conf and then silently ignored (H2).
     local digest=""
+    # 2026-10: also the trusted networks, the class modes, the server names
+    # the TLS block renders (a changed name regenerates the site, and the
+    # regeneration re-applies the TLS block with it) and the server_tokens form.
     digest=$(printf '%s\n' \
         "$LOXONE_IP" "$LOXONE_PORT" \
         "$RATE_LIMIT_REQ_PER_SEC" "$RATE_LIMIT_BURST" "$RATE_LIMIT_CONN_PER_IP" \
         "$PROXY_CONNECT_TIMEOUT" "$PROXY_SEND_TIMEOUT" "$PROXY_READ_TIMEOUT" \
         "$CLIENT_BODY_TIMEOUT" "$CLIENT_HEADER_TIMEOUT" \
         "$ENABLE_APPSEC" "$NGINX_APPSEC_INCLUDE" \
+        "$LAN_SUBNET" "${CROWDSEC_WHITELIST_IPS[*]}" \
+        "$UNKNOWN_PATH_MODE" "$REMOTE_ADMIN_PATHS" \
+        "$(_loxprox_tls_server_names)" "$(_loxprox_server_tokens_line)" \
         | sha256sum 2>/dev/null | cut -c1-16) || digest=""
     printf '%s' "$digest"
+}
+
+# server_name list for the real :1080 / :80 servers in TLS mode: TLS_DOMAIN,
+# EXTRA_SERVER_NAMES and — with the tunnel on — TUNNEL_PUBLIC_HOST, the Host
+# the relay passes through. (v2.0 refuses TLS + tunnel together, so that last
+# one only matters once split-horizon TLS lands.) Deduplicated, in order.
+_loxprox_tls_server_names() {
+    local -a names=() extra=() cand=()
+    local n known
+    read -r -a extra <<<"$EXTRA_SERVER_NAMES"
+    cand=("$TLS_DOMAIN" "${extra[@]}")
+    if [[ "${ENABLE_TUNNEL,,}" == "true" && -n "$TUNNEL_PUBLIC_HOST" ]]; then
+        cand+=("$TUNNEL_PUBLIC_HOST")
+    fi
+    for n in "${cand[@]}"; do
+        [[ -n "$n" ]] || continue
+        for known in "${names[@]}"; do
+            [[ "${known,,}" == "${n,,}" ]] && continue 2
+        done
+        names+=("$n")
+    done
+    printf '%s' "${names[*]}"
+}
+
+# `server_tokens off` at http level hides the nginx version on every response
+# the gateway generates (the live :1080 sent "Server: nginx/1.22.1"). nginx
+# rejects a second http-level copy, so an operator's own line in nginx.conf
+# wins and the site carries a comment instead.
+_loxprox_server_tokens_line() {
+    if grep -qE '^[[:space:]]*server_tokens[[:space:]]' "$NGINX_MAIN_CONF" 2>/dev/null; then
+        printf '# server_tokens: set in %s (nginx rejects a second http-level copy)' "$NGINX_MAIN_CONF"
+    else
+        printf 'server_tokens off;'
+    fi
+}
+
+# geo lines for the sources the per-endpoint limits and the admin / unknown
+# denials never apply to: loopback (local probes; tunnelled requests carry the
+# real client address after real-IP restoration), LAN_SUBNET and
+# CROWDSEC_WHITELIST_IPS. Deduplicated; a malformed entry is skipped (with a
+# warning on stderr — stdout is the config) instead of failing `nginx -t`.
+_loxprox_trusted_geo_entries() {
+    local -a seen=()
+    local net known ok
+    for net in 127.0.0.0/8 ::1 "$LAN_SUBNET" "${CROWDSEC_WHITELIST_IPS[@]}"; do
+        [[ -n "$net" ]] || continue
+        if [[ "$net" == *:* ]]; then
+            ok=0; [[ "$net" =~ ^[0-9A-Fa-f:]+(/[0-9]{1,3})?$ ]] && ok=1
+        elif [[ "$net" == */* ]]; then
+            ok=0; validate_network "$net" >/dev/null 2>&1 && ok=1
+        else
+            ok=0; validate_ip "$net" >/dev/null 2>&1 && ok=1
+        fi
+        if (( ! ok )); then
+            warn "Not adding '$net' to nginx's trusted networks (not an address or CIDR)." >&2
+            continue
+        fi
+        for known in "${seen[@]}"; do
+            [[ "$known" == "$net" ]] && continue 2
+        done
+        seen+=("$net")
+        printf '    %-24s 1;\n' "$net"
+    done
 }
 
 _loxprox_write_appsec_passthrough_include() {
@@ -1499,6 +1697,17 @@ log_format appsec_evt '\''$time_iso8601 $remote_addr "$request_method $loxone_lo
             appsec_access_log='    access_log /var/log/nginx/appsec-detections.log appsec_evt if=$appsec_blocked;'
         fi
 
+        # 2026-10: the denials untrusted sources get (the trap applies to all).
+        local deny_entries="" trusted_geo server_tokens_line
+        if [[ "$REMOTE_ADMIN_PATHS" == "deny" ]]; then
+            deny_entries+='    "0:admin"    403;'$'\n'
+        fi
+        if [[ "$UNKNOWN_PATH_MODE" == "deny" ]]; then
+            deny_entries+='    "0:unknown"  404;'$'\n'
+        fi
+        trusted_geo=$(_loxprox_trusted_geo_entries)
+        server_tokens_line=$(_loxprox_server_tokens_line)
+
         cat > "$NGINX_SITE" <<EOF
 # Loxone Miniserver Gen 1 — Security Gateway
 # Generated by deploy.sh on $(date -Iseconds)
@@ -1512,6 +1721,9 @@ ${_LOXPROX_SITE_PARAMS_MARKER} ${site_params}
 
 limit_req_zone  \$binary_remote_addr zone=loxone_req:10m  rate=${RATE_LIMIT_REQ_PER_SEC}r/s;
 limit_conn_zone \$binary_remote_addr zone=loxone_conn:10m;
+
+# 2026-10: no nginx version in Server headers or error pages.
+${server_tokens_line}
 
 ${appsec_http_extras}
 # F7: WebSocket transparency. Loxone Gen 1 speaks plain ws:// on :80; with the
@@ -1534,7 +1746,7 @@ map \$http_upgrade \$connection_upgrade {
 # \`combined\` format, whose \$request field is the raw request line *including
 # the query string* — which for Loxone carries the gettoken HMAC/username and
 # base64 command args. Those then persist at rest in loxone-access.log (0640
-# www-data:adm) plus 14 days of rotated archives. This format reproduces the
+# www-data:adm) plus its rotated archives (90 days). This format reproduces the
 # same combined shape so the CrowdSec type:nginx parser still reads
 # verb/path/version/status/UA, but (a) the ?query is dropped (\$loxone_log_uri
 # derives from \$uri, which is the path only) and (b) the secret suffix of
@@ -1543,13 +1755,123 @@ map \$http_upgrade \$connection_upgrade {
 # GET /jdev/sys/fenc/<encrypted-blob>?sk=<key> — the secret rides in BOTH the
 # path and the query, so \$uri alone is insufficient. The map masks the blob
 # while keeping the endpoint prefix visible for CrowdSec detection.
+# 2026-10: also the token commands — authwithtoken, refreshjwt, refreshtoken,
+# checktoken and killtoken carry {tokenHash}/{user} in the path (loxone-kb
+# kb/api/grundlagen.md:306-324), getvisusalt/{user} — and the deprecated dev/
+# spelling of every command (grundlagen.md:155-156). The trap and unknown logs
+# use this format too.
 map \$uri \$loxone_log_uri {
-    default                                                                      \$uri;
-    "~^(?<loxsens>/jdev/sys/(?:fenc|enc|gettoken|getjwt|keyexchange|getkey2?)/)" "\${loxsens}<redacted>";
+    default \$uri;
+    "~^(?<loxsens>/j?dev/sys/(?:fenc|enc|gettoken|getjwt|keyexchange|getkey2?|authwithtoken|refreshjwt|refreshtoken|checktoken|killtoken|getvisusalt)/)" "\${loxsens}<redacted>";
 }
 log_format loxone_scrubbed '\$remote_addr - \$remote_user [\$time_local] '
                            '"\$request_method \$loxone_log_uri \$server_protocol" \$status \$body_bytes_sent '
                            '"\$http_referer" "\$http_user_agent"';
+# 2026-10: what the TLS block's trap servers saw — Host and SNI next to the
+# client. The trap log (loxone_scrubbed, read by CrowdSec) cannot tell a
+# bare-IP scanner from a family device on an old name or a CloudDNS address;
+# this one can (TRAP_BAN_MODE=observe). Not read by CrowdSec. sni is "-" on
+# :80 (no TLS) and "" for a TLS client that sent none (a bare-IP connect).
+log_format loxprox_trap_hosts '\$time_iso8601 \$remote_addr host="\$host" sni="\$ssl_server_name" '
+                              '"\$request_method \$loxone_log_uri" \$status "\$http_user_agent"';
+
+# ── 2026-10 breach hardening: path classes and per-endpoint limits ──────────
+# Trusted sources: loopback, LAN_SUBNET, CROWDSEC_WHITELIST_IPS. They are never
+# counted by the auth / WebSocket limits below and never get the admin /
+# unknown denials. The trap applies to everyone.
+geo \$loxprox_lan {
+    default                  0;
+${trusted_geo}
+}
+# Key for the per-endpoint limits: "" (= not accounted) for a trusted source.
+map \$loxprox_lan \$loxprox_limit_key {
+    1       "";
+    default \$binary_remote_addr;
+}
+# Loxone authentication endpoints: key / token acquisition and refresh.
+map \$uri \$loxprox_auth_path {
+    default 0;
+    "~^/j?dev/sys/(getkey2?|getjwt|gettoken|authwithtoken|refreshjwt)(/|\$)" 1;
+}
+map "\$loxprox_lan:\$loxprox_auth_path" \$loxprox_auth_key {
+    default "";
+    "0:1"   \$binary_remote_addr;
+}
+limit_req_zone  \$loxprox_auth_key  zone=loxone_auth:10m    rate=3r/s;
+limit_conn_zone \$loxprox_limit_key zone=loxone_ws_conn:10m;
+
+# Path class of every request — exact names first, then the regexes in order
+# (first match wins): trap → admin → app; anything else is "unknown".
+#   trap    → 444 + trap log. Scanner-only paths; no Loxone endpoint in the
+#             KB (loxone-kb kb/api/*.md, kb/webservices.md) matches any of them.
+#   admin   → 403 for untrusted sources when REMOTE_ADMIN_PATHS=deny (logged
+#             normally; never banned by a LoxProx scenario, but repeated 403s
+#             still count toward crowdsecurity/http-probing). Only the file-system / system-control
+#             webservices the KB documents: kb/webservices.md:249-257 (sys
+#             reboot/check/logoff/sdtest, fslist/fsget/fsdel), :166-174 (sps
+#             restart/stop/run/log/enum*/identify), :187-198 (cfg setters),
+#             :223-224, :234-239 (task*), :270, :280 (sendwebservice),
+#             :292-304 (wsextension/wsdevice), :316 (allowhttpiframe). Each
+#             also in its jdev/ form (kb/api/grundlagen.md:155-156).
+#   app     → proxied. kb/api/grundlagen.md:27-41 (cfg/api, cfg/apiKey,
+#             getcertificate, ws/rfc6455, keyexchange), :154-156 + :177-329
+#             (the jdev|dev sps/ and sys/ command families), :201 (camimage),
+#             :401-403 (LoxAPP3.json); kb/api/structure-file.md:173-176
+#             (stats/, binstatisticdata/); plus paths seen live: /get,
+#             /favicon.ico, /resources/favicon/.
+#   unknown → proxied + unknown log (UNKNOWN_PATH_MODE=log), or a local 404
+#             + unknown log for untrusted sources (deny).
+#   internal → the AppSec auth_request target. Subrequests run the
+#             server-level checks too and must never be denied.
+map \$uri \$loxprox_path_class {
+    default                                   unknown;
+    /crowdsec-appsec                          internal;
+    /favicon.ico                              app;
+    "~*/\.env"                                trap;
+    "~*/\.git"                                trap;
+    "~*\.php\$"                               trap;
+    "~*^/wp-"                                 trap;
+    "~*/cgi-bin/"                             trap;
+    "~*/vendor/phpunit"                       trap;
+    "~*^/HNAP1"                               trap;
+    "~*^/boaform"                             trap;
+    "~*^/actuator"                            trap;
+    "~*^/j?dev/fs(get|list|del)(/|\$)"         admin;
+    "~*^/j?dev/sys/(reboot|check|logoff|sdtest|updatetolatestrelease|setdatetime|ntp|allowhttpiframe|wsextension|wsdevice|sendwebservice)(/|\$)" admin;
+    "~*^/j?dev/sps/(restart|stop|run|log|enumdev|enumin|enumout|identify)(/|\$)" admin;
+    "~*^/j?dev/cfg/(dhcp|ip|mask|gateway|device|dns1|dns2|ntp|timezoneoffset|http|ftp|ftllocalonly)(/|\$)" admin;
+    "~*^/j?dev/task[0-9]+/"                   admin;
+    "~*^/j?dev/(sps|sys)/"                    app;
+    "~*^/j?dev/cfg/api(key)?/?\$"             app;
+    "~*^/data/LoxAPP3\.json\$"                app;
+    "~*^/(stats|binstatisticdata|camimage)/"  app;
+    "~*^/ws/rfc6455\$"                        app;
+    "~*^/resources/favicon/"                  app;
+    "~*^/get(/|\$)"                           app;
+}
+# Scanner methods. TRACE and CONNECT never reach the server checks — nginx
+# rejects them with 405 while reading the header; the server routes that 405
+# to the trap as well.
+map \$request_method \$loxprox_trap_method {
+    default   0;
+    CONNECT   1;
+    TRACE     1;
+    TRACK     1;
+    PROPFIND  1;
+}
+map "\$loxprox_trap_method:\$loxprox_path_class" \$loxprox_trap {
+    default   0;
+    "~^1:"    1;
+    "0:trap"  1;
+}
+map "\$loxprox_trap:\$loxprox_path_class" \$loxprox_unknown {
+    default      0;
+    "0:unknown"  1;
+}
+# REMOTE_ADMIN_PATHS=${REMOTE_ADMIN_PATHS}, UNKNOWN_PATH_MODE=${UNKNOWN_PATH_MODE}
+map "\$loxprox_lan:\$loxprox_path_class" \$loxprox_deny {
+    default      "";
+${deny_entries}}
 
 upstream loxone_backend {
     server ${LOXONE_IP}:${LOXONE_PORT};
@@ -1561,8 +1883,19 @@ server {
     server_name _;
 
     access_log /var/log/nginx/loxone-access.log loxone_scrubbed;
+    access_log /var/log/nginx/loxprox-trap.log    loxone_scrubbed if=\$loxprox_trap;
+    access_log /var/log/nginx/loxprox-unknown.log loxone_scrubbed if=\$loxprox_unknown;
     error_log  /var/log/nginx/loxone-error.log;
 ${appsec_access_log}
+
+    # 2026-10 path classes (maps above). Server rewrite phase, i.e. before the
+    # rate limits (preaccess) and the AppSec auth_request (access): a scanner
+    # path never costs an AppSec round-trip.
+    if (\$loxprox_trap)       { return 444; }
+    if (\$loxprox_deny = 403) { return 403; }
+    if (\$loxprox_deny = 404) { return 404; }
+    # TRACE / CONNECT: nginx's own 405 (see the method map) → the trap.
+    error_page 405 = @loxprox_trap;
 
     # Security headers
     add_header X-Frame-Options        "SAMEORIGIN"                   always;
@@ -1604,8 +1937,10 @@ ${appsec_access_log}
     large_client_header_buffers 4 8k;
     client_max_body_size        10m;
 
-    # Rate limiting
+    # Rate limiting. loxone_auth only counts untrusted requests for an auth
+    # path (its key is empty otherwise): 3/s, burst 30.
     limit_req  zone=loxone_req  burst=${RATE_LIMIT_BURST} nodelay;
+    limit_req  zone=loxone_auth burst=30 nodelay;
     limit_conn loxone_conn ${RATE_LIMIT_CONN_PER_IP};
 ${appsec_include}
     location / {
@@ -1627,6 +1962,11 @@ ${appsec_auth}
     # an ordinary GET and auth_request completes before the 101 switch.
     location /ws/ {
 ${appsec_auth}
+        # 2026-10: at most 6 concurrent event sockets per untrusted address
+        # (one per app instance is normal). A limit_conn here replaces the
+        # server-level list, so the global per-IP cap is repeated.
+        limit_conn loxone_conn    ${RATE_LIMIT_CONN_PER_IP};
+        limit_conn loxone_ws_conn 6;
         proxy_http_version 1.1;
         proxy_set_header Upgrade            \$http_upgrade;
         proxy_set_header Connection         "upgrade";
@@ -1638,6 +1978,10 @@ ${appsec_auth}
         proxy_send_timeout  86400s;
         proxy_buffering     off;
         proxy_pass http://loxone_backend;
+    }
+
+    location @loxprox_trap {
+        return 444;
     }
 }
 EOF
@@ -1824,6 +2168,15 @@ EOF
 
 _LOXPROX_TLS_BEGIN_MARKER="# LOXPROX-TLS-BEGIN"
 _LOXPROX_TLS_END_MARKER="# LOXPROX-TLS-END"
+# 2026-10 Host/SNI gate, applied and reverted together with the TLS block:
+# the real server's `server_name _;` becomes the gateway's names (tagged with
+# this marker), and the trap servers are appended between the TRAP markers.
+_LOXPROX_TLS_NAMES_MARKER="# LOXPROX-TLS-SERVER-NAMES"
+_LOXPROX_TRAP_BEGIN_MARKER="# LOXPROX-TRAP-BEGIN"
+_LOXPROX_TRAP_END_MARKER="# LOXPROX-TRAP-END"
+# F6: ECDHE-only, so a TLS 1.2 client cannot negotiate a non-forward-secret
+# (RSA key-exchange) suite. Shared by the real server and the trap.
+_LOXPROX_TLS_CIPHERS="ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305"
 
 _loxprox_install_acme_sh() {
     if [[ -x "$ACME_HOME/acme.sh" ]]; then
@@ -1882,6 +2235,8 @@ _loxprox_write_acme_listener() {
     mkdir -p "$ACME_WEBROOT/.well-known/acme-challenge"
     chmod 0755 "$ACME_WEBROOT" "$ACME_WEBROOT/.well-known" "$ACME_WEBROOT/.well-known/acme-challenge" 2>/dev/null || true
     mkdir -p "$(dirname "$NGINX_ACME_CONF")"
+    local names
+    names=$(_loxprox_tls_server_names)
 
     cat > "$NGINX_ACME_CONF" <<EOF
 # LoxProx — ACME HTTP-01 challenge listener (v1.5.0).
@@ -1889,10 +2244,15 @@ _loxprox_write_acme_listener() {
 # disable. Operator router must forward WAN:80 → ${GATEWAY_IP}:80 for ACME
 # validation. Everything other than /.well-known/acme-challenge/ on :80 gets
 # a permanent 301 to https://\$host:1080\$request_uri.
+# 2026-10: for the gateway's own names only — the HTTP-01 validator asks with
+# Host: ${TLS_DOMAIN}. Any other Host on :80 (IP scans) lands in the trap
+# server the TLS block adds to the site, which is the :80 default_server, so
+# this file must not claim it. Before that block exists (first issuance)
+# this is the only :80 server and answers every Host.
 server {
-    listen      80 default_server;
-    listen      [::]:80 default_server;
-    server_name _;
+    listen      80;
+    listen      [::]:80;
+    server_name ${names:-$TLS_DOMAIN};
 
     # ACME HTTP-01 challenge directory — read by the ACME validator.
     location ^~ /.well-known/acme-challenge/ {
@@ -2063,6 +2423,17 @@ _loxprox_site_enable_tls() {
         error "Aborting TLS site mutation. Fix the listen line manually, then re-run deploy.sh."
         return 1
     fi
+    # 2026-10: the gate needs the names and the trap certificate first, and
+    # the trap below becomes the :80 default_server — the ACME listener is
+    # rewritten without that claim before nginx -t ever sees both.
+    local names
+    names=$(_loxprox_tls_server_names)
+    if [[ -z "$names" ]]; then
+        error "TLS mode needs TLS_DOMAIN — no server name to gate :1080 on. Aborting the TLS site mutation."
+        return 1
+    fi
+    _loxprox_ensure_trap_cert || return 1
+    _loxprox_write_acme_listener
     backup_file "$NGINX_SITE"
     # awk, not sed: BSD sed (macOS) and GNU sed (Linux) disagree on multi-line
     # replacement semantics (\n expansion, \+ support). awk handles inserted
@@ -2072,7 +2443,19 @@ _loxprox_site_enable_tls() {
     tmp=$(mktemp -t loxprox-site.XXXXXX) || return 1
     awk -v tls_begin="$_LOXPROX_TLS_BEGIN_MARKER" \
         -v tls_end="$_LOXPROX_TLS_END_MARKER" \
-        -v tls_dir="$LOXPROX_TLS_DIR" '
+        -v tls_dir="$LOXPROX_TLS_DIR" \
+        -v ciphers="$_LOXPROX_TLS_CIPHERS" \
+        -v names="$names" \
+        -v names_marker="$_LOXPROX_TLS_NAMES_MARKER" '
+        # The real server answers for the gateway names only; everything else
+        # falls through to the trap default_server appended below.
+        !named && match($0, /^[[:space:]]*server_name[[:space:]]+_[[:space:]]*;[[:space:]]*$/) {
+            indent = $0
+            sub(/server_name.*/, "", indent)
+            printf "%sserver_name %s;  %s\n", indent, names, names_marker
+            named = 1
+            next
+        }
         match($0, /^[[:space:]]*listen[[:space:]]+1080[[:space:]]*;[[:space:]]*$/) {
             # Extract leading whitespace as the indent string.
             indent = $0
@@ -2085,7 +2468,7 @@ _loxprox_site_enable_tls() {
             # F6: explicit ECDHE-only cipher list so a TLS 1.2 client cannot
             # negotiate a non-forward-secret (RSA key-exchange) suite. TLS 1.3
             # suites are all AEAD+PFS by default and unaffected by ssl_ciphers.
-            printf "%s    ssl_ciphers         ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;\n", indent
+            printf "%s    ssl_ciphers         %s;\n", indent, ciphers
             printf "%s    ssl_prefer_server_ciphers off;\n", indent
             printf "%s    ssl_session_cache   shared:loxprox_ssl:10m;\n", indent
             printf "%s    ssl_session_timeout 1d;\n", indent
@@ -2108,20 +2491,94 @@ _loxprox_site_enable_tls() {
             # The bare `error_page 497 https://...` form does not work; the
             # named-location indirection is required.
             printf "%s    error_page 497 = @loxprox_https_redirect;\n", indent
+            # 2026-10: the 301 stays for the gateway's own names — a family
+            # device still on http://<name>:1080 relies on it. Cleartext with
+            # any other Host is the trap server's 497 → 444.
             printf "%s    location @loxprox_https_redirect { return 301 https://$host:1080$request_uri; }\n", indent
             printf "%s%s\n", indent, tls_end
             next
         }
         { print }
     ' "$NGINX_SITE" > "$tmp"
-    if [[ ! -s "$tmp" ]]; then
-        error "awk produced empty output; refusing to clobber $NGINX_SITE."
+    if [[ ! -s "$tmp" ]] || ! grep -qF "$_LOXPROX_TLS_NAMES_MARKER" "$tmp"; then
+        error "TLS mutation produced no output or found no 'server_name _;' to gate; refusing to clobber $NGINX_SITE."
         rm -f "$tmp"
         return 1
     fi
+    _loxprox_trap_servers_block >> "$tmp"
     mv "$tmp" "$NGINX_SITE"
     chmod 0644 "$NGINX_SITE"
-    info "Site mutated → listen 1080 ssl + cert directives between markers."
+    info "Site mutated → listen 1080 ssl + cert directives, server_name $names, trap default servers."
+}
+
+# 2026-10: self-signed CN=invalid certificate for the :1080 trap. It lets an
+# SNI-less scanner (a connection to the bare IP) finish the handshake and send
+# its request, which is then logged and banned instead of only failing.
+# Idempotent: kept while valid for another 30 days, regenerated otherwise.
+_loxprox_ensure_trap_cert() {
+    local crt="$LOXPROX_TLS_DIR/trap-fullchain.pem" key="$LOXPROX_TLS_DIR/trap-privkey.pem"
+    if [[ -s "$crt" && -s "$key" ]] && openssl x509 -checkend 2592000 -noout -in "$crt" >/dev/null 2>&1; then
+        return 0
+    fi
+    command -v openssl >/dev/null 2>&1 || apt-get install -y openssl >/dev/null \
+        || { error "openssl missing — cannot create the trap certificate."; return 1; }
+    install -d -m 0750 -o root -g root "$LOXPROX_TLS_DIR" 2>/dev/null || mkdir -p "$LOXPROX_TLS_DIR"
+    local tmp_key="$key.new.$$" tmp_crt="$crt.new.$$"
+    if ! (umask 077; openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=invalid" \
+            -keyout "$tmp_key" -out "$tmp_crt" >/dev/null 2>&1); then
+        rm -f "$tmp_key" "$tmp_crt"
+        error "Could not generate the trap certificate in $LOXPROX_TLS_DIR."
+        return 1
+    fi
+    chmod 0640 "$tmp_key" "$tmp_crt"
+    mv -f "$tmp_key" "$key"
+    mv -f "$tmp_crt" "$crt"
+    info "Trap certificate (self-signed, CN=invalid) written: $crt"
+}
+
+# The trap default servers appended by _loxprox_site_enable_tls (between the
+# TRAP markers, stripped again by _loxprox_site_disable_tls). Every request
+# whose SNI/Host is not one of the gateway's names — IP scans, Shodan/Censys
+# sweeps — goes to the trap log (loxone_scrubbed, so CrowdSec's nginx parser
+# reads it) and gets 444: connection closed, not one byte of fingerprint.
+_loxprox_trap_servers_block() {
+    cat <<EOF
+${_LOXPROX_TRAP_BEGIN_MARKER}
+# 2026-10 Host/SNI gate — generated by deploy.sh together with the TLS block.
+server {
+    listen 1080 ssl default_server;
+    server_name _;
+    ssl_certificate     ${LOXPROX_TLS_DIR}/trap-fullchain.pem;
+    ssl_certificate_key ${LOXPROX_TLS_DIR}/trap-privkey.pem;
+    ssl_protocols       TLSv1.3 TLSv1.2;
+    ssl_ciphers         ${_LOXPROX_TLS_CIPHERS};
+    ssl_session_tickets off;
+    access_log /var/log/nginx/loxprox-trap.log loxone_scrubbed;
+    access_log /var/log/nginx/loxprox-trap-hosts.log loxprox_trap_hosts;
+    # Cleartext to the TLS port with a foreign Host (497) and TRACE/CONNECT
+    # (405, rejected by nginx before any rewrite) end in the trap as well.
+    error_page 405 497 = @loxprox_trap;
+    return 444;
+
+    location @loxprox_trap {
+        return 444;
+    }
+}
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    access_log /var/log/nginx/loxprox-trap.log loxone_scrubbed;
+    access_log /var/log/nginx/loxprox-trap-hosts.log loxprox_trap_hosts;
+    error_page 405 = @loxprox_trap;
+    return 444;
+
+    location @loxprox_trap {
+        return 444;
+    }
+}
+${_LOXPROX_TRAP_END_MARKER}
+EOF
 }
 
 _loxprox_site_disable_tls() {
@@ -2134,11 +2591,25 @@ _loxprox_site_disable_tls() {
     tmp=$(mktemp -t loxprox-site.XXXXXX) || return 1
     # Strip everything between (and including) the markers, then revert the
     # listen directive. awk for the same portability reason as enable.
+    # 2026-10: also the trap servers and the gated server_name — plain-HTTP
+    # mode serves every Host again (server_name _), as before.
     awk -v tls_begin="$_LOXPROX_TLS_BEGIN_MARKER" \
-        -v tls_end="$_LOXPROX_TLS_END_MARKER" '
+        -v tls_end="$_LOXPROX_TLS_END_MARKER" \
+        -v trap_begin="$_LOXPROX_TRAP_BEGIN_MARKER" \
+        -v trap_end="$_LOXPROX_TRAP_END_MARKER" \
+        -v names_marker="$_LOXPROX_TLS_NAMES_MARKER" '
+        index($0, trap_begin) > 0 { in_trap = 1; next }
+        index($0, trap_end)   > 0 { in_trap = 0; next }
+        in_trap { next }
         index($0, tls_begin) > 0 { in_block = 1; next }
         index($0, tls_end)   > 0 { in_block = 0; next }
         in_block { next }
+        index($0, names_marker) > 0 && $0 ~ /^[[:space:]]*server_name[[:space:]]/ {
+            indent = $0
+            sub(/server_name.*/, "", indent)
+            printf "%sserver_name _;\n", indent
+            next
+        }
         match($0, /^[[:space:]]*listen[[:space:]]+1080[[:space:]]+ssl[[:space:]]*;[[:space:]]*$/) {
             indent = $0
             sub(/listen.*/, "", indent)
@@ -2154,7 +2625,7 @@ _loxprox_site_disable_tls() {
     fi
     mv "$tmp" "$NGINX_SITE"
     chmod 0644 "$NGINX_SITE"
-    info "Site reverted → listen 1080 (plain), marker block stripped."
+    info "Site reverted → listen 1080 (plain), server_name _, TLS block and trap servers stripped."
 }
 
 _loxprox_tls_validate_config() {
@@ -2202,6 +2673,7 @@ setup_tls() {
             fi
             systemctl reload nginx || { error "nginx reload failed after the TLS site mutation."; return 1; }
             ok "HTTPS active on :1080 for $TLS_DOMAIN. Renewal cron handled by acme.sh."
+            ok "  Host/SNI gate: only '$(_loxprox_tls_server_names)' is served; anything else → trap log + 444."
             ok "  Test from outside the LAN: curl -vI https://$TLS_DOMAIN:1080/"
             ;;
         false|no|0|"")
@@ -3032,13 +3504,23 @@ EOF
         done
     } > "$wl"
 
+    local bans_ok=1 bans_rolled_back=0
+    _loxprox_configure_crowdsec_bans || bans_ok=0
+
     # M19: an unguarded `systemctl restart crowdsec` aborted the deploy before
     # SSH hardening, monitoring and config.env were written. It is also the one
     # place where a bad AppSec config surfaces: if CrowdSec refuses to start in
     # monitor mode, fall back to the hub's enforcing config rather than leaving
     # the host with no CrowdSec at all — and say so.
+    # 2026-10: the same for the LoxProx ban configuration — a profiles.yaml or
+    # scenario CrowdSec rejects is rolled back first, so a bad ladder value can
+    # never leave the gateway without CrowdSec.
     if ! systemctl restart crowdsec; then
-        if [[ "$ENABLE_APPSEC" == "true" && "$APPSEC_MODE" == "monitor" ]]; then
+        if _loxprox_crowdsec_rollback_bans && systemctl restart crowdsec; then
+            error "CrowdSec rejected the LoxProx ban configuration — rolled back to the previous files."
+            error "  HARD/SOFT ladders, trap/unknown/auth scenarios are NOT active. Diagnose: journalctl -u crowdsec -n 50"
+            bans_rolled_back=1
+        elif [[ "$ENABLE_APPSEC" == "true" && "$APPSEC_MODE" == "monitor" ]]; then
             warn "CrowdSec did not start with the monitor-mode AppSec config."
             warn "  Falling back to enforce (blocking) so the WAF stays up."
             APPSEC_MODE="enforce"
@@ -3063,7 +3545,220 @@ EOF
         return 1
     fi
 
-    ok "CrowdSec configured and running (AppSec mode: $APPSEC_MODE)."
+    # Recorded as a degraded step: CrowdSec runs, the LoxProx bans do not.
+    (( bans_ok && ! bans_rolled_back )) || return 1
+    ok "CrowdSec configured and running (AppSec mode: $APPSEC_MODE; ban ladders HARD ${BAN_HARD_LADDER} / SOFT ${BAN_SOFT_LADDER})."
+}
+
+# CrowdSec profile durations are Go durations, which have no "d" unit; the
+# ladders may use one (progressive-ban.py accepts m/h/d).
+_loxprox_go_duration() {
+    case "$1" in
+        [1-9]*d)    printf '%sh' "$(( ${1%d} * 24 ))" ;;
+        [1-9]*[hm]) printf '%s' "$1" ;;
+        *)          return 1 ;;
+    esac
+}
+
+# Files _loxprox_configure_crowdsec_bans wrote this run, for the rollback.
+_LOXPROX_CROWDSEC_BAN_FILES=()
+
+# Puts every file of this run's ban configuration back the way the run found
+# it: the pre-run copy from $BACKUP_DIR, else the once-kept .loxprox-orig,
+# else (the file did not exist) removed. Returns 1 when there is nothing to
+# roll back, so the caller knows a retry would change nothing.
+_loxprox_crowdsec_rollback_bans() {
+    (( ${#_LOXPROX_CROWDSEC_BAN_FILES[@]} > 0 )) || return 1
+    local f
+    for f in "${_LOXPROX_CROWDSEC_BAN_FILES[@]}"; do
+        if [[ -f "$BACKUP_DIR/files$f" ]]; then
+            cp -a "$BACKUP_DIR/files$f" "$f"
+        elif [[ -f "$f.loxprox-orig" ]]; then
+            cp -a "$f.loxprox-orig" "$f"
+        else
+            rm -f "$f"
+        fi
+    done
+    _LOXPROX_CROWDSEC_BAN_FILES=()
+    return 0
+}
+
+# Keeps an operator's / the package's own copy once before LoxProx manages $1.
+_loxprox_keep_original_once() {
+    local f="$1"
+    [[ -f "$f" && ! -e "$f.loxprox-orig" ]] || return 0
+    grep -q 'LOXPROX-MANAGED' "$f" && return 0
+    cp -a "$f" "$f.loxprox-orig"
+    info "Original $f kept as $f.loxprox-orig."
+}
+
+# 2026-10 breach hardening — the CrowdSec half of "much longer bans, much less
+# tolerance":
+#   * the three LoxProx scenarios (crowdsec/scenarios/) and the acquisition for
+#     the trap and unknown logs (crowdsec/acquis.d/loxprox.yaml);
+#   * a managed profiles.yaml: unambiguous scanner scenarios (BAN_HARD_SCENARIOS)
+#     get the first HARD duration, everything else the first SOFT one —
+#     progressive-ban.py extends repeat offenders along the ladders;
+#   * config.yaml.local: a year of alert history (the default flush kept 7 days,
+#     so the offence memory could never see an earlier offence);
+#   * simulation (alert, no ban) for the two learning scenarios.
+# Called by configure_crowdsec before its restart, which rolls this back if
+# CrowdSec refuses the result.
+_loxprox_configure_crowdsec_bans() {
+    local src="${SCRIPT_DIR:-.}/crowdsec" f dst hard soft max_age_days=400
+    local -a ladder=() simulated=() unconfirmed=()
+    _LOXPROX_CROWDSEC_BAN_FILES=()
+    if [[ ! -d "$src/scenarios" || ! -f "$src/acquis.d/loxprox.yaml" ]]; then
+        error "LoxProx CrowdSec files not found under $src — trap / unknown-path / auth scenarios NOT installed."
+        return 1
+    fi
+    read -r -a ladder <<<"$BAN_HARD_LADDER"
+    hard=$(_loxprox_go_duration "${ladder[0]:-}") || { error "BAN_HARD_LADDER: bad first duration '${ladder[0]:-}'."; return 1; }
+    read -r -a ladder <<<"$BAN_SOFT_LADDER"
+    soft=$(_loxprox_go_duration "${ladder[0]:-}") || { error "BAN_SOFT_LADDER: bad first duration '${ladder[0]:-}'."; return 1; }
+
+    _loxprox_mkdir_mode 0755 "$CROWDSEC_SCENARIO_DIR"
+    _loxprox_mkdir_mode 0755 "$(dirname "$CROWDSEC_LOXPROX_ACQUIS")"
+    for f in "$src"/scenarios/*.yaml; do
+        dst="$CROWDSEC_SCENARIO_DIR/$(basename "$f")"
+        backup_file "$dst"
+        _LOXPROX_CROWDSEC_BAN_FILES+=("$dst")
+        install -m 0644 "$f" "$dst"
+    done
+    backup_file "$CROWDSEC_LOXPROX_ACQUIS"
+    _LOXPROX_CROWDSEC_BAN_FILES+=("$CROWDSEC_LOXPROX_ACQUIS")
+    install -m 0644 "$src/acquis.d/loxprox.yaml" "$CROWDSEC_LOXPROX_ACQUIS"
+    # nginx creates both logs when it loads the site; make sure CrowdSec has a
+    # file to tail from its first start either way (best effort: tests run
+    # unprivileged).
+    for f in /var/log/nginx/loxprox-trap.log /var/log/nginx/loxprox-unknown.log; do
+        [[ -e "$f" ]] || install -m 0640 -o www-data -g adm /dev/null "$f" 2>/dev/null || true
+    done
+    if grep -qsE '^[[:space:]]*-[[:space:]]*["'\'']?/var/log/nginx/\*' "$CROWDSEC_DIR/acquis.yaml"; then
+        warn "$CROWDSEC_DIR/acquis.yaml also reads /var/log/nginx/* — LoxProx's nginx logs are then read twice"
+        warn "  and every event counts double. Narrow that entry (acquis.d/ already covers LoxProx's logs)."
+    fi
+
+    _loxprox_keep_original_once "$CROWDSEC_PROFILES"
+    backup_file "$CROWDSEC_PROFILES"
+    _LOXPROX_CROWDSEC_BAN_FILES+=("$CROWDSEC_PROFILES")
+    cat > "$CROWDSEC_PROFILES" <<EOF
+# LOXPROX-MANAGED — CrowdSec remediation profiles, generated by deploy.sh on
+# $(date -Iseconds). Edits are replaced on the next deploy; the package's
+# original is kept as profiles.yaml.loxprox-orig.
+#
+# First match wins (on_success: break). The first offence of an unambiguous
+# scanner scenario (BAN_HARD_SCENARIOS) bans for ${hard}, any other first
+# offence for ${soft}; progressive-ban.py extends repeat offenders along
+# BAN_HARD_LADDER="${BAN_HARD_LADDER}" / BAN_SOFT_LADDER="${BAN_SOFT_LADDER}".
+name: loxprox_hard_ip
+filters:
+ - 'Alert.Remediation == true && Alert.GetScope() == "Ip" && Alert.GetScenario() matches "${BAN_HARD_SCENARIOS}"'
+decisions:
+ - type: ban
+   duration: ${hard}
+on_success: break
+---
+name: default_ip_remediation
+filters:
+ - Alert.Remediation == true && Alert.GetScope() == "Ip"
+decisions:
+ - type: ban
+   duration: ${soft}
+on_success: break
+---
+name: default_range_remediation
+filters:
+ - Alert.Remediation == true && Alert.GetScope() == "Range"
+decisions:
+ - type: ban
+   duration: ${soft}
+on_success: break
+EOF
+    chmod 0644 "$CROWDSEC_PROFILES"
+
+    # Alert history must outlive the offence window, with margin.
+    if (( PROGRESSIVE_BAN_WINDOW_DAYS + 35 > max_age_days )); then
+        max_age_days=$(( PROGRESSIVE_BAN_WINDOW_DAYS + 35 ))
+    fi
+    _loxprox_keep_original_once "$CROWDSEC_CONFIG_LOCAL"
+    backup_file "$CROWDSEC_CONFIG_LOCAL"
+    _LOXPROX_CROWDSEC_BAN_FILES+=("$CROWDSEC_CONFIG_LOCAL")
+    cat > "$CROWDSEC_CONFIG_LOCAL" <<EOF
+# LOXPROX-MANAGED — generated by deploy.sh on $(date -Iseconds).
+# CrowdSec merges this over config.yaml (mappings merge, sequences replace).
+# The package default flush (7d / 5000 alerts) forgot every offence after a
+# week; progressive-ban.py remembers PROGRESSIVE_BAN_WINDOW_DAYS=${PROGRESSIVE_BAN_WINDOW_DAYS}.
+#
+# Sizing (production, 2026-10): ~50-100 external IPs a day on :1080 and 40-70
+# on :80, about 43 local alerts a day today, database 16 MB with 11 GB free.
+# That is an expected ~190 alerts a day, so 100000 alerts last
+# over 500 days, beyond the 400-day default max_age. max_items caps retention
+# too — whichever limit is reached first deletes the oldest alerts — so raise
+# it if alerts ever pass ~250 a day (100000 / 250 = 400 days), or offences are
+# forgotten before the window ends.
+db_config:
+  flush:
+    max_age: ${max_age_days}d
+    max_items: 100000
+EOF
+    chmod 0644 "$CROWDSEC_CONFIG_LOCAL"
+
+    # Learning scenarios alert without banning: auth-bf in this release, and
+    # unknown-path while UNKNOWN_PATH_MODE=log (those paths are still proxied).
+    # 2026-10 (owner decision): TRAP_BAN_MODE=observe does the same for
+    # scanner-trap — the trap still answers 444 and logs from the first
+    # request, only the ban waits until the trap log has been checked for the
+    # family's own devices. Set here, before configure_crowdsec's restart, so
+    # there is no window in which the trap bans.
+    # cscli is idempotent ("already enabled", exit 0) — and also exits 0 when
+    # it cannot find the scenario, so the result is read back.
+    if command -v cscli >/dev/null 2>&1; then
+        simulated=(loxprox/auth-bf)
+        if [[ "$UNKNOWN_PATH_MODE" == "log" ]]; then
+            simulated+=(loxprox/unknown-path)
+        else
+            cscli simulation disable loxprox/unknown-path >>"$LOG_FILE" 2>&1 || true
+        fi
+        if [[ "$TRAP_BAN_MODE" == "observe" ]]; then
+            simulated+=(loxprox/scanner-trap)
+        else
+            cscli simulation disable loxprox/scanner-trap >>"$LOG_FILE" 2>&1 || true
+        fi
+        cscli simulation enable "${simulated[@]}" >>"$LOG_FILE" 2>&1 || true
+        local sim_status
+        sim_status=$(cscli simulation status 2>&1) || sim_status=""
+        for f in "${simulated[@]}"; do
+            grep -qF "$f" <<<"$sim_status" || unconfirmed+=("$f")
+        done
+        if [[ "$TRAP_BAN_MODE" == "ban" ]] && grep -qF loxprox/scanner-trap <<<"$sim_status"; then
+            warn "TRAP_BAN_MODE=ban, but cscli still lists loxprox/scanner-trap in simulation — trap hits do NOT ban."
+        fi
+        if [[ "$TRAP_BAN_MODE" == "observe" ]]; then
+            warn "TRAP_BAN_MODE=observe: trap hits are logged and alerted, NOT banned — check, then set TRAP_BAN_MODE=ban."
+            warn "  Check: /var/log/nginx/loxprox-trap-hosts.log (Host, SNI, user agent per hit) and"
+            warn "  sudo cscli alerts list -s loxprox/scanner-trap --limit 0"
+        fi
+    else
+        # Nothing can confirm simulation without cscli: fail safe below.
+        simulated=(loxprox/auth-bf)
+        [[ "$UNKNOWN_PATH_MODE" == "log" ]] && simulated+=(loxprox/unknown-path)
+        [[ "$TRAP_BAN_MODE" == "observe" ]] && simulated+=(loxprox/scanner-trap)
+        unconfirmed=("${simulated[@]}")
+    fi
+    # Fail safe (2026-10): a scenario that MUST only alert but whose
+    # simulation cannot be confirmed would ban for real after the restart. It
+    # is removed instead — no detection beats a wrong ban — and the step is
+    # reported degraded.
+    for f in "${unconfirmed[@]}"; do
+        error "Simulation for $f NOT confirmed (cscli simulation status) — its scenario is removed so it cannot ban."
+        rm -f "$CROWDSEC_SCENARIO_DIR/${f/\//-}.yaml"
+    done
+    if (( ${#unconfirmed[@]} > 0 )); then
+        error "  Fix: sudo cscli simulation enable ${unconfirmed[*]}, then re-run sudo bash deploy.sh"
+        return 1
+    fi
+    info "LoxProx scenarios, acquisition, ban profiles (HARD ${hard} / SOFT ${soft}) and ${max_age_days}d alert history written."
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3234,19 +3929,100 @@ _loxprox_interactive_collect_pubkey() {
     done
 }
 
+# True (0) for a login shell — sshd refuses accounts whose shell is
+# nologin/false (or empty), so they never count as a way in.
+_loxprox_is_login_shell() {
+    case "$1" in
+        ""|*/nologin|*/false) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# True (0) if account $1 can become root: a member of sudo, or of wheel /
+# admin where those groups exist (id -nG: primary + supplementary groups).
+_loxprox_user_can_sudo() {
+    local groups
+    groups=" $(id -nG "$1" 2>/dev/null) "
+    [[ "$groups" == *" sudo "* || "$groups" == *" wheel "* || "$groups" == *" admin "* ]]
+}
+
+# True (0) if a non-root account (uid >= 1000) with a login shell has a
+# parseable authorized key. $1 (optional): only these users. $2 = "sudo":
+# the account must also be able to become root — the precondition for
+# PermitRootLogin no (otherwise nobody could administer the box over SSH).
+_loxprox_has_user_authorized_key() {
+    local only="${1:-}" need="${2:-}" user uid home shell f
+    while IFS=: read -r user _ uid _ _ home shell; do
+        [[ "$uid" =~ ^[0-9]+$ ]] && (( uid >= 1000 )) || continue
+        [[ "$user" != "nobody" && -d "$home" ]] || continue
+        _loxprox_is_login_shell "$shell" || continue
+        [[ -z "$only" || " $only " == *" $user "* ]] || continue
+        [[ "$need" != "sudo" ]] || _loxprox_user_can_sudo "$user" || continue
+        f="$home/.ssh/authorized_keys"
+        [[ -f "$f" ]] && grep -qE '^(ssh-|ecdsa-sha2-|sk-)' "$f" 2>/dev/null && return 0
+    done < "$LOXPROX_PASSWD_FILE"
+    return 1
+}
+
+# 2026-10: the AllowUsers line for SSH_ALLOW_USERS, or nothing when it is
+# empty. Lockout guard: at least one listed plain user name must exist with a
+# login shell — and, in HARD mode, a key — or the line is left out (and said
+# so). user@host patterns pass through to sshd unchecked.
+_loxprox_ssh_allow_users_line() {
+    local mode="$1" tok plain="" ent
+    local -a toks=()
+    read -r -a toks <<<"$SSH_ALLOW_USERS"
+    (( ${#toks[@]} > 0 )) || return 0
+    for tok in "${toks[@]}"; do
+        [[ "$tok" == *[@*?]* ]] && continue
+        ent=$(getent passwd "$tok" 2>/dev/null) || continue
+        _loxprox_is_login_shell "${ent##*:}" && plain+=" $tok"
+    done
+    if [[ -z "$plain" ]]; then
+        warn "SSH_ALLOW_USERS names no existing account with a login shell — AllowUsers NOT written (it would lock everyone out)." >&2
+        return 0
+    fi
+    if [[ "$mode" == "hard" ]] && ! _loxprox_has_user_authorized_key "$plain" \
+            && ! { [[ " $plain " == *" root "* ]] && _loxprox_has_authorized_key; }; then
+        warn "No account in SSH_ALLOW_USERS has an authorized key — AllowUsers NOT written (key-only login would lock everyone out)." >&2
+        return 0
+    fi
+    printf 'AllowUsers %s\n' "${toks[*]}"
+}
+
 _loxprox_write_hard_ssh_drop_in() {
-    local drop=/etc/ssh/sshd_config.d/99-loxprox.conf
+    local drop="$SSHD_DROPIN" root_login="no" allow only="" t
+    local -a toks=()
+    allow=$(_loxprox_ssh_allow_users_line hard)
+    # With AllowUsers written, only the listed accounts can log in at all.
+    if [[ -n "$allow" ]]; then
+        read -r -a toks <<<"$SSH_ALLOW_USERS"
+        for t in "${toks[@]}"; do
+            [[ "$t" == *[@*?]* ]] || only+=" $t"
+        done
+    fi
+    # 2026-10: root logs in by key no more — admin access is a user account +
+    # sudo. Exception, so this can never lock a box out: unless an account
+    # that can log in (key, login shell, allowed) can also become root (sudo /
+    # wheel / admin), prohibit-password stays, with a warning — e.g. root's
+    # key is the only one (the interactive key prompt installs into /root).
+    if ! _loxprox_has_user_authorized_key "$only" sudo; then
+        root_login="prohibit-password"
+        warn "No sudo-capable account with an SSH key (and a login shell${only:+, in SSH_ALLOW_USERS}) — keeping 'PermitRootLogin prohibit-password' (no lockout)."
+        warn "  Add your key to a sudo user's ~/.ssh/authorized_keys, re-run: sudo bash deploy.sh --finalize-ssh"
+    fi
+    mkdir -p "$(dirname "$drop")"
     backup_file "$drop"
-    cat > "$drop" <<'EOF'
+    cat > "$drop" <<EOF
 # LoxProx — CIS Debian 12 §5.2 SSH hardening (HARD mode)
 # Generated by deploy.sh — do not edit by hand.
 Protocol 2
 LogLevel VERBOSE
 MaxAuthTries 4
-# H5: prohibit-password (not "no") — root login by KEY still works, so installing the
-# operator's key for root and then applying HARD mode does not lock a root-only box
-# out. Password root login stays denied (PasswordAuthentication no enforces it too).
-PermitRootLogin prohibit-password
+# 2026-10: "no" — admin access is a user account + sudo. H5's
+# "prohibit-password" remains only while root's key is the only key here.
+PermitRootLogin ${root_login}
+${allow:-# AllowUsers: not written (SSH_ALLOW_USERS empty, or refused as a lockout — see the deploy log)}
 PermitEmptyPasswords no
 PasswordAuthentication no
 PubkeyAuthentication yes
@@ -3263,16 +4039,21 @@ EOF
 }
 
 _loxprox_write_soft_ssh_drop_in() {
-    local drop=/etc/ssh/sshd_config.d/99-loxprox.conf
+    local drop="$SSHD_DROPIN" allow
+    allow=$(_loxprox_ssh_allow_users_line soft)
+    mkdir -p "$(dirname "$drop")"
     backup_file "$drop"
-    cat > "$drop" <<'EOF'
+    # PermitRootLogin stays yes here: with no key anywhere, a root password may
+    # be the box's only way in. HARD mode (--finalize-ssh) turns it off.
+    cat > "$drop" <<EOF
 # LoxProx — SOFT SSH hardening (password auth STILL ENABLED).
-# Re-run `sudo bash deploy.sh --finalize-ssh` after installing an
+# Re-run \`sudo bash deploy.sh --finalize-ssh\` after installing an
 # authorized_keys entry to swap this for the HARD profile.
 Protocol 2
 LogLevel VERBOSE
 MaxAuthTries 4
 PermitRootLogin yes
+${allow:-# AllowUsers: not written (SSH_ALLOW_USERS empty, or refused as a lockout — see the deploy log)}
 PermitEmptyPasswords no
 PasswordAuthentication yes
 PubkeyAuthentication yes
@@ -3347,17 +4128,24 @@ setup_ssh_hardening() {
         _loxprox_install_ssh_motd_nag
     fi
 
+    # Validated before the reload. 2026-10: a rejected drop-in is replaced by
+    # the one this run found (not just deleted — that dropped every hardening
+    # line and left sshd on its password-auth defaults).
     if ! sshd -t 2>>"$LOG_FILE"; then
         error "sshd -t failed with the new drop-in; reverting."
-        rm -f /etc/ssh/sshd_config.d/99-loxprox.conf
+        if [[ -f "$BACKUP_DIR/files$SSHD_DROPIN" ]]; then
+            cp -a "$BACKUP_DIR/files$SSHD_DROPIN" "$SSHD_DROPIN"
+        else
+            rm -f "$SSHD_DROPIN"
+        fi
         return 1
     fi
 
     systemctl reload ssh 2>>"$LOG_FILE" || systemctl reload sshd 2>>"$LOG_FILE" || true
 
     if [[ "$mode" == "hard" ]]; then
-        ok "SSH HARD-hardened (key-only, no root, VERBOSE log)."
-        ok "  Verify from a SECOND terminal before logging out:  ssh root@<gateway>"
+        ok "SSH HARD-hardened (key-only, PermitRootLogin $(awk '$1 == "PermitRootLogin" {print $2}' "$SSHD_DROPIN"), VERBOSE log)."
+        ok "  Verify from a SECOND terminal before logging out:  ssh <your-user>@<gateway>"
     else
         warn "SSH SOFT-hardened — password auth is STILL ENABLED."
         warn "  Login banner will nag every session until you fix it."
@@ -3375,12 +4163,22 @@ setup_unattended_upgrades() {
 
     _loxprox_pkg_installed unattended-upgrades || apt-get install -y unattended-upgrades
 
-    cat > /etc/apt/apt.conf.d/50unattended-upgrades <<EOF
-Unattended-Upgrade::Allowed-Origins {
-    "\${distro_id}:\${distro_codename}";
-    "\${distro_id}:\${distro_codename}-security";
-    "\${distro_id}ESMApps:\${distro_codename}-apps-security";
-    "\${distro_id}ESM:\${distro_codename}-infra-security";
+    local auto_conf
+    auto_conf="$(dirname "$UNATTENDED_UPGRADES_CONF")/20auto-upgrades"
+    mkdir -p "$(dirname "$UNATTENDED_UPGRADES_CONF")"
+    backup_file "$UNATTENDED_UPGRADES_CONF"
+    cat > "$UNATTENDED_UPGRADES_CONF" <<EOF
+// LoxProx — generated by deploy.sh on $(date -Iseconds); edits are replaced.
+// 2026-10: Origins-Pattern by codename + label. The old Allowed-Origins form
+// "\${distro_id}:\${distro_codename}-security" matches the ARCHIVE, and since
+// trixie's release bookworm's security archive is "oldstable-security" —
+// nothing matched and security updates silently stopped. Codename + label
+// do not change when a release becomes oldstable. The CrowdSec repository
+// (origin packagecloud.io/crowdsec/crowdsec, label crowdsec) is deliberately
+// absent: its upgrades are staged by hand.
+Unattended-Upgrade::Origins-Pattern {
+    "origin=Debian,codename=\${distro_codename},label=Debian";
+    "origin=Debian,codename=\${distro_codename}-security,label=Debian-Security";
 };
 Unattended-Upgrade::AutoFixInterruptedDpkg "true";
 Unattended-Upgrade::MinimalSteps "true";
@@ -3391,7 +4189,7 @@ Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
 Unattended-Upgrade::Automatic-Reboot-Time "${AUTOREBOOT_TIME}";
 EOF
 
-    cat > /etc/apt/apt.conf.d/20auto-upgrades <<EOF
+    cat > "$auto_conf" <<EOF
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 APT::Periodic::AutocleanInterval "7";
@@ -3502,8 +4300,28 @@ setup_logrotate() {
     backup_file "$LOGROTATE_CONF"
     mkdir -p "$(dirname "$LOGROTATE_CONF")"
 
+    # 2026-10: the access log and the two class logs are kept 90 days — the
+    # forensic window for an offence history that now spans a year. Named
+    # explicitly: the old loxone-*.log glob would claim loxone-access.log a
+    # second time (logrotate then skips the file).
     cat > "$LOGROTATE_CONF" <<EOF
-/var/log/nginx/loxone-*.log
+/var/log/nginx/loxone-access.log
+/var/log/nginx/loxprox-trap.log
+/var/log/nginx/loxprox-trap-hosts.log
+/var/log/nginx/loxprox-unknown.log {
+    daily
+    missingok
+    rotate 90
+    compress
+    delaycompress
+    notifempty
+    create 0640 www-data adm
+    sharedscripts
+    postrotate
+        [ -f /var/run/nginx.pid ] && kill -USR1 \$(cat /var/run/nginx.pid)
+    endscript
+}
+/var/log/nginx/loxone-error.log
 /var/log/nginx/appsec-detections.log {
     daily
     missingok
@@ -3546,7 +4364,7 @@ EOF
     chmod 0644 "$LOGROTATE_CONF" "$LOXPROX_LOGROTATE_CONF" 2>/dev/null || true
 
     _loxprox_yield_stock_nginx_logrotate
-    ok "Logrotate: nginx logs 14 days; LoxProx logs weekly (or at 10 MB), 8 generations."
+    ok "Logrotate: access/trap/unknown logs 90 days, error/AppSec logs 14 days; LoxProx logs weekly (or at 10 MB), 8 generations."
 }
 
 # 2026-10: the stock Debian /etc/logrotate.d/nginx rotates /var/log/nginx/*.log,
@@ -3647,7 +4465,8 @@ EOF
 #   /opt/loxprox/gateway-monitor.sh       (systemd timer, 60s)
 #   /opt/loxprox/gateway-backup.sh        (cron, daily 02:00)
 #   /opt/loxprox/geoip-block.sh           (cron, daily 03:00)
-#   /opt/loxprox/progressive-ban.py       (cron, every 15 min)
+#   /opt/loxprox/progressive-ban.py       (cron, every 15 min, under flock)
+#   /opt/loxprox/hub-refresh.sh           (cron, Sunday 04:30)
 #   /opt/loxprox/discord-alert.sh         (alert dispatcher)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -3658,13 +4477,23 @@ setup_security_monitoring() {
     local src_dir="${SCRIPT_DIR:-.}"
     mkdir -p "$install_dir"
 
-    # Copy the five scripts that cron and the monitor timer drive
+    # 2026-10: the monitor's session alert resolves ASNs with mmdblookup (the
+    # GeoLite2 files CrowdSec already ships); jq parses every cscli JSON. Both
+    # are hard dependencies of the new checks.
+    local pkg
+    for pkg in mmdb-bin jq; do
+        _loxprox_pkg_installed "$pkg" || apt-get install -y "$pkg" >/dev/null \
+            || warn "$pkg install failed — the monitor's checks that need it stay degraded."
+    done
+
+    # Copy the six scripts that cron and the monitor timer drive
     local f
     for f in \
         "$src_dir/progressive-ban.py" \
         "$src_dir/security-monitoring/gateway-monitor.sh" \
         "$src_dir/security-monitoring/gateway-backup.sh" \
         "$src_dir/security-monitoring/geoip-block.sh" \
+        "$src_dir/security-monitoring/hub-refresh.sh" \
         "$src_dir/security-monitoring/discord-alert.sh"
     do
         if [[ -f "$f" ]]; then
@@ -3721,7 +4550,7 @@ EOF
     done
     (( cron_bad == 0 )) || return 1
 
-    ok "Security monitor (60s), daily backup, daily GeoIP, progressive ban (15min) installed."
+    ok "Security monitor (60s), daily backup, daily GeoIP, progressive ban (15min, flock), weekly hub refresh installed."
 }
 
 # Single cron file for all periodic jobs.
@@ -3740,14 +4569,20 @@ SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 MAILTO=""
 
-# Progressive ban escalation — extend repeat offenders every 15 min
-*/15 * * * * root /opt/loxprox/progressive-ban.py >> /var/log/loxprox-cron.log 2>&1
+# Progressive ban escalation — extend repeat offenders every 15 min. flock -n:
+# a run still busy with a year of alert history makes the next one skip
+# instead of a second copy rewriting the same decisions.
+*/15 * * * * root flock -n /run/loxprox-progressive-ban.lock /opt/loxprox/progressive-ban.py >> /var/log/loxprox-cron.log 2>&1
 
 # Daily config backup
 0 2 * * * root /opt/loxprox/gateway-backup.sh >> /var/log/loxprox-cron.log 2>&1
 
-# Daily GeoIP blocklist refresh
+# Daily GeoIP blocklist refresh (IPv4 + IPv6; the script reads config.env)
 0 3 * * * root /opt/loxprox/geoip-block.sh >> /var/log/loxprox-cron.log 2>&1
+
+# Weekly CrowdSec hub refresh (Sunday 04:30): virtual-patching rules only,
+# the rest is reported, never upgraded unattended.
+30 4 * * 0 root /opt/loxprox/hub-refresh.sh >> /var/log/loxprox-cron.log 2>&1
 EOF
     chmod 644 "$LOXPROX_CRON_FILE"
 }
@@ -3875,6 +4710,42 @@ _loxprox_check_cron_files() {
 # full transparency documentation.
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# 2026-10 (reboot-loop guard): in TLS mode the Host/SNI gate answers a request
+# for 127.0.0.1 with 444 — which is exactly what the network watchdog an
+# EARLIER deploy installed sends (plain http://127.0.0.1:1080/), and what it
+# reads as "nginx is dead": heal, restart networking, reboot — mid-deploy.
+# Its timer is DISABLED (not just stopped — a stopped-but-enabled timer comes
+# back at the next boot, e.g. unattended-upgrades' auto-reboot, and loops)
+# before configure_nginx can activate the gate; setup_network_watchdog
+# enables and starts it again once the new script and the config.env carrying
+# TLS_DOMAIN are both in place. A run that dies in between leaves it disabled
+# and says so on exit — never a reboot loop.
+_LOXPROX_WATCHDOG_PAUSED=0
+_loxprox_pause_network_watchdog() {
+    if [[ "${ENABLE_TLS,,}" == "true" ]] || _loxprox_site_in_tls_mode; then
+        if systemctl is-enabled --quiet network-watchdog.timer 2>/dev/null \
+                || systemctl is-active --quiet network-watchdog.timer 2>/dev/null; then
+            if systemctl disable --now network-watchdog.timer 2>/dev/null; then
+                _LOXPROX_WATCHDOG_PAUSED=1
+                trap '_loxprox_watchdog_paused_notice' EXIT
+                info "Network watchdog disabled until its Host/SNI-aware version is installed (later in this run)."
+            fi
+        fi
+    fi
+    return 0
+}
+
+# EXIT trap while the watchdog is paused: a run that ends before
+# setup_network_watchdog re-armed it (failed step, SIGHUP, stopped panel job)
+# must not leave that silently.
+_loxprox_watchdog_paused_notice() {
+    (( _LOXPROX_WATCHDOG_PAUSED )) || return 0
+    systemctl is-active --quiet network-watchdog.timer 2>/dev/null && return 0
+    warn "network-watchdog → NOT ARMED: this deploy paused it and ended before re-arming it."
+    warn "  Re-arm by re-running: sudo bash deploy.sh — not by starting the timer by hand: the installed"
+    warn "  watchdog may predate the Host/SNI gate and would read the trap's 444 as an outage (reboot loop)."
+}
+
 setup_network_watchdog() {
     banner "Network Watchdog"
 
@@ -3910,6 +4781,9 @@ setup_network_watchdog() {
         systemctl daemon-reload
         systemctl enable network-watchdog.timer
         systemctl start network-watchdog.timer
+        # Re-armed: the EXIT notice has nothing to say (if the start failed,
+        # the flag stays and the notice reports it).
+        systemctl is-active --quiet network-watchdog.timer 2>/dev/null && _LOXPROX_WATCHDOG_PAUSED=0
         ok "Network watchdog enabled (runs every 60s)"
         info "Disable any time: systemctl stop network-watchdog.timer"
         info "View logs: journalctl -u network-watchdog --since '10 minutes ago'"
@@ -3943,9 +4817,11 @@ _LOXPROX_DEPLOY_SOURCE_FILES=(
     set-static-ip.sh
 )
 # Copied as whole trees: setup_gui installs gui/loxprox-gui.py + gui/static/,
-# and every file under security-monitoring/ is installed by one module or
-# another (monitor, backup, GeoIP, Discord, network + tunnel watchdogs).
+# every file under security-monitoring/ is installed by one module or
+# another (monitor, backup, GeoIP, Discord, network + tunnel watchdogs), and
+# configure_crowdsec installs crowdsec/ (scenarios + acquisition).
 _LOXPROX_DEPLOY_SOURCE_DIRS=(
+    crowdsec
     gui
     security-monitoring
 )
@@ -4108,6 +4984,27 @@ TUNNEL_PUBLIC_HOST="${TUNNEL_PUBLIC_HOST:-}"
 ENABLE_GUI="$ENABLE_GUI"
 GUI_PORT="$GUI_PORT"
 LOXPROX_DEPLOY_SH="$LOXPROX_DEPLOY_SH"
+# 2026-10 — TLS mode: the watchdogs probe :1080 under TLS_DOMAIN (Host/SNI
+# gate; a request for 127.0.0.1 is the trap's).
+ENABLE_TLS="$ENABLE_TLS"
+TLS_DOMAIN="${TLS_DOMAIN:-}"
+# 2026-10 breach hardening — read by gateway-monitor.sh, progressive-ban.py,
+# hub-refresh.sh and geoip-block.sh.
+EXTRA_SERVER_NAMES="$EXTRA_SERVER_NAMES"
+UNKNOWN_PATH_MODE="$UNKNOWN_PATH_MODE"
+TRAP_BAN_MODE="$TRAP_BAN_MODE"
+REMOTE_ADMIN_PATHS="$REMOTE_ADMIN_PATHS"
+BAN_HARD_LADDER="$BAN_HARD_LADDER"
+BAN_SOFT_LADDER="$BAN_SOFT_LADDER"
+BAN_HARD_SCENARIOS="$BAN_HARD_SCENARIOS"
+PROGRESSIVE_BAN_WINDOW_DAYS="$PROGRESSIVE_BAN_WINDOW_DAYS"
+SESSION_ALERT_ENABLED="$SESSION_ALERT_ENABLED"
+AUTH_RATE_ALERT_PER_CYCLE="$AUTH_RATE_ALERT_PER_CYCLE"
+SSH_ALLOW_USERS="$SSH_ALLOW_USERS"
+GEOIP_IPV6_ENABLED="$GEOIP_IPV6_ENABLED"
+GEOIP_URL_BASE6="$GEOIP_URL_BASE6"
+ASN_LEARNING_DAYS="$ASN_LEARNING_DAYS"
+SEC_UPDATE_MAX_AGE_DAYS="$SEC_UPDATE_MAX_AGE_DAYS"
 EOF
 
     chmod 640 "$GATEWAY_CONFIG_FILE"
@@ -4230,14 +5127,23 @@ _loxprox_probe_listener() {
         warn "curl not installed — skipping the live listener probe."
         return 0
     fi
-    local scheme="http" code=""
-    [[ "${ENABLE_TLS,,}" == "true" ]] && scheme="https"
-    info "Probing the gateway listener: ${scheme}://127.0.0.1:1080/"
-    # -k: with TLS on, the cert is valid for TLS_DOMAIN, not for 127.0.0.1.
-    code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "${scheme}://127.0.0.1:1080/" 2>>"$LOG_FILE") || code="000"
+    # 2026-10: in TLS mode :1080 is gated on Host/SNI — a request for
+    # 127.0.0.1 is answered by the trap (444; curl reports 000). Ask for the
+    # real name, resolved to loopback. The site's actual state decides, not
+    # ENABLE_TLS: a TLS step that degraded leaves the site on plain HTTP. The
+    # path is an app-class one, so UNKNOWN_PATH_MODE=deny cannot 404 it.
+    local url="http://127.0.0.1:1080/jdev/cfg/api" code=""
+    local -a gate=()
+    if _loxprox_site_in_tls_mode && [[ -n "$TLS_DOMAIN" ]]; then
+        url="https://${TLS_DOMAIN}:1080/jdev/cfg/api"
+        gate=(--resolve "${TLS_DOMAIN}:1080:127.0.0.1")
+    fi
+    info "Probing the gateway listener: $url (via 127.0.0.1)"
+    # -k: liveness, not certificate validity (the renewal checks cover that).
+    code=$(curl -sk "${gate[@]}" -o /dev/null -w '%{http_code}' --max-time 10 "$url" 2>>"$LOG_FILE") || code="000"
     case "$code" in
         000)
-            error "No HTTP response from ${scheme}://127.0.0.1:1080/ — the gateway is NOT serving."
+            error "No HTTP response from $url (via 127.0.0.1) — the gateway is NOT serving."
             error "  Check: systemctl status nginx; nginx -t; ss -tlnp | grep 1080"
             return 1
             ;;
@@ -4342,12 +5248,12 @@ Services:
   crowdsec-firewall-bouncer → $(service_active crowdsec-firewall-bouncer && echo "running" || echo "NOT RUNNING")
   auditd                    → $(service_active auditd     && echo "running" || echo "NOT RUNNING")
   unattended-upgrades       → $(service_active unattended-upgrades && echo "running" || echo "NOT RUNNING")
-  network-watchdog          → $(systemctl is-active --quiet network-watchdog.timer 2>/dev/null && echo "armed" || echo "NOT ARMED")$([[ "${ENABLE_TUNNEL,,}" == "true" ]] && echo "
+  network-watchdog          → $(systemctl is-active --quiet network-watchdog.timer 2>/dev/null && echo "armed" || echo "NOT ARMED — re-arm: sudo bash deploy.sh")$([[ "${ENABLE_TUNNEL,,}" == "true" ]] && echo "
   frpc (tunnel)             → $(service_active frpc && echo "running" || echo "NOT RUNNING")
   tunnel-watchdog           → $(systemctl is-active --quiet tunnel-watchdog.timer 2>/dev/null && echo "armed" || echo "NOT ARMED")")
 
 Next steps:
-  1. Verify proxy: curl -v http://127.0.0.1:1080/jdev/cfg/api
+  1. Verify proxy: $(if _loxprox_site_in_tls_mode && [[ -n "$TLS_DOMAIN" ]]; then echo "curl -v --resolve ${TLS_DOMAIN}:1080:127.0.0.1 https://${TLS_DOMAIN}:1080/jdev/cfg/api"; else echo "curl -v http://127.0.0.1:1080/jdev/cfg/api"; fi)
   2. Allow ${GATEWAY_IP} → Loxone:${LOXONE_PORT} in Proxmox firewall
   3. Switch router port forwarding: external 1080 → ${GATEWAY_IP}:1080
   4. Watch traffic: tail -f /var/log/nginx/loxone-access.log
@@ -4513,7 +5419,7 @@ _loxprox_restore_backup() {
     fi
 
     if src=$(_loxprox_restore_locate "$work" "99-loxprox.conf"); then
-        local sshd_drop="/etc/ssh/sshd_config.d/99-loxprox.conf"
+        local sshd_drop="$SSHD_DROPIN"
         backup_file "$sshd_drop"
         mkdir -p "$(dirname "$sshd_drop")"
         install -m 0644 "$src" "$sshd_drop"
@@ -4623,6 +5529,13 @@ main() {
     # MOTD nag. Safe to run repeatedly.
     if [[ "${1:-}" == "--finalize-ssh" ]]; then
         banner "LoxProx — --finalize-ssh"
+        # 2026-10: deploy.conf carries SSH_ALLOW_USERS — load and validate it
+        # as a full deploy does, or the AllowUsers line would silently vanish.
+        if _loxprox_load_config; then
+            _loxprox_validate_hardening_config || exit 1
+        else
+            warn "No $LOXPROX_DEPLOY_CONF — SSH_ALLOW_USERS is not applied."
+        fi
         setup_ssh_hardening
         exit 0
     fi
@@ -4724,11 +5637,17 @@ main() {
         _loxprox_install_script "$geoip_src" "$LOXPROX_INSTALL_DIR/geoip-block.sh"
         # A short retry schedule here: the nightly cron run uses the full
         # backoff (minutes), which a deploy should not sit through.
-        GEOIP_RETRY_DELAYS="5" GEOIP_MAX_TIME=60 bash "$LOXPROX_INSTALL_DIR/geoip-block.sh" \
+        # 2026-10: this run happens before write_runtime_config, so config.env
+        # still holds the PREVIOUS run's values (or does not exist yet) — the
+        # script is told to skip it and gets this run's GEOIP_* values instead.
+        LOXPROX_CONFIG=/nonexistent GEOIP_RETRY_DELAYS="5" GEOIP_MAX_TIME=60 \
+            GEOIP_IPV6_ENABLED="$GEOIP_IPV6_ENABLED" GEOIP_URL_BASE6="$GEOIP_URL_BASE6" \
+            bash "$LOXPROX_INSTALL_DIR/geoip-block.sh" \
             || warn "GeoIP blocklist load failed — last known-good list kept; the nightly cron run retries"
     fi
 
     install_nginx
+    _loxprox_pause_network_watchdog
     configure_nginx
     run_optional_step "nginx systemd hardening" setup_nginx_hardening
     install_crowdsec
@@ -4744,9 +5663,11 @@ main() {
     run_optional_step "journald size cap"       setup_journald
     run_optional_step "alerting"                setup_alerting
     run_optional_step "security monitoring"     setup_security_monitoring
-    run_optional_step "network watchdog"        setup_network_watchdog
     run_optional_step "persistent deploy source" install_deploy_source
     write_runtime_config
+    # 2026-10: after config.env — the watchdog needs TLS_DOMAIN from it to
+    # probe through the Host/SNI gate (see _loxprox_pause_network_watchdog).
+    run_optional_step "network watchdog"        setup_network_watchdog
     run_optional_step "LoxProx Panel"           setup_gui
     health_check
     summary

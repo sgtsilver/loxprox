@@ -45,6 +45,8 @@ export AUTOREBOOT_TIME="03:00"
 export ENABLE_GUI="true"
 export GUI_PORT="1081"
 export GUI_PASSWORD=""
+# 2026-10 breach hardening: TLS mode needs a name to gate on.
+export TLS_DOMAIN="loxprox.example.com"
 
 # Override paths to use mock root
 export LOG_FILE="$MOCK_ROOT/var/log/loxprox-deploy.log"
@@ -106,6 +108,25 @@ ip() {
     esac
 }
 export -f systemctl apt-get dpkg dpkg-query nginx hostname ip
+# 2026-10: the TLS block creates a self-signed trap certificate with openssl.
+# Containers without the openssl binary (CI's Debian 12 job) get a stand-in
+# that writes the two files; real openssl is used wherever it exists.
+if ! command -v openssl >/dev/null 2>&1; then
+    openssl() {
+        local key="" out=""
+        case "$1" in
+            req)
+                while (( $# )); do
+                    case "$1" in -keyout) key="$2"; shift ;; -out) out="$2"; shift ;; esac
+                    shift
+                done
+                printf 'MOCK KEY\n' > "$key" && printf 'MOCK CERT CN=invalid\n' > "$out" ;;
+            x509)
+                [[ " $* " == *" -subject "* ]] && echo "subject=CN = invalid"
+                return 0 ;;
+        esac
+    }
+fi
 
 # Source deploy.sh functions (skip main via BASH_SOURCE guard)
 # shellcheck source=../deploy.sh
@@ -143,6 +164,18 @@ LOXPROX_DEPLOY_DIR="$MOCK_ROOT/opt/loxprox/deploy"
 LOXPROX_INSTALL_DIR="$MOCK_ROOT/opt/loxprox"
 SYSTEMD_UNIT_DIR="$MOCK_ROOT/etc/systemd/system"
 LOXPROX_STRAY_ACME_HOME="$MOCK_ROOT/stray-acme-home"
+# 2026-10 breach hardening
+NGINX_MAIN_CONF="$MOCK_ROOT/etc/nginx/nginx.conf"
+NFTABLES_D_DIR="$MOCK_ROOT/etc/nftables.d"
+SSHD_DROPIN="$MOCK_ROOT/etc/ssh/sshd_config.d/99-loxprox.conf"
+UNATTENDED_UPGRADES_CONF="$MOCK_ROOT/etc/apt/apt.conf.d/50unattended-upgrades"
+CROWDSEC_DIR="$MOCK_ROOT/etc/crowdsec"
+CROWDSEC_LOXPROX_ACQUIS="$CROWDSEC_DIR/acquis.d/loxprox.yaml"
+CROWDSEC_SCENARIO_DIR="$CROWDSEC_DIR/scenarios"
+CROWDSEC_PROFILES="$CROWDSEC_DIR/profiles.yaml"
+CROWDSEC_CONFIG_LOCAL="$CROWDSEC_DIR/config.yaml.local"
+LOXPROX_TLS_DIR="$MOCK_ROOT/etc/loxprox/tls"
+ACME_WEBROOT="$MOCK_ROOT/var/www/acme"
 
 # ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -309,9 +342,22 @@ test_setup_logrotate() {
     setup_logrotate
 
     if [[ -f "$LOGROTATE_CONF" ]]; then pass "logrotate config created"; else fail "logrotate config missing"; fi
-    if grep -q "loxone-\*.log" "$LOGROTATE_CONF"; then pass "logrotate pattern present"; else fail "logrotate pattern missing"; fi
     # LOW-005: appsec-detections.log in logrotate
     if grep -q "appsec-detections.log" "$LOGROTATE_CONF"; then pass "appsec log in logrotate"; else fail "appsec log missing from logrotate"; fi
+    # 2026-10: access + trap + trap-hosts + unknown logs 90 days, error + AppSec
+    # 14 days; every file named once (no loxone-*.log glob claiming access.log twice).
+    local stanzas
+    stanzas=$(awk '
+        /^[^ \t{}].*\.log/ { files = files " " $1; next }
+        /\{/               { if (files == "") files = " " $1; next }
+        /rotate [0-9]+/    { rot = $2 }
+        /^\}/              { print rot ":" files; files = ""; rot = "" }' "$LOGROTATE_CONF")
+    grep -qx '90: /var/log/nginx/loxone-access.log /var/log/nginx/loxprox-trap.log /var/log/nginx/loxprox-trap-hosts.log /var/log/nginx/loxprox-unknown.log' <<<"$stanzas" \
+        && pass "access + trap + trap-hosts + unknown logs rotated daily, kept 90 days" || fail "90-day stanza wrong: $stanzas"
+    grep -qx '14: /var/log/nginx/loxone-error.log /var/log/nginx/appsec-detections.log' <<<"$stanzas" \
+        && pass "error + AppSec detection logs kept 14 days" || fail "14-day stanza wrong: $stanzas"
+    grep -q 'loxone-\*\.log' "$LOGROTATE_CONF" && fail "loxone-*.log glob still present (double claim)" || pass "no overlapping loxone-*.log glob"
+    [[ "$(grep -c 'compress$' "$LOGROTATE_CONF")" -ge 2 ]] && pass "both stanzas compress" || fail "a stanza does not compress"
 }
 
 test_write_runtime_config() {
@@ -674,7 +720,7 @@ EOF
     grep -q '^[[:space:]]*listen 1080 ssl;' "$NGINX_SITE" && pass "listen line swapped to 'listen 1080 ssl;'" || fail "listen line not swapped"
     grep -q '# LOXPROX-TLS-BEGIN' "$NGINX_SITE" && pass "TLS-BEGIN marker present" || fail "TLS-BEGIN marker missing"
     grep -q '# LOXPROX-TLS-END' "$NGINX_SITE" && pass "TLS-END marker present" || fail "TLS-END marker missing"
-    grep -q 'ssl_certificate     /etc/loxprox/tls/fullchain.pem;' "$NGINX_SITE" && pass "ssl_certificate path present" || fail "ssl_certificate missing"
+    grep -qF "ssl_certificate     ${LOXPROX_TLS_DIR}/fullchain.pem;" "$NGINX_SITE" && pass "ssl_certificate path present" || fail "ssl_certificate missing"
     grep -q 'Strict-Transport-Security' "$NGINX_SITE" && pass "HSTS header present" || fail "HSTS header missing"
     # F6 — TLS forward-secrecy hardening
     grep -q 'ssl_session_tickets off;' "$NGINX_SITE" && pass "F6: ssl_session_tickets off present" || fail "F6: ssl_session_tickets off missing (PFS regression)"
@@ -734,9 +780,14 @@ test_tls_acme_listener_written() {
     # Re-target the webroot into MOCK_ROOT so non-root tests can create dirs.
     ACME_WEBROOT="$MOCK_ROOT/var/www/acme"
     rm -f "$NGINX_ACME_CONF"
-    GATEWAY_IP="192.168.42.252" _loxprox_write_acme_listener
+    GATEWAY_IP="192.168.42.252" EXTRA_SERVER_NAMES="alt.example.com" _loxprox_write_acme_listener
     [[ -f "$NGINX_ACME_CONF" ]] && pass "ACME conf.d file written" || fail "ACME conf.d not written"
-    grep -q 'listen      80 default_server;' "$NGINX_ACME_CONF" && pass ":80 listener present" || fail ":80 listen missing"
+    grep -q '^    listen      80;$' "$NGINX_ACME_CONF" && pass ":80 listener present" || fail ":80 listen missing"
+    # 2026-10: the trap in the site is the :80 default; this file must not be.
+    grep -q 'default_server' "$NGINX_ACME_CONF" && fail "ACME listener still claims default_server" \
+                                                || pass "ACME listener is not the :80 default server"
+    grep -qF "server_name ${TLS_DOMAIN} alt.example.com;" "$NGINX_ACME_CONF" && pass "ACME listener answers the gateway names only" \
+                                                                           || fail "ACME listener server_name wrong: $(grep server_name "$NGINX_ACME_CONF")"
     grep -q '/.well-known/acme-challenge/' "$NGINX_ACME_CONF" && pass "challenge location present" || fail "challenge location missing"
     grep -q 'return 301 https://\$host:1080' "$NGINX_ACME_CONF" && pass "301-to-HTTPS catch-all present" || fail "301 catch-all missing"
     rm -f "$NGINX_ACME_CONF"
@@ -1104,7 +1155,17 @@ test_cron_file_generation() {
     fi
     local jobs
     jobs=$(grep -cE '^[0-9*]' "$LOXPROX_CRON_FILE" || true)
-    [[ "$jobs" -eq 3 ]] && pass "3 job lines (ban / backup / GeoIP)" || fail "expected 3 job lines, got $jobs"
+    [[ "$jobs" -eq 4 ]] && pass "4 job lines (ban / backup / GeoIP / hub refresh)" || fail "expected 4 job lines, got $jobs"
+    # 2026-10 breach hardening
+    grep -qx '\*/15 \* \* \* \* root flock -n /run/loxprox-progressive-ban.lock /opt/loxprox/progressive-ban.py >> /var/log/loxprox-cron.log 2>&1' "$LOXPROX_CRON_FILE" \
+        && pass "progressive ban runs under flock -n /run/loxprox-progressive-ban.lock" || fail "progressive-ban line without the flock"
+    grep -qx '30 4 \* \* 0 root /opt/loxprox/hub-refresh.sh >> /var/log/loxprox-cron.log 2>&1' "$LOXPROX_CRON_FILE" \
+        && pass "hub refresh weekly, Sunday 04:30" || fail "hub-refresh line missing or wrong schedule"
+    # geoip-block.sh loads config.env itself — the cron line stays a plain call.
+    grep -qx '0 3 \* \* \* root /opt/loxprox/geoip-block.sh >> /var/log/loxprox-cron.log 2>&1' "$LOXPROX_CRON_FILE" \
+        && pass "GeoIP cron line is a plain call (no sourcing inside the crontab)" || fail "GeoIP cron line changed: $(grep geoip "$LOXPROX_CRON_FILE")"
+    grep -qF 'CONFIG_FILE="${LOXPROX_CONFIG:-/etc/loxprox/config.env}"' "$PROJECT_DIR/security-monitoring/geoip-block.sh" \
+        && pass "geoip-block.sh loads config.env itself" || fail "geoip-block.sh does not read config.env"
 
     # Regression: the shipped v1.3.0–2026-09 content must be rejected.
     local bad="$MOCK_ROOT/cron-fixture-bad"
@@ -1755,6 +1816,703 @@ test_gateway_metric_readers() {
     [[ "$out" == "[]" ]] && pass "no source → empty (reported as unreadable, never as 0)" || fail "unreadable case: $out"
 }
 
+# ── 2026-10 breach hardening ────────────────────────────────────────────────
+
+# The class nginx's `map $uri $loxprox_path_class` gives $1, evaluated from the
+# GENERATED site with nginx's map semantics: exact keys first, then the
+# regexes in the order written, first match wins, else the default. Every
+# regex in that map is ERE-compatible, so [[ =~ ]] (nocasematch for "~*") is a
+# faithful model; tests/host-integration.sh (nginx-edge) asks the real nginx.
+_path_class() {
+    local uri="$1" line key val re exact_hit="" default_class="" i rc nocase
+    local -a regexes=() classes=()
+    while IFS= read -r line; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        key="${line%%[[:space:]]*}"
+        val="${line##*[[:space:]]}"
+        val="${val%;}"
+        case "$key" in
+            default) default_class="$val" ;;
+            \"~*)    regexes+=("${key:1:${#key}-2}"); classes+=("$val") ;;
+            *)       [[ "$key" == "$uri" ]] && exact_hit="$val" ;;
+        esac
+    done < <(awk '/^map \$uri \$loxprox_path_class \{/ {on = 1; next} on && /^\}/ {exit} on' "$NGINX_SITE")
+    if [[ -n "$exact_hit" ]]; then printf '%s' "$exact_hit"; return 0; fi
+    for i in "${!regexes[@]}"; do
+        re="${regexes[$i]}"
+        nocase=0
+        if [[ "$re" == '~*'* ]]; then re="${re:2}"; nocase=1; else re="${re:1}"; fi
+        (( nocase )) && shopt -s nocasematch
+        rc=1
+        [[ "$uri" =~ $re ]] && rc=0
+        shopt -u nocasematch
+        if (( rc == 0 )); then printf '%s' "${classes[$i]}"; return 0; fi
+    done
+    printf '%s' "$default_class"
+}
+
+test_breach_nginx_classes() {
+    echo ""
+    echo "━━━ configure_nginx() — path classes, limits, scrub, server_tokens (2026-10) ━━━"
+
+    rm -f "$NGINX_SITE" "$NGINX_MAIN_CONF"
+    UNKNOWN_PATH_MODE=log REMOTE_ADMIN_PATHS=deny configure_nginx >/dev/null 2>&1
+    grep -qx 'server_tokens off;' "$NGINX_SITE" && pass "server_tokens off at http level" || fail "server_tokens off missing"
+    grep -q "^# LOXPROX-SITE-TEMPLATE-VERSION: 6$" "$NGINX_SITE" && pass "site template v6" || fail "site template not v6"
+
+    # Trusted sources: loopback, LAN, whitelist — deduplicated.
+    local geo
+    geo=$(awk '/^geo \$loxprox_lan \{/ {on = 1; next} on && /^\}/ {exit} on' "$NGINX_SITE")
+    local net
+    for net in 127.0.0.0/8 ::1 192.168.1.0/24 10.0.0.0/24; do
+        grep -qE "^[[:space:]]+${net//./\\.}[[:space:]]+1;" <<<"$geo" && pass "trusted source: $net" || fail "trusted source missing: $net"
+    done
+    [[ "$(grep -c '192\.168\.1\.0/24' <<<"$geo")" == "1" ]] && pass "LAN_SUBNET listed once although also whitelisted" \
+                                                            || fail "duplicate geo entry (nginx warns, a wrong value would win)"
+
+    # Limits: the global ones kept, auth zone and /ws/ connection cap added.
+    grep -qE 'limit_req_zone +\$loxprox_auth_key +zone=loxone_auth:10m +rate=3r/s;' "$NGINX_SITE" && pass "auth zone 3r/s" || fail "auth zone missing"
+    grep -qE '^ +limit_req +zone=loxone_auth burst=30 nodelay;' "$NGINX_SITE" && pass "auth limit burst 30 nodelay" || fail "auth limit missing"
+    grep -qE '^ +limit_req +zone=loxone_req +burst=100 nodelay;' "$NGINX_SITE" && pass "global request limit kept" || fail "global request limit lost"
+    grep -qE '"0:1" +\$binary_remote_addr;' "$NGINX_SITE" && pass "auth key only for untrusted sources on auth paths" || fail "auth key map wrong"
+    local ws
+    ws=$(awk '/^    location \/ws\/ \{/ {on = 1} on {print} on && /^    \}/ {exit}' "$NGINX_SITE")
+    grep -qE 'limit_conn loxone_ws_conn 6;' <<<"$ws" && pass "/ws/: 6 sockets per untrusted address" || fail "/ws/ connection cap missing"
+    grep -qE 'limit_conn loxone_conn +20;' <<<"$ws" && pass "/ws/ repeats the global per-IP cap" || fail "/ws/ dropped the global per-IP cap"
+
+    # Classes are enforced before AppSec and logged.
+    grep -qF 'if ($loxprox_trap)       { return 444; }' "$NGINX_SITE" && pass "trap → 444 (server rewrite phase)" || fail "trap return missing"
+    grep -qF 'if ($loxprox_deny = 403) { return 403; }' "$NGINX_SITE" && pass "admin denial → 403" || fail "403 return missing"
+    grep -qF 'if ($loxprox_deny = 404) { return 404; }' "$NGINX_SITE" && pass "unknown denial → 404" || fail "404 return missing"
+    grep -qF 'error_page 405 = @loxprox_trap;' "$NGINX_SITE" && pass "TRACE/CONNECT 405 → trap" || fail "405 not routed to the trap"
+    grep -qF 'access_log /var/log/nginx/loxprox-trap.log    loxone_scrubbed if=$loxprox_trap;' "$NGINX_SITE" \
+        && pass "trap log (loxone_scrubbed, if=)" || fail "trap access_log missing"
+    grep -qF 'access_log /var/log/nginx/loxprox-unknown.log loxone_scrubbed if=$loxprox_unknown;' "$NGINX_SITE" \
+        && pass "unknown log (loxone_scrubbed, if=)" || fail "unknown access_log missing"
+    local trap_line appsec_line
+    trap_line=$(grep -n 'if (\$loxprox_trap)' "$NGINX_SITE" | cut -d: -f1)
+    appsec_line=$(grep -n 'include .*crowdsec-appsec.conf;' "$NGINX_SITE" | cut -d: -f1)
+    [[ -n "$trap_line" && -n "$appsec_line" ]] && (( trap_line < appsec_line )) \
+        && pass "class checks precede the AppSec include" || fail "class checks not before AppSec ($trap_line vs $appsec_line)"
+    grep -qE '"0:admin" +403;' "$NGINX_SITE" && pass "REMOTE_ADMIN_PATHS=deny → admin denial entry" || fail "admin denial entry missing"
+    grep -q '"0:unknown"' "$NGINX_SITE" && fail "UNKNOWN_PATH_MODE=log must not deny unknown paths" || pass "UNKNOWN_PATH_MODE=log proxies unknown paths"
+
+    # The classes themselves, read back from the generated map.
+    local sample want got bad=0
+    while read -r sample want; do
+        got=$(_path_class "$sample")
+        [[ "$got" == "$want" ]] || { fail "class($sample) = '$got', expected '$want'"; bad=1; }
+    done <<'CLASSES'
+/.env trap
+/api/.env trap
+/.git/config trap
+/index.php trap
+/wp-login.php trap
+/wp-admin/ trap
+/cgi-bin/luci trap
+/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php trap
+/HNAP1/ trap
+/hnap1 trap
+/boaform/admin/formLogin trap
+/actuator/health trap
+/dev/fsget/log/def.log admin
+/jdev/fslist/ admin
+/dev/fsdel/x admin
+/dev/sys/reboot admin
+/jdev/sys/sendwebservice admin
+/dev/sys/wsextension/SERIAL/Reboot admin
+/dev/sps/restart admin
+/dev/sps/enumdev admin
+/dev/cfg/ip/192.168.1.5 admin
+/dev/task0/name admin
+/jdev/cfg/api app
+/jdev/cfg/apiKey app
+/jdev/sys/getcertificate app
+/dev/sys/getcertificate app
+/jdev/sys/getkey2/user app
+/jdev/sys/fenc/BLOB app
+/jdev/sps/io/0b734138-037d-034e-ffff403fb0c34b9e/on app
+/jdev/sps/LoxAPPversion3 app
+/jdev/sps/enablebinstatusupdate app
+/data/LoxAPP3.json app
+/stats/statistics.json app
+/binstatisticdata/uuid/202610 app
+/camimage/uuid app
+/ws/rfc6455 app
+/resources/favicon/apple-touch-icon.png app
+/favicon.ico app
+/get app
+/ unknown
+/robots.txt unknown
+/jdev/cfg/version unknown
+/crowdsec-appsec internal
+CLASSES
+    (( bad == 0 )) && pass "43 sample paths land in their class (trap / admin / app / unknown / internal)"
+
+    # F3 + 2026-10: token commands are scrubbed too (B's report: they were not).
+    local scrub
+    scrub=$(sed -n 's/.*"~^(?<loxsens>\(.*\))" "\${loxsens}<redacted>";.*/\1/p' "$NGINX_SITE")
+    scrub="${scrub//\(\?:/(}"
+    if [[ -n "$scrub" ]]; then
+        for sample in /jdev/sys/authwithtoken/HASH/user /jdev/sys/refreshjwt/HASH/user /jdev/sys/checktoken/HASH/user \
+                      /jdev/sys/killtoken/HASH/user /jdev/sys/getjwt/HASH/user/4/uuid/info /dev/sys/getkey2/user \
+                      /jdev/sys/getvisusalt/user /jdev/sys/enc/BLOB; do
+            [[ "$sample" =~ ^$scrub ]] && pass "scrubbed in every log: $sample" || fail "NOT scrubbed: $sample"
+        done
+        [[ "/jdev/sys/getcertificate" =~ ^$scrub ]] && fail "scrub map over-matches getcertificate" || pass "non-secret paths stay readable"
+    else
+        fail "scrub map regex not found in the site"
+    fi
+
+    # deny / allow variants regenerate the site (fingerprint).
+    UNKNOWN_PATH_MODE=deny REMOTE_ADMIN_PATHS=allow configure_nginx >/dev/null 2>&1
+    grep -qE '"0:unknown" +404;' "$NGINX_SITE" && pass "UNKNOWN_PATH_MODE=deny → local 404 for untrusted sources" || fail "deny mode: no 404 entry"
+    grep -q '"0:admin"' "$NGINX_SITE" && fail "REMOTE_ADMIN_PATHS=allow still denies admin paths" || pass "REMOTE_ADMIN_PATHS=allow → admin paths proxied"
+
+    # An operator's own server_tokens in nginx.conf wins (nginx rejects two).
+    mkdir -p "$(dirname "$NGINX_MAIN_CONF")"
+    printf 'http {\n    server_tokens off;\n}\n' > "$NGINX_MAIN_CONF"
+    configure_nginx >/dev/null 2>&1
+    grep -q '^server_tokens' "$NGINX_SITE" && fail "duplicate server_tokens next to nginx.conf's own" \
+                                         || pass "server_tokens already in nginx.conf → the site only comments it"
+    rm -f "$NGINX_MAIN_CONF"
+
+    # A malformed whitelist entry is skipped, not handed to nginx -t.
+    local saved_wl=("${CROWDSEC_WHITELIST_IPS[@]}")
+    CROWDSEC_WHITELIST_IPS=("192.168.1.0/24" "not-an-address")
+    configure_nginx >/dev/null 2>&1
+    grep -q 'not-an-address' "$NGINX_SITE" && fail "malformed whitelist entry reached the geo block" || pass "malformed whitelist entry skipped"
+    CROWDSEC_WHITELIST_IPS=("${saved_wl[@]}")
+    rm -f "$NGINX_SITE"
+}
+
+test_breach_tls_gate() {
+    echo ""
+    echo "━━━ TLS block — Host/SNI gate + trap servers (2026-10) ━━━"
+
+    local h1 h2 before after
+    rm -f "$NGINX_SITE" "$NGINX_ACME_CONF"
+    rm -rf "$LOXPROX_TLS_DIR"
+    configure_nginx >/dev/null 2>&1
+    EXTRA_SERVER_NAMES="alt.example.com" _loxprox_site_enable_tls >/dev/null 2>&1 \
+        && pass "enable returns 0" || fail "enable failed"
+    grep -qx '    server_name loxprox.example.com alt.example.com;  # LOXPROX-TLS-SERVER-NAMES' "$NGINX_SITE" \
+        && pass "real server answers TLS_DOMAIN + EXTRA_SERVER_NAMES only" || fail "gated server_name missing: $(grep server_name "$NGINX_SITE" | head -3 | tr '\n' ';')"
+    [[ "$(grep -c 'listen 1080 ssl default_server;' "$NGINX_SITE")" == "1" ]] && pass "one :1080 trap default_server" || fail ":1080 default_server count wrong"
+    [[ "$(grep -c '^    listen 1080 ssl;$' "$NGINX_SITE")" == "1" ]] && pass "real server still listen 1080 ssl" || fail "real listen line wrong"
+    [[ "$(grep -c 'listen 80 default_server;' "$NGINX_SITE")" == "1" && "$(grep -c 'listen \[::\]:80 default_server;' "$NGINX_SITE")" == "1" ]] \
+        && pass ":80 trap default_server (v4 + v6)" || fail ":80 trap default_server missing"
+    [[ "$(grep -c '^    access_log /var/log/nginx/loxprox-trap.log loxone_scrubbed;$' "$NGINX_SITE")" == "2" ]] \
+        && pass "both trap servers log to the trap log in loxone_scrubbed" || fail "trap servers do not log to the trap log"
+    # R5: Host/SNI log, written by the two trap servers only (and never read by CrowdSec).
+    [[ "$(grep -c '^    access_log /var/log/nginx/loxprox-trap-hosts.log loxprox_trap_hosts;$' "$NGINX_SITE")" == "2" \
+        && "$(grep -c 'loxprox-trap-hosts.log' "$NGINX_SITE")" == "2" ]] \
+        && pass "both trap servers (and nothing else) write the trap-hosts log" || fail "trap-hosts access_log count wrong"
+    grep -qF "log_format loxprox_trap_hosts '\$time_iso8601 \$remote_addr host=\"\$host\" sni=\"\$ssl_server_name\" '" "$NGINX_SITE" \
+        && grep -qF "'\"\$request_method \$loxone_log_uri\" \$status \"\$http_user_agent\"';" "$NGINX_SITE" \
+        && pass "loxprox_trap_hosts format: time, client, host, sni, scrubbed request, status, UA" || fail "loxprox_trap_hosts log_format missing or wrong"
+    grep -qF 'error_page 405 497 = @loxprox_trap;' "$NGINX_SITE" && pass "cleartext + foreign Host (497) and 405 → trap" || fail "trap error_page missing"
+    [[ "$(grep -c '^    return 444;$' "$NGINX_SITE")" -ge 2 ]] && pass "trap servers answer 444" || fail "trap servers lack return 444"
+    grep -qF 'error_page 497 = @loxprox_https_redirect;' "$NGINX_SITE" && grep -qF 'return 301 https://$host:1080$request_uri;' "$NGINX_SITE" \
+        && pass "real names keep the 497 → 301 grace redirect" || fail "497 → 301 for the real names lost"
+    grep -qF "ssl_certificate     ${LOXPROX_TLS_DIR}/trap-fullchain.pem;" "$NGINX_SITE" && pass "trap uses its own certificate" || fail "trap certificate not referenced"
+    if command -v openssl >/dev/null 2>&1; then
+        local subject
+        subject=$(openssl x509 -noout -subject -in "$LOXPROX_TLS_DIR/trap-fullchain.pem" 2>/dev/null)
+        grep -qE 'CN ?= ?invalid' <<<"$subject" && pass "trap certificate is self-signed CN=invalid" || fail "trap certificate missing or wrong CN ($subject)"
+        before=$(stat -c %Y "$LOXPROX_TLS_DIR/trap-fullchain.pem" 2>/dev/null)
+        sleep 1
+        _loxprox_ensure_trap_cert >/dev/null 2>&1
+        after=$(stat -c %Y "$LOXPROX_TLS_DIR/trap-fullchain.pem" 2>/dev/null)
+        [[ -n "$before" && "$before" == "$after" ]] && pass "trap certificate kept while valid (idempotent)" || fail "trap certificate regenerated needlessly"
+    fi
+    grep -q 'default_server' "$NGINX_ACME_CONF" && fail "ACME listener claims default_server next to the trap" || pass "ACME listener rewritten without default_server"
+    grep -qF 'server_name loxprox.example.com alt.example.com;' "$NGINX_ACME_CONF" && pass "ACME listener: gateway names only" || fail "ACME listener names wrong"
+    h1=$(sha256sum "$NGINX_SITE" | awk '{print $1}')
+
+    _loxprox_site_disable_tls >/dev/null 2>&1
+    grep -q 'LOXPROX-TRAP\|LOXPROX-TLS-' "$NGINX_SITE" && fail "markers left after disable" || pass "disable strips the TLS block and the trap servers"
+    grep -q 'default_server' "$NGINX_SITE" && fail "a default_server survived disable" || pass "no default_server in plain mode"
+    [[ "$(grep -c '^    server_name _;$' "$NGINX_SITE")" == "1" ]] && pass "plain mode: server_name _ (every Host) as before" || fail "server_name _ not restored"
+    grep -q '^    listen 1080;$' "$NGINX_SITE" && pass "plain listen restored" || fail "plain listen not restored"
+
+    EXTRA_SERVER_NAMES="alt.example.com" _loxprox_site_enable_tls >/dev/null 2>&1
+    h2=$(sha256sum "$NGINX_SITE" | awk '{print $1}')
+    [[ "$h1" == "$h2" ]] && pass "enable → disable → enable is byte-identical" || fail "round trip changed the site"
+
+    # A changed name regenerates the site, and the regeneration re-applies the
+    # TLS block with it (fingerprint covers the names).
+    EXTRA_SERVER_NAMES="other.example.com" configure_nginx >/dev/null 2>&1
+    grep -qF 'server_name loxprox.example.com other.example.com;' "$NGINX_SITE" && grep -q 'LOXPROX-TRAP-BEGIN' "$NGINX_SITE" \
+        && pass "changed EXTRA_SERVER_NAMES → site regenerated, gate re-applied with the new name" || fail "name change not applied"
+
+    # No name → refuse, untouched.
+    configure_nginx >/dev/null 2>&1
+    _loxprox_site_disable_tls >/dev/null 2>&1
+    h1=$(sha256sum "$NGINX_SITE" | awk '{print $1}')
+    TLS_DOMAIN="" _loxprox_site_enable_tls >/dev/null 2>&1 && fail "enable accepted an empty TLS_DOMAIN" || pass "enable refuses without TLS_DOMAIN"
+    h2=$(sha256sum "$NGINX_SITE" | awk '{print $1}')
+    [[ "$h1" == "$h2" ]] && pass "site untouched when refused" || fail "site changed although enable refused"
+
+    local names
+    names=$(TLS_DOMAIN="a.example.com" EXTRA_SERVER_NAMES="A.example.com b.example.com" ENABLE_TUNNEL=true \
+            TUNNEL_PUBLIC_HOST="relay.example.com" _loxprox_tls_server_names)
+    [[ "$names" == "a.example.com b.example.com relay.example.com" ]] && pass "server names deduplicated, tunnel host added" \
+                                                                        || fail "server names: '$names'"
+    rm -f "$NGINX_SITE" "$NGINX_ACME_CONF"
+}
+
+test_breach_firewall() {
+    echo ""
+    echo "━━━ setup_firewall() — IPv6 GeoIP set, nginx egress (2026-10) ━━━"
+
+    rm -rf "$NFTABLES_D_DIR"
+    setup_firewall >/dev/null 2>&1
+    grep -qF "include \"${NFTABLES_D_DIR}/*.conf\"" "$NFTABLES_CONF" && pass "include follows NFTABLES_D_DIR" || fail "include path wrong"
+    grep -qE '^ +ip saddr @geoip_blocklist drop$' "$NFTABLES_CONF" && grep -qE '^ +ip6 saddr @geoip_blocklist6 drop$' "$NFTABLES_CONF" \
+        && pass "input: v4 and v6 GeoIP drop rules side by side" || fail "GeoIP v6 drop rule missing"
+    local inc="$NFTABLES_D_DIR/99-geoip.conf"
+    [[ "$(grep -c '^set geoip_blocklist {' "$inc")" == "1" && "$(grep -c '^set geoip_blocklist6 {' "$inc")" == "1" ]] \
+        && pass "placeholder declares both sets once" || fail "placeholder sets wrong: $(grep '^set' "$inc" | tr '\n' ';')"
+    local v6decl
+    v6decl=$(grep -A2 '^set geoip_blocklist6 {' "$inc")
+    grep -q 'type ipv6_addr' <<<"$v6decl" && grep -q 'flags interval' <<<"$v6decl" && pass "v6 set is ipv6_addr, interval" || fail "v6 set type wrong"
+    grep -q 'Generated:' "$inc" && fail "placeholder carries 'Generated:' (the monitor would treat it as a real list)" || pass "placeholder is recognisable as one"
+
+    local out
+    out=$(awk '/^    chain output \{/ {on = 1} on {print} on && /^    \}/ {exit}' "$NFTABLES_CONF")
+    grep -q 'policy accept;' <<<"$out" && pass "output policy stays accept (root egress: acme.sh, apt, CAPI, Discord)" || fail "output policy changed"
+    local want n=0 prev=0 cur
+    for want in 'oifname "lo" accept comment "loxprox-egress"' \
+                'ct state established,related accept comment "loxprox-egress"' \
+                'meta skuid "www-data" ip daddr 192.168.1.100 tcp dport 80 accept comment "loxprox-egress"' \
+                'meta skuid "www-data" limit rate 6/minute log prefix "loxprox-egress-drop: " comment "loxprox-egress"' \
+                'meta skuid "www-data" counter drop comment "loxprox-egress"'; do
+        cur=$(grep -nF "$want" <<<"$out" | cut -d: -f1)
+        if [[ -n "$cur" ]] && (( cur > prev )); then n=$((n + 1)); prev=$cur; fi
+    done
+    (( n == 5 )) && pass "output chain: lo, established, www-data → Miniserver only, log, drop — in that order" \
+                 || fail "output chain egress rules missing or out of order ($n/5): $out"
+
+    # A pre-2026-10 include declares the v4 set only → the v6 set is appended once.
+    printf '%s\n' '# LoxProx — GeoIP blocklist' '# Generated: earlier' 'set geoip_blocklist {' '    type ipv4_addr' \
+        '    flags interval' '    elements = { 198.51.100.0/24 }' '}' > "$inc"
+    setup_firewall >/dev/null 2>&1
+    setup_firewall >/dev/null 2>&1
+    [[ "$(grep -c '^set geoip_blocklist6 {' "$inc")" == "1" ]] && pass "old v4-only include: v6 set appended exactly once" || fail "v6 set not appended once"
+    grep -q '198.51.100.0/24' "$inc" && pass "old include's v4 elements kept" || fail "v4 elements lost"
+    # geoip-block.sh's own file (both sets) is left alone.
+    printf '%s\n' '# Generated: now' 'set geoip_blocklist {' '    type ipv4_addr' '    flags interval' '}' \
+        'set geoip_blocklist6 {' '    type ipv6_addr' '    flags interval' '}' > "$inc"
+    local h1 h2
+    h1=$(sha256sum "$inc" | awk '{print $1}')
+    setup_firewall >/dev/null 2>&1
+    h2=$(sha256sum "$inc" | awk '{print $1}')
+    [[ "$h1" == "$h2" ]] && pass "geoip-block.sh's two-set include untouched" || fail "two-set include was modified"
+}
+
+test_breach_crowdsec() {
+    echo ""
+    echo "━━━ CrowdSec — scenarios, acquisition, profiles, retention, simulation (2026-10) ━━━"
+
+    local saved_backup="$BACKUP_DIR" calls="$MOCK_ROOT/cscli.calls" out rc
+    BACKUP_DIR="$MOCK_ROOT/root/loxprox-backup-cs"
+    rm -rf "$BACKUP_DIR" "$CROWDSEC_DIR"
+    mkdir -p "$BACKUP_DIR" "$CROWDSEC_DIR"
+    printf '%s\n' 'name: default_ip_remediation' 'filters:' ' - Alert.Remediation == true && Alert.GetScope() == "Ip"' \
+        'decisions:' ' - type: ban' '   duration: 4h' 'on_success: break' > "$CROWDSEC_PROFILES"
+    : > "$calls"
+    _CS_SIM_LIST="loxprox/auth-bf loxprox/unknown-path"
+    cscli() {
+        printf '%s\n' "$*" >> "$calls"
+        if [[ "$1 $2" == "simulation status" ]]; then
+            printf '%s\n' "global simulation: disabled" "Scenarios in simulation mode :"
+            local s; for s in $_CS_SIM_LIST; do printf '  - %s\n' "$s"; done
+        fi
+        return 0
+    }
+
+    out=$(UNKNOWN_PATH_MODE=log _loxprox_configure_crowdsec_bans 2>&1) && pass "ban configuration written (rc 0)" || fail "ban configuration failed: $out"
+    local f
+    for f in loxprox-scanner-trap.yaml loxprox-unknown-path.yaml loxprox-auth-bf.yaml; do
+        cmp -s "$PROJECT_DIR/crowdsec/scenarios/$f" "$CROWDSEC_SCENARIO_DIR/$f" && pass "scenario installed: $f" || fail "scenario not installed: $f"
+    done
+    cmp -s "$PROJECT_DIR/crowdsec/acquis.d/loxprox.yaml" "$CROWDSEC_LOXPROX_ACQUIS" && pass "acquis.d/loxprox.yaml installed" || fail "acquisition not installed"
+
+    [[ "$(awk '/^name:/ {printf "%s ", $2}' "$CROWDSEC_PROFILES")" == "loxprox_hard_ip default_ip_remediation default_range_remediation " ]] \
+        && pass "profiles: loxprox_hard_ip first, then the default ip / range profiles" || fail "profile order wrong: $(grep '^name:' "$CROWDSEC_PROFILES" | tr '\n' ' ')"
+    grep -qF "Alert.GetScenario() matches \"${BAN_HARD_SCENARIOS}\"" "$CROWDSEC_PROFILES" && pass "HARD profile matches BAN_HARD_SCENARIOS" || fail "HARD regex not in the profile"
+    grep -qF "Alert.GetScope() == \"Ip\" && Alert.GetScenario()" "$CROWDSEC_PROFILES" && pass "HARD profile is Ip-scoped, remediation only" || fail "HARD profile filter wrong"
+    [[ "$(awk '/duration:/ {printf "%s ", $2}' "$CROWDSEC_PROFILES")" == "168h 24h 24h " ]] \
+        && pass "first HARD duration 168h, first SOFT 24h" || fail "durations: $(awk '/duration:/ {printf "%s ", $2}' "$CROWDSEC_PROFILES")"
+    [[ "$(grep -c '^on_success: break$' "$CROWDSEC_PROFILES")" == "3" ]] && pass "every profile on_success: break" || fail "on_success: break missing"
+    grep -q 'duration: 4h' "$CROWDSEC_PROFILES.loxprox-orig" && pass "package profiles.yaml kept once as .loxprox-orig" || fail "original profiles not kept"
+    grep -qx '    max_age: 400d' "$CROWDSEC_CONFIG_LOCAL" && grep -qx '    max_items: 100000' "$CROWDSEC_CONFIG_LOCAL" \
+        && pass "config.yaml.local: flush max_age 400d, max_items 100000" || fail "config.yaml.local wrong"
+    grep -qx 'simulation enable loxprox/auth-bf loxprox/unknown-path' "$calls" && pass "log mode: auth-bf and unknown-path in simulation" \
+                                                                           || fail "simulation calls: $(tr '\n' ';' < "$calls")"
+    grep -q 'NOT confirmed' <<<"$out" && fail "flagged although cscli lists both" || pass "simulation verified via cscli simulation status"
+    # TRAP_BAN_MODE=ban (default): scanner-trap is taken OUT of simulation.
+    grep -qx 'simulation disable loxprox/scanner-trap' "$calls" && ! grep -q 'enable.*loxprox/scanner-trap' "$calls" \
+        && pass "TRAP_BAN_MODE=ban: scanner-trap leaves simulation (bans)" || fail "ban-mode calls: $(tr '\n' ';' < "$calls")"
+
+    # TRAP_BAN_MODE=observe: scanner-trap joins the simulated scenarios in the
+    # same pre-restart call, and is read back like the others.
+    : > "$calls"
+    _CS_SIM_LIST="loxprox/auth-bf loxprox/unknown-path loxprox/scanner-trap"
+    out=$(UNKNOWN_PATH_MODE=log TRAP_BAN_MODE=observe _loxprox_configure_crowdsec_bans 2>&1)
+    grep -qx 'simulation enable loxprox/auth-bf loxprox/unknown-path loxprox/scanner-trap' "$calls" \
+        && ! grep -q 'disable loxprox/scanner-trap' "$calls" \
+        && pass "TRAP_BAN_MODE=observe: scanner-trap in simulation (alerts, no ban)" || fail "observe-mode calls: $(tr '\n' ';' < "$calls")"
+    grep -q 'NOT confirmed' <<<"$out" && fail "observe mode: verified scenario reported missing" || pass "observe mode: read back via cscli simulation status"
+    grep -q 'TRAP_BAN_MODE=observe: trap hits are logged and alerted, NOT banned' <<<"$out" \
+        && pass "observe mode is announced in the deploy output" || fail "observe mode not announced"
+    : > "$calls"
+    _CS_SIM_LIST="loxprox/auth-bf loxprox/unknown-path"
+    out=$(UNKNOWN_PATH_MODE=log TRAP_BAN_MODE=observe _loxprox_configure_crowdsec_bans 2>&1); rc=$?
+    # R4 fail safe: unconfirmed → the scenario is removed, the step degraded.
+    grep -q 'Simulation for loxprox/scanner-trap NOT confirmed' <<<"$out" && (( rc == 1 )) \
+        && [[ ! -e "$CROWDSEC_SCENARIO_DIR/loxprox-scanner-trap.yaml" && -e "$CROWDSEC_SCENARIO_DIR/loxprox-auth-bf.yaml" ]] \
+        && pass "observe mode, scanner-trap not confirmed simulated: its scenario removed (cannot ban), rc 1" \
+        || fail "unconfirmed observe simulation (rc=$rc): $(ls "$CROWDSEC_SCENARIO_DIR")"
+    : > "$calls"
+    _CS_SIM_LIST="loxprox/auth-bf loxprox/unknown-path loxprox/scanner-trap"
+    out=$(UNKNOWN_PATH_MODE=log TRAP_BAN_MODE=ban _loxprox_configure_crowdsec_bans 2>&1)
+    grep -q 'TRAP_BAN_MODE=ban, but cscli still lists loxprox/scanner-trap in simulation' <<<"$out" \
+        && pass "ban mode: a scanner-trap still in simulation is warned about" || fail "lingering trap simulation not reported"
+    _CS_SIM_LIST="loxprox/auth-bf loxprox/unknown-path"
+
+    # Second run: the .loxprox-orig copy stays the package's.
+    UNKNOWN_PATH_MODE=log _loxprox_configure_crowdsec_bans >/dev/null 2>&1
+    grep -q 'duration: 4h' "$CROWDSEC_PROFILES.loxprox-orig" && pass "re-run keeps the original copy" || fail "re-run overwrote .loxprox-orig"
+
+    # deny mode: unknown-path bans; a scenario cscli does not list is flagged.
+    : > "$calls"
+    _CS_SIM_LIST=""
+    out=$(UNKNOWN_PATH_MODE=deny PROGRESSIVE_BAN_WINDOW_DAYS=400 BAN_HARD_LADDER="7d 90d" _loxprox_configure_crowdsec_bans 2>&1)
+    grep -qx 'simulation disable loxprox/unknown-path' "$calls" && grep -qx 'simulation enable loxprox/auth-bf' "$calls" \
+        && pass "deny mode: unknown-path leaves simulation, auth-bf stays" || fail "deny-mode simulation calls: $(tr '\n' ';' < "$calls")"
+    grep -q 'Simulation for loxprox/auth-bf NOT confirmed' <<<"$out" && [[ ! -e "$CROWDSEC_SCENARIO_DIR/loxprox-auth-bf.yaml" ]] \
+        && [[ -e "$CROWDSEC_SCENARIO_DIR/loxprox-unknown-path.yaml" ]] \
+        && pass "deny mode, auth-bf not confirmed simulated: only auth-bf removed (unknown-path may ban here)" || fail "missing simulation not handled"
+    _CS_SIM_LIST="loxprox/unknown-path"
+    out=$(UNKNOWN_PATH_MODE=log _loxprox_configure_crowdsec_bans 2>&1); rc=$?
+    if (( rc == 1 )) && grep -q 'error\|ERROR' <<<"$out" && grep -q 'Simulation for loxprox/auth-bf NOT confirmed' <<<"$out" \
+            && [[ ! -e "$CROWDSEC_SCENARIO_DIR/loxprox-auth-bf.yaml" ]] \
+            && [[ -e "$CROWDSEC_SCENARIO_DIR/loxprox-unknown-path.yaml" && -e "$CROWDSEC_SCENARIO_DIR/loxprox-scanner-trap.yaml" ]]; then
+        pass "R4: fake cscli not listing auth-bf → error naming it, its file removed before any restart, rc 1 (degraded)"
+    else
+        fail "R4 fail safe (rc=$rc): $(ls "$CROWDSEC_SCENARIO_DIR"); $out"
+    fi
+    _CS_SIM_LIST="loxprox/auth-bf loxprox/unknown-path"
+    grep -qx '   duration: 168h' "$CROWDSEC_PROFILES" && pass "7d ladder → Go duration 168h in the profile" || fail "d-ladder not converted"
+    grep -qx '    max_age: 435d' "$CROWDSEC_CONFIG_LOCAL" && pass "window 400 days → alert history 435 days" || fail "max_age not raised with the window"
+    BAN_HARD_LADDER="x 90d" _loxprox_configure_crowdsec_bans >/dev/null 2>&1 && fail "bad ladder accepted" || pass "bad first ladder value refused"
+
+    # A stock acquis.yaml with the nginx glob is reported (double reading).
+    printf '%s\n' 'filenames:' '  - /var/log/nginx/*.log' 'labels:' '  type: nginx' > "$CROWDSEC_DIR/acquis.yaml"
+    out=$(_loxprox_configure_crowdsec_bans 2>&1)
+    grep -q 'read twice' <<<"$out" && pass "acquis.yaml /var/log/nginx/* glob reported (events would count double)" || fail "double acquisition not reported"
+    rm -f "$CROWDSEC_DIR/acquis.yaml"
+
+    # Rollback puts this run's files back: profiles from the run's backup,
+    # files that did not exist before removed.
+    rm -rf "$BACKUP_DIR" "$CROWDSEC_SCENARIO_DIR" "$CROWDSEC_LOXPROX_ACQUIS" "$CROWDSEC_CONFIG_LOCAL"
+    mkdir -p "$BACKUP_DIR"
+    cp "$CROWDSEC_PROFILES.loxprox-orig" "$CROWDSEC_PROFILES"
+    _loxprox_configure_crowdsec_bans >/dev/null 2>&1
+    _loxprox_crowdsec_rollback_bans && pass "rollback runs" || fail "rollback reported nothing to do"
+    grep -q 'duration: 4h' "$CROWDSEC_PROFILES" && ! grep -q LOXPROX-MANAGED "$CROWDSEC_PROFILES" \
+        && pass "rollback restored the previous profiles.yaml" || fail "profiles not restored"
+    [[ ! -e "$CROWDSEC_CONFIG_LOCAL" && ! -e "$CROWDSEC_LOXPROX_ACQUIS" && ! -e "$CROWDSEC_SCENARIO_DIR/loxprox-auth-bf.yaml" ]] \
+        && pass "rollback removed files that did not exist before" || fail "rollback left new files behind"
+    _loxprox_crowdsec_rollback_bans && fail "second rollback claimed work" || pass "nothing left to roll back"
+
+    unset -f cscli
+    unset _CS_SIM_LIST
+    BACKUP_DIR="$saved_backup"
+}
+
+test_breach_sshd() {
+    echo ""
+    echo "━━━ SSH drop-in — PermitRootLogin no, AllowUsers (2026-10) ━━━"
+
+    # A synthetic account database: admin (sudo, key, bash), plain (key,
+    # bash, no sudo), svc (sudo, key, nologin), nokey (sudo, bash, no key).
+    local pw="$MOCK_ROOT/ssh-passwd" home="$MOCK_ROOT/ssh-home" u
+    : > "$pw"
+    for u in admin plain svc nokey; do
+        mkdir -p "$home/$u/.ssh"
+        printf '%s:x:%d:%d::%s:%s\n' "$u" $((1000 + ${#u})) $((1000 + ${#u})) "$home/$u" \
+            "$([[ "$u" == svc ]] && echo /usr/sbin/nologin || echo /bin/bash)" >> "$pw"
+        [[ "$u" == nokey ]] || printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEKEYFORTESTSONLY %s@ci\n' "$u" > "$home/$u/.ssh/authorized_keys"
+    done
+    local saved_pw="$LOXPROX_PASSWD_FILE"
+    LOXPROX_PASSWD_FILE="$pw"
+    getent() { [[ "$1" == "passwd" ]] && grep "^$2:" "$pw"; }
+    id() { case "$2" in admin|svc|nokey) echo "$2 sudo" ;; *) echo "$2" ;; esac; }
+
+    SSH_ALLOW_USERS="" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
+    grep -qx 'PermitRootLogin no' "$SSHD_DROPIN" && pass "HARD: PermitRootLogin no (admin: key + login shell + sudo)" || fail "HARD: PermitRootLogin not 'no'"
+    grep -q '^AllowUsers' "$SSHD_DROPIN" && fail "AllowUsers written with SSH_ALLOW_USERS empty" || pass "SSH_ALLOW_USERS empty → no AllowUsers"
+    grep -qx 'PasswordAuthentication no' "$SSHD_DROPIN" && pass "HARD keeps key-only auth" || fail "PasswordAuthentication changed"
+
+    # (a) the keyed account must be able to become root.
+    rm -f "$home/admin/.ssh/authorized_keys"
+    SSH_ALLOW_USERS="" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
+    grep -qx 'PermitRootLogin prohibit-password' "$SSHD_DROPIN" \
+        && pass "only a non-sudo account (plain) and a nologin one (svc) have keys → prohibit-password (no lockout)" \
+        || fail "root login switched off with no sudo-capable keyed account"
+    printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEKEYFORTESTSONLY admin@ci\n' > "$home/admin/.ssh/authorized_keys"
+
+    SSH_ALLOW_USERS="admin backup@192.168.1.0/24" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
+    grep -qx 'AllowUsers admin backup@192.168.1.0/24' "$SSHD_DROPIN" && pass "AllowUsers written verbatim" || fail "AllowUsers line wrong: $(grep AllowUsers "$SSHD_DROPIN")"
+    grep -qx 'PermitRootLogin no' "$SSHD_DROPIN" && pass "…with root login off (admin is listed, keyed, sudo)" || fail "listed sudo admin did not allow PermitRootLogin no"
+    SSH_ALLOW_USERS="plain" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
+    grep -qx 'AllowUsers plain' "$SSHD_DROPIN" && grep -qx 'PermitRootLogin prohibit-password' "$SSHD_DROPIN" \
+        && pass "AllowUsers limited to a non-sudo account → root login kept (key only)" || fail "AllowUsers plain: $(grep -E 'AllowUsers|PermitRootLogin' "$SSHD_DROPIN" | tr '\n' ' ')"
+
+    SSH_ALLOW_USERS="ghost" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
+    grep -q '^AllowUsers' "$SSHD_DROPIN" && fail "AllowUsers for a non-existent account (lockout)" || pass "AllowUsers refused: no listed account exists"
+    # (b) a login shell is required in both modes.
+    SSH_ALLOW_USERS="svc" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
+    grep -q '^AllowUsers' "$SSHD_DROPIN" && fail "HARD: AllowUsers for a nologin account" || pass "HARD: AllowUsers refused for a nologin account"
+    SSH_ALLOW_USERS="svc" _loxprox_write_soft_ssh_drop_in >/dev/null 2>&1
+    grep -q '^AllowUsers' "$SSHD_DROPIN" && fail "SOFT: AllowUsers for a nologin account" || pass "SOFT: AllowUsers refused for a nologin account"
+    SSH_ALLOW_USERS="nokey" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
+    grep -q '^AllowUsers' "$SSHD_DROPIN" && fail "AllowUsers although no listed account has a key (key-only lockout)" || pass "HARD: AllowUsers refused: no listed account has a key"
+
+    SSH_ALLOW_USERS="nokey" _loxprox_write_soft_ssh_drop_in >/dev/null 2>&1
+    grep -qx 'AllowUsers nokey' "$SSHD_DROPIN" && pass "SOFT mode writes AllowUsers for a password account with a login shell" || fail "SOFT mode lost AllowUsers"
+    grep -qx 'PermitRootLogin yes' "$SSHD_DROPIN" && pass "SOFT mode keeps root password login (only way in)" || fail "SOFT mode PermitRootLogin changed"
+
+    # (c) --finalize-ssh loads deploy.conf, so SSH_ALLOW_USERS applies there too.
+    local finalize
+    finalize=$(awk '/if \[\[ "\$\{1:-\}" == "--finalize-ssh" \]\]; then/ {on = 1} on {print} on && /^    fi$/ {exit}' "$PROJECT_DIR/deploy.sh")
+    grep -q '_loxprox_load_config' <<<"$finalize" && grep -q '_loxprox_validate_hardening_config' <<<"$finalize" \
+        && pass "--finalize-ssh loads and validates deploy.conf before setup_ssh_hardening" || fail "--finalize-ssh ignores deploy.conf: $finalize"
+
+    unset -f getent id
+    LOXPROX_PASSWD_FILE="$saved_pw"
+    rm -f "$SSHD_DROPIN"
+}
+
+test_breach_unattended_upgrades() {
+    echo ""
+    echo "━━━ setup_unattended_upgrades() — Origins-Pattern (2026-10) ━━━"
+
+    setup_unattended_upgrades >/dev/null 2>&1
+    local uu="$UNATTENDED_UPGRADES_CONF"
+    # shellcheck disable=SC2016  # literal ${distro_codename} expected in the file
+    grep -qF '"origin=Debian,codename=${distro_codename},label=Debian";' "$uu" && pass "main archive by codename + label" || fail "main archive pattern missing"
+    # shellcheck disable=SC2016
+    grep -qF '"origin=Debian,codename=${distro_codename}-security,label=Debian-Security";' "$uu" && pass "security archive by codename + label" || fail "security pattern missing"
+    grep -q '^Unattended-Upgrade::Allowed-Origins' "$uu" && fail "archive-based Allowed-Origins still active" || pass "no Allowed-Origins (archive match missed oldstable-security)"
+    local patterns
+    patterns=$(awk '/^Unattended-Upgrade::Origins-Pattern/,/^\};/' "$uu")
+    grep -qi 'crowdsec\|packagecloud' <<<"$patterns" \
+        && fail "CrowdSec repository in the unattended origins" || pass "CrowdSec repository not upgraded unattended"
+    grep -qx 'Unattended-Upgrade::Automatic-Reboot-Time "03:00";' "$uu" && grep -qx 'Unattended-Upgrade::Remove-Unused-Dependencies "true";' "$uu" \
+        && pass "other settings kept" || fail "other u-u settings lost"
+    [[ -f "$(dirname "$uu")/20auto-upgrades" ]] && pass "20auto-upgrades next to it" || fail "20auto-upgrades missing"
+}
+
+test_breach_runtime_config() {
+    echo ""
+    echo "━━━ write_runtime_config() — new keys reach config.env (2026-10) ━━━"
+
+    write_runtime_config >/dev/null 2>&1
+    local key missing="" back
+    for key in ENABLE_TLS TLS_DOMAIN EXTRA_SERVER_NAMES UNKNOWN_PATH_MODE TRAP_BAN_MODE REMOTE_ADMIN_PATHS BAN_HARD_LADDER \
+               BAN_SOFT_LADDER BAN_HARD_SCENARIOS PROGRESSIVE_BAN_WINDOW_DAYS SESSION_ALERT_ENABLED AUTH_RATE_ALERT_PER_CYCLE \
+               SSH_ALLOW_USERS GEOIP_IPV6_ENABLED GEOIP_URL_BASE6 ASN_LEARNING_DAYS SEC_UPDATE_MAX_AGE_DAYS; do
+        grep -q "^${key}=\"" "$GATEWAY_CONFIG_FILE" || missing+=" $key"
+    done
+    [[ -z "$missing" ]] && pass "config.env carries all 17 hardening keys" || fail "config.env lacks:$missing"
+    grep -qx 'TRAP_BAN_MODE="ban"' "$GATEWAY_CONFIG_FILE" && pass "TRAP_BAN_MODE defaults to ban" || fail "TRAP_BAN_MODE default wrong"
+    TRAP_BAN_MODE=observe write_runtime_config >/dev/null 2>&1
+    back=$(set +u; source "$GATEWAY_CONFIG_FILE"; printf '%s' "$TRAP_BAN_MODE")
+    [[ "$back" == "observe" ]] && pass "TRAP_BAN_MODE=observe round-trips through config.env" || fail "TRAP_BAN_MODE in config.env: '$back'"
+    write_runtime_config >/dev/null 2>&1
+    back=$(set +u; source "$GATEWAY_CONFIG_FILE"; printf '%s' "$BAN_HARD_SCENARIOS")
+    [[ "$back" == "$_LOXPROX_HARD_SCENARIOS_DEFAULT" ]] && pass "BAN_HARD_SCENARIOS survives sourcing config.env unchanged" \
+                                                      || fail "BAN_HARD_SCENARIOS changed by sourcing: $back"
+    back=$(awk -F= '/^BAN_HARD_SCENARIOS=/ {sub(/^BAN_HARD_SCENARIOS=/, ""); gsub(/^"|"$/, ""); print}' "$GATEWAY_CONFIG_FILE")
+    [[ "$back" == "$_LOXPROX_HARD_SCENARIOS_DEFAULT" ]] && pass "…and a KEY=\"value\" reader (progressive-ban.py) gets it verbatim" \
+                                                      || fail "line-parsed BAN_HARD_SCENARIOS differs: $back"
+    grep -qx 'AUTH_RATE_ALERT_PER_CYCLE="20"' "$GATEWAY_CONFIG_FILE" && grep -qx 'PROGRESSIVE_BAN_WINDOW_DAYS="365"' "$GATEWAY_CONFIG_FILE" \
+        && pass "contract defaults (20 / 365)" || fail "defaults wrong in config.env"
+}
+
+test_breach_validation() {
+    echo ""
+    echo "━━━ _loxprox_validate_hardening_config() (2026-10) ━━━"
+
+    _loxprox_validate_hardening_config >/dev/null 2>&1 && pass "defaults validate" || fail "defaults rejected"
+    local case_ ok
+    while IFS='|' read -r case_ ok; do
+        [[ -n "$case_" ]] || continue
+        if ( eval "$case_"; _loxprox_validate_hardening_config >/dev/null 2>&1 ); then
+            [[ "$ok" == "ok" ]] && pass "accepted: $case_" || fail "accepted although invalid: $case_"
+        else
+            [[ "$ok" == "bad" ]] && pass "rejected: $case_" || fail "rejected although valid: $case_"
+        fi
+    done <<'CASES'
+UNKNOWN_PATH_MODE=DENY|ok
+UNKNOWN_PATH_MODE=block|bad
+TRAP_BAN_MODE=Observe|ok
+TRAP_BAN_MODE=ban|ok
+TRAP_BAN_MODE=warn|bad
+TRAP_BAN_MODE=""|bad
+REMOTE_ADMIN_PATHS=maybe|bad
+EXTRA_SERVER_NAMES="a.example.com *.b.example.com"|ok
+EXTRA_SERVER_NAMES="a.example.com;evil"|bad
+EXTRA_SERVER_NAMES=".example.com"|ok
+EXTRA_SERVER_NAMES="www.example.*"|ok
+EXTRA_SERVER_NAMES="mail.*"|ok
+EXTRA_SERVER_NAMES="192.168.1.50"|ok
+EXTRA_SERVER_NAMES="home-1.example.net"|ok
+EXTRA_SERVER_NAMES="*"|bad
+EXTRA_SERVER_NAMES="a*b.example.com"|bad
+EXTRA_SERVER_NAMES="*example.com"|bad
+EXTRA_SERVER_NAMES="*.*"|bad
+EXTRA_SERVER_NAMES="example"|bad
+EXTRA_SERVER_NAMES="-bad.example.com"|bad
+EXTRA_SERVER_NAMES="a..example.com"|bad
+EXTRA_SERVER_NAMES="."|bad
+EXTRA_SERVER_NAMES="*.example.*"|bad
+BAN_HARD_LADDER="7d 90d 365d"|ok
+BAN_HARD_LADDER="7 days"|bad
+BAN_SOFT_LADDER=""|bad
+BAN_HARD_SCENARIOS='^(crowdsecurity/(?=x).+)$'|bad
+BAN_HARD_SCENARIOS='^(a`id`)$'|bad
+BAN_HARD_SCENARIOS='^(a$(id))$'|bad
+BAN_HARD_SCENARIOS='^(a$HOME)$'|bad
+BAN_HARD_SCENARIOS='^(?:loxprox/scanner-trap|crowdsecurity/vpatch-.+)$'|ok
+PROGRESSIVE_BAN_WINDOW_DAYS=0|bad
+AUTH_RATE_ALERT_PER_CYCLE=lots|bad
+SESSION_ALERT_ENABLED=maybe|bad
+SSH_ALLOW_USERS='admin "root"'|bad
+SSH_ALLOW_USERS="admin backup@192.168.1.0/24"|ok
+GEOIP_URL_BASE6="http://example.com/v6"|bad
+CASES
+    if command -v python3 >/dev/null 2>&1; then
+        ( BAN_HARD_SCENARIOS='^(unclosed$'; _loxprox_validate_hardening_config >/dev/null 2>&1 ) \
+            && fail "unbalanced regex accepted" || pass "unbalanced regex rejected (Python re compile)"
+    fi
+    local saved="$UNKNOWN_PATH_MODE"
+    UNKNOWN_PATH_MODE="LOG"
+    _loxprox_validate_hardening_config >/dev/null 2>&1
+    [[ "$UNKNOWN_PATH_MODE" == "log" ]] && pass "modes normalised to lower case" || fail "UNKNOWN_PATH_MODE not normalised"
+    UNKNOWN_PATH_MODE="$saved"
+}
+
+# The reboot-loop guard (feedback: a probe that misreads a healthy gateway
+# reboots it every cycle). With the Host/SNI gate, 127.0.0.1 is the trap's —
+# every local probe must ask for the real name.
+test_breach_probes() {
+    echo ""
+    echo "━━━ :1080 probes send the real name (deploy health check + watchdogs) (2026-10) ━━━"
+
+    local calls="$MOCK_ROOT/curl.calls" code sysd="$MOCK_ROOT/systemctl.calls"
+
+    # The watchdog an EARLIER deploy installed probes plain 127.0.0.1 — the
+    # trap's. It is paused before the gate goes live in TLS mode.
+    systemctl() { printf '%s\n' "$*" >> "$sysd"; return 0; }
+    : > "$sysd"
+    ENABLE_TLS=true _loxprox_pause_network_watchdog >/dev/null 2>&1
+    # disable, not stop: a stopped-but-enabled timer returns at the next boot.
+    grep -qx 'disable --now network-watchdog.timer' "$sysd" && pass "TLS deploy disables the running network watchdog before the gate" \
+                                                          || fail "network watchdog not disabled: $(tr '\n' ';' < "$sysd")"
+    (( _LOXPROX_WATCHDOG_PAUSED == 1 )) && pass "the pause is recorded for the EXIT notice" || fail "pause not recorded"
+    # A run that ends before re-arming says so (timer inactive here).
+    systemctl() { [[ "$1" == "is-active" ]] && return 1; return 0; }
+    out=$(_loxprox_watchdog_paused_notice 2>&1)
+    grep -q 'network-watchdog → NOT ARMED' <<<"$out" && grep -q 'Re-arm by re-running: sudo bash deploy.sh' <<<"$out" \
+        && pass "a run that dies paused prints NOT ARMED + how to re-arm" || fail "no paused notice: $out"
+    _LOXPROX_WATCHDOG_PAUSED=0
+    out=$(_loxprox_watchdog_paused_notice 2>&1)
+    [[ -z "$out" ]] && pass "no notice once re-armed" || fail "notice although not paused: $out"
+    trap cleanup EXIT   # the pause installed its own EXIT trap in this shell
+    systemctl() { printf '%s\n' "$*" >> "$sysd"; return 0; }
+    : > "$sysd"
+    rm -f "$NGINX_SITE"
+    ENABLE_TLS=false _loxprox_pause_network_watchdog >/dev/null 2>&1
+    grep -q 'disable\|^stop' "$sysd" && fail "plain deploy paused the watchdog for nothing" || pass "plain deploy (no gate) leaves the watchdog running"
+    systemctl() { true; }
+
+    MOCK_HTTPS="200"; MOCK_HTTP="200"
+    curl() {
+        local a url=""
+        for a in "$@"; do [[ "$a" == http://* || "$a" == https://* ]] && url="$a"; done
+        printf '%s\n' "$*" >> "$calls"
+        case "$url" in
+            https://*) printf '%s' "$MOCK_HTTPS" ;;
+            *)         printf '%s' "$MOCK_HTTP" ;;
+        esac
+    }
+
+    # deploy.sh health probe: the site's ACTUAL mode decides.
+    configure_nginx >/dev/null 2>&1
+    _loxprox_site_enable_tls >/dev/null 2>&1
+    : > "$calls"
+    _loxprox_probe_listener >/dev/null 2>&1 && pass "health probe passes in TLS mode" || fail "health probe failed in TLS mode"
+    grep -qF -- "--resolve ${TLS_DOMAIN}:1080:127.0.0.1" "$calls" && grep -qF "https://${TLS_DOMAIN}:1080/jdev/cfg/api" "$calls" \
+        && pass "TLS mode: probe asks https://${TLS_DOMAIN}:1080 resolved to 127.0.0.1" || fail "TLS probe: $(cat "$calls")"
+    _loxprox_site_disable_tls >/dev/null 2>&1
+    : > "$calls"
+    ENABLE_TLS=true _loxprox_probe_listener >/dev/null 2>&1
+    grep -qx -- "-sk -o /dev/null -w %{http_code} --max-time 10 http://127.0.0.1:1080/jdev/cfg/api" "$calls" \
+        && pass "plain site (even with ENABLE_TLS=true, e.g. a degraded TLS step): plain 127.0.0.1 probe" || fail "plain probe: $(cat "$calls")"
+    rm -f "$NGINX_SITE" "$NGINX_ACME_CONF"
+
+    # network-watchdog.sh: the probe functions, extracted and run as shipped.
+    local wd="$PROJECT_DIR/security-monitoring/network-watchdog.sh" fn
+    for fn in probe_status nginx_local_status check_nginx_local; do
+        eval "$(awk -v f="$fn" '$0 ~ "^" f "\\(\\) \\{" {on = 1} on {print} on && /^\}/ {exit}' "$wd")"
+    done
+    # shellcheck disable=SC2034  # read by the extracted watchdog functions
+    NGINX_LOCAL="" NGINX_PROBE_PATH="/jdev/cfg/api"
+    local wd_tls_domain="loxprox.example.com"
+    : > "$calls"; MOCK_HTTPS="200"
+    code=$(ENABLE_TLS=true TLS_DOMAIN="$wd_tls_domain" nginx_local_status)
+    [[ "$code" == "200" ]] && grep -qF -- "--resolve ${wd_tls_domain}:1080:127.0.0.1" "$calls" && grep -qF "https://${wd_tls_domain}:1080/jdev/cfg/api" "$calls" \
+        && pass "watchdog, TLS: real name via loopback (200)" || fail "watchdog TLS probe: code=$code calls=$(tr '\n' ';' < "$calls")"
+    : > "$calls"; MOCK_HTTPS="000"; MOCK_HTTP="301"
+    if ENABLE_TLS=true TLS_DOMAIN="$wd_tls_domain" check_nginx_local; then
+        grep -qF "Host: ${wd_tls_domain}" "$calls" && pass "watchdog, TLS listener not up (degraded step): plain + Host fallback is healthy (301)" \
+                                                   || fail "watchdog fallback did not send the Host header"
+    else
+        fail "watchdog reads a 301 grace redirect as nginx down"
+    fi
+    grep -q -e 'https://127\.0\.0\.1' -e '127\.0\.0\.1:1080/$' "$calls" \
+        && fail "watchdog probed 127.0.0.1 by IP over TLS or '/' (the trap / unknown class)" \
+        || pass "watchdog never asks the trap (bare IP over TLS) or '/'"
+    : > "$calls"; MOCK_HTTP="404"
+    if ENABLE_TLS=false TLS_DOMAIN="" check_nginx_local; then
+        grep -qF 'http://127.0.0.1:1080/jdev/cfg/api' "$calls" && pass "watchdog, plain mode without a domain: 127.0.0.1, app path; 404 counts as alive" \
+                                                              || fail "plain probe URL wrong: $(cat "$calls")"
+    else
+        fail "watchdog treats a 404 (nginx answered) as a failure — reboot risk"
+    fi
+    MOCK_HTTPS="000"; MOCK_HTTP="000"
+    ENABLE_TLS=true TLS_DOMAIN="$wd_tls_domain" check_nginx_local && fail "watchdog healthy although nothing answers" || pass "no answer at all → unhealthy"
+
+    # tunnel-watchdog.sh: same rule for its local Miniserver check.
+    local tw="$PROJECT_DIR/security-monitoring/tunnel-watchdog.sh" block
+    block=$(awk '/^NGINX_LOCAL=/ {on = 1} on {print} on && /^fi$/ {exit}' "$tw")
+    local tw_url
+    tw_url=$(ENABLE_TLS=false TLS_DOMAIN="" bash -c "set -u; WATCHDOG_NGINX_URL=''; $block; printf '%s' \"\$NGINX_LOCAL\"")
+    [[ "$tw_url" == "http://127.0.0.1:1080/jdev/cfg/api" ]] && pass "tunnel watchdog probes an app path, not '/'" || fail "tunnel watchdog URL: $tw_url"
+    tw_url=$(ENABLE_TLS=true TLS_DOMAIN="$wd_tls_domain" bash -c "set -u; WATCHDOG_NGINX_URL=''; $block; printf '%s %s' \"\$NGINX_LOCAL\" \"\${NGINX_LOCAL_ARGS[*]}\"")
+    [[ "$tw_url" == "https://${wd_tls_domain}:1080/jdev/cfg/api -k --resolve ${wd_tls_domain}:1080:127.0.0.1" ]] \
+        && pass "tunnel watchdog in TLS mode: real name via loopback" || fail "tunnel watchdog TLS URL: $tw_url"
+
+    unset -f curl probe_status nginx_local_status check_nginx_local
+    unset MOCK_HTTPS MOCK_HTTP NGINX_LOCAL NGINX_PROBE_PATH
+}
+
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 
 cleanup() {
@@ -1815,6 +2573,17 @@ test_setup_journald
 test_setup_auditd
 test_install_deploy_source
 test_site_template_v3_upgrade
+
+# 2026-10 breach hardening
+test_breach_validation
+test_breach_nginx_classes
+test_breach_tls_gate
+test_breach_firewall
+test_breach_crowdsec
+test_breach_sshd
+test_breach_unattended_upgrades
+test_breach_runtime_config
+test_breach_probes
 
 # 2026-10 deploy follow-ups
 test_secure_install_dir

@@ -61,7 +61,17 @@ TUNNEL_PUBLIC_HOST="${TUNNEL_PUBLIC_HOST:-}"
 PROBE_TIMEOUT="${TUNNEL_PROBE_TIMEOUT:-10}"
 # Same local listener the network watchdog probes — used to tell a broken
 # tunnel apart from a Miniserver outage the relay is faithfully forwarding.
-NGINX_LOCAL="${WATCHDOG_NGINX_URL:-http://127.0.0.1:1080/}"
+# 2026-10: an app-class path, never "/" (UNKNOWN_PATH_MODE=deny answers "/"
+# with nginx's own 404, which would hide a 502). In TLS mode the listener is
+# gated on Host/SNI, so the probe asks for TLS_DOMAIN resolved to loopback
+# (v2.0 refuses TLS + tunnel together; this keeps the probe right if that
+# ever changes).
+NGINX_LOCAL="${WATCHDOG_NGINX_URL:-http://127.0.0.1:1080/jdev/cfg/api}"
+NGINX_LOCAL_ARGS=()
+if [[ -z "${WATCHDOG_NGINX_URL:-}" && "${ENABLE_TLS:-false}" == "true" && -n "${TLS_DOMAIN:-}" ]]; then
+    NGINX_LOCAL="https://${TLS_DOMAIN}:1080/jdev/cfg/api"
+    NGINX_LOCAL_ARGS=(-k --resolve "${TLS_DOMAIN}:1080:127.0.0.1")
+fi
 
 # ── State / Logging ───────────────────────────────────────────────────────────
 STATE_DIR="/var/lib/loxprox"
@@ -99,14 +109,15 @@ http_status() {
     # append a fallback with `|| echo` — that concatenates two codes into
     # "000000", which then matches no case branch. Normalise instead.
     local url="$1" timeout="$2" code
-    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time "$timeout" "$url" 2>/dev/null) || true
+    shift 2
+    code=$(curl -s "$@" -o /dev/null -w '%{http_code}' --max-time "$timeout" "$url" 2>/dev/null) || true
     [[ "$code" =~ ^[0-9]{3}$ ]] || code="000"
     echo "$code"
 }
 
 # M11: is the gateway's own nginx returning 502/504 (Miniserver down)?
 backend_down_locally() {
-    case "$(http_status "$NGINX_LOCAL" 5)" in
+    case "$(http_status "$NGINX_LOCAL" 5 "${NGINX_LOCAL_ARGS[@]}")" in
         502|504) return 0 ;;
         *)       return 1 ;;
     esac

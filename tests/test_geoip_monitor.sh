@@ -24,6 +24,9 @@ GEOIP="$PROJECT_DIR/security-monitoring/geoip-block.sh"
 MONITOR="$PROJECT_DIR/security-monitoring/gateway-monitor.sh"
 WORK="$(mktemp -d /tmp/loxprox-test-geoip.XXXXXXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
+# geoip-block.sh loads $LOXPROX_CONFIG (default /etc/loxprox/config.env) —
+# never the host's own file in a test; a case that wants one passes its own.
+export LOXPROX_CONFIG="$WORK/no-config.env"
 
 # ── fakes ────────────────────────────────────────────────────────────────────
 
@@ -37,6 +40,11 @@ gen_zone 300 > "$ZONES/cn.zone"
 gen_zone 200 > "$ZONES/ru.zone"
 gen_zone 3   > "$ZONES/kp.zone"
 gen_zone 50  > "$ZONES/ir.zone"
+# IPv6 (documentation space 2001:db8::/32). kp has no IPv6 list: ipdeny answers 404.
+gen_zone6() { local n="$1" i; for ((i = 0; i < n; i++)); do printf '2001:db8:%x::/48\n' $((i + 1)); done; }
+gen_zone6 120 > "$ZONES/cn.zone6"
+gen_zone6 80  > "$ZONES/ru.zone6"
+gen_zone6 10  > "$ZONES/ir.zone6"
 
 cat > "$FAKEBIN/curl" <<'EOF'
 #!/bin/bash
@@ -51,22 +59,31 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 cc=$(basename "$url" .zone)
-echo "$cc" >> "$FAKE_CURL_LOG"
-n=$(grep -cx "$cc" "$FAKE_CURL_LOG")
-mode_var="FAKE_MODE_${cc}"
-case "${!mode_var:-ok}" in
-    ok)      cp "$FAKE_ZONES/$cc.zone" "$out"; printf 200 ;;
+src="$FAKE_ZONES/$cc.zone"; mode_var="FAKE_MODE_${cc}"; logname="$cc"
+if [[ "$url" == */ipv6/* ]]; then
+    src="$FAKE_ZONES/$cc.zone6"; mode_var="FAKE6_MODE_${cc}"; logname="${cc}6"
+    [[ -f "$src" ]] || FAKE_DEFAULT=http404
+fi
+echo "$logname" >> "$FAKE_CURL_LOG"
+n=$(grep -cx "$logname" "$FAKE_CURL_LOG")
+case "${!mode_var:-${FAKE_DEFAULT:-ok}}" in
+    http404) echo "curl: (22) The requested URL returned error: 404" >&2; printf 404; exit 22 ;;
+    ok)      cp "$src" "$out"; printf 200 ;;
     timeout) echo "curl: (28) Operation timed out after 120001 milliseconds with 65536 bytes received" >&2; printf 000; exit 28 ;;
     flaky)   if (( n < 3 )); then echo "curl: (28) Operation timed out" >&2; printf 000; exit 28; fi
-             cp "$FAKE_ZONES/$cc.zone" "$out"; printf 200 ;;
+             cp "$src" "$out"; printf 200 ;;
     http503) echo "curl: (22) The requested URL returned error: 503" >&2; printf 503; exit 22 ;;
     html)    printf '<html><body>Too many requests</body></html>\n' > "$out"; printf 200 ;;
-    shrunk)  head -n 2 "$FAKE_ZONES/$cc.zone" > "$out"; printf 200 ;;
+    shrunk)  head -n 2 "$src" > "$out"; printf 200 ;;
 esac
 EOF
 cat > "$FAKEBIN/nft" <<'EOF'
 #!/bin/bash
 echo "$*" | cut -c1-80 >> "$FAKE_NFT_LOG"
+if [[ "${1:-}" == -f ]]; then
+    cat "$2" >> "$FAKE_NFT_LOG.files"
+    if [[ -n "${FAKE_NFT_REJECT6:-}" ]] && grep -q geoip_blocklist6 "$2"; then exit 1; fi
+fi
 exit 0
 EOF
 printf '#!/bin/bash\nexit 0\n' > "$FAKEBIN/logger"
@@ -77,11 +94,13 @@ chmod +x "$FAKEBIN"/*
 run_geoip() {
     local case_dir="$1"; shift
     mkdir -p "$case_dir/state"
-    : > "$case_dir/curl.log"; : > "$case_dir/nft.log"
+    : > "$case_dir/curl.log"; : > "$case_dir/nft.log"; : > "$case_dir/nft.log.files"
     env PATH="$FAKEBIN:$PATH" FAKE_ZONES="$ZONES" FAKE_CURL_LOG="$case_dir/curl.log" FAKE_NFT_LOG="$case_dir/nft.log" \
         GEOIP_BLOCKLIST_DIR="$case_dir/state" GEOIP_NFT_FILE="$case_dir/99-geoip.conf" \
         GEOIP_RETRY_DELAYS="0 0 0" "$@" bash "$GEOIP" > "$case_dir/out.log" 2>&1
 }
+
+seed_v6() { mkdir -p "$1/state"; cp "$ZONES"/*.zone6 "$1/state/"; printf '1790000000 210\n' > "$1/state/last-success6"; }
 
 seed_last_known_good() {   # a previous successful run's state
     local case_dir="$1"
@@ -92,7 +111,7 @@ seed_last_known_good() {   # a previous successful run's state
 }
 
 # The active state only: lists, success stamp, nftables include (not the logs).
-tree_sum() { (cd "$1" && find state 99-geoip.conf -type f ! -name 'last-failure' -exec sha256sum {} + | sort | sha256sum); }
+tree_sum() { (cd "$1" && find state 99-geoip.conf -type f ! -name 'last-failure' ! -name '*6' -exec sha256sum {} + | sort | sha256sum); }
 
 # ── geoip-block.sh ───────────────────────────────────────────────────────────
 
@@ -124,7 +143,7 @@ test_geoip_live_failure_keeps_last_known_good() {
     local c="$WORK/fail"
     seed_last_known_good "$c"
     local before; before=$(tree_sum "$c")
-    run_geoip "$c" FAKE_MODE_cn=timeout FAKE_MODE_ru=http503; local rc=$?
+    run_geoip "$c" GEOIP_IPV6_ENABLED=false FAKE_MODE_cn=timeout FAKE_MODE_ru=http503; local rc=$?
     [[ $rc -eq 1 ]] && pass "exit 1" || fail "exit $rc"
     grep -q 'failed countries: cn ru' "$c/out.log" && pass "same summary line as before" || fail "summary line missing"
     grep -q 'cn: curl exit 28, HTTP 000: curl: (28) Operation timed out' "$c/out.log" \
@@ -141,14 +160,14 @@ test_geoip_rejects_bad_lists() {
     local c="$WORK/html"
     seed_last_known_good "$c"
     local before; before=$(tree_sum "$c")
-    run_geoip "$c" FAKE_MODE_cn=html; local rc=$?
+    run_geoip "$c" GEOIP_IPV6_ENABLED=false FAKE_MODE_cn=html; local rc=$?
     [[ $rc -eq 1 ]] && grep -q 'cn: 1 line(s) are not IPv4 CIDRs' "$c/out.log" \
         && pass "an HTML page served with 200 is rejected" || fail "html accepted (rc=$rc)"
     [[ "$(tree_sum "$c")" == "$before" ]] && pass "…and the last known-good list stays" || fail "state changed after html"
 
     c="$WORK/shrunk"
     seed_last_known_good "$c"
-    run_geoip "$c" FAKE_MODE_cn=shrunk; rc=$?
+    run_geoip "$c" GEOIP_IPV6_ENABLED=false FAKE_MODE_cn=shrunk; rc=$?
     [[ $rc -eq 1 ]] && grep -q 'cn: shrank from 300 to 2 ranges' "$c/out.log" \
         && pass "a list that lost >50% against last known-good is rejected" || fail "shrink accepted (rc=$rc): $(grep cn: "$c/out.log")"
 
@@ -173,6 +192,120 @@ test_geoip_disabled_marker() {
     [[ ! -s "$c/curl.log" ]] && pass "nothing downloaded" || fail "downloaded while disabled"
     run_geoip "$c"
     [[ ! -e "$c/state/disabled" ]] && pass "an enabled run clears the marker" || fail "marker survived an enabled run"
+}
+
+test_geoip_ipv6() {
+    echo ""; echo "━━━ geoip-block.sh — IPv6 ━━━"
+    local c="$WORK/v6ok" rc
+    run_geoip "$c"; rc=$?
+    [[ $rc -eq 0 ]] && pass "exit 0 with both families" || fail "exit $rc: $(tail -3 "$c/out.log")"
+    read -r _ ranges6 < "$c/state/last-success6" 2>/dev/null
+    read -r _ ranges4 < "$c/state/last-success" 2>/dev/null
+    [[ "$ranges6" == "210" && "$ranges4" == "553" ]] && pass "separate stamps: 553 v4 ranges, 210 v6 ranges" || fail "stamps: v4=$ranges4 v6=$ranges6"
+    grep -q 'no IPv6 list published for kp (HTTP 404)' "$c/out.log" && pass "a country without an IPv6 list (kp, 404) is skipped, not a failure" || fail "kp 404 not handled: $(cat "$c/out.log")"
+    grep -q '^set geoip_blocklist6 {' "$c/99-geoip.conf" && grep -q 'type ipv6_addr' "$c/99-geoip.conf" \
+        && [[ $(grep -c '/48' "$c/99-geoip.conf") -eq 210 ]] && pass "nftables include declares geoip_blocklist6 with 210 ranges" || fail "v6 include wrong"
+    grep -q '^set geoip_blocklist {' "$c/99-geoip.conf" && [[ $(grep -c '/24' "$c/99-geoip.conf") -eq 553 ]] \
+        && pass "…next to the unchanged IPv4 set" || fail "v4 set wrong"
+    grep -q 'flush set inet filter geoip_blocklist6' "$c/nft.log.files" && grep -q 'add element inet filter geoip_blocklist6 { 2001:db8:' "$c/nft.log.files" \
+        && [[ $(grep -c 'geoip_blocklist6' "$c/nft.log.files") -eq 2 ]] && pass "live v6 set loaded as one nft transaction (flush + add in one file)" || fail "v6 load: $(cat "$c/nft.log.files" | cut -c1-120)"
+    [[ $(grep -cx cn6 "$c/curl.log") -eq 1 && $(grep -cx kp6 "$c/curl.log") -eq 1 ]] && pass "404 is not retried" || fail "attempts: $(grep 6 "$c/curl.log" | sort | uniq -c | tr '\n' ' ')"
+
+    c="$WORK/v6fail"
+    run_geoip "$c" FAKE6_MODE_cn=timeout; rc=$?
+    [[ $rc -eq 1 ]] && pass "a v6 failure exits 1…" || fail "exit $rc"
+    [[ -s "$c/state/last-success" && ! -e "$c/state/last-failure" ]] && [[ $(grep -c '/24' "$c/99-geoip.conf") -eq 553 ]] \
+        && pass "…but the v4 refresh still completed" || fail "v4 lost to a v6 failure"
+    grep -q 'cn: curl exit 28' "$c/state/last-failure6" && [[ ! -e "$c/state/last-success6" ]] && pass "v6 failure stamped separately, with its reason" || fail "last-failure6: $(cat "$c/state/last-failure6" 2>&1)"
+    grep -q 'add element inet filter geoip_blocklist ' "$c/nft.log" && ! grep -q 'geoip_blocklist6' "$c/nft.log.files" && pass "v4 set loaded, v6 set untouched" || fail "live set handling wrong"
+
+    c="$WORK/v4fail"
+    run_geoip "$c" FAKE_MODE_cn=timeout; rc=$?
+    [[ $rc -eq 1 && -s "$c/state/last-success6" && ! -e "$c/state/last-success" ]] && grep -q 'cn: curl exit 28' "$c/state/last-failure" \
+        && pass "a v4 failure does not stop the v6 refresh" || fail "v4 failure blocked v6 (rc=$rc)"
+
+    c="$WORK/v6bad"
+    seed_last_known_good "$c"; seed_v6 "$c"
+    local before; before=$(cd "$c/state" && sha256sum ./*.zone6 | sha256sum)
+    run_geoip "$c" FAKE6_MODE_cn=html; rc=$?
+    grep -q 'cn: 1 line(s) are not IPv6 CIDRs' "$c/out.log" && pass "v6: an HTML page served with 200 is rejected" || fail "v6 html accepted (rc=$rc)"
+    run_geoip "$c" FAKE6_MODE_cn=shrunk; rc=$?
+    grep -q 'cn: shrank from 120 to 2 ranges' "$c/out.log" && pass "v6: shrink guard applies" || fail "v6 shrink: $(grep cn: "$c/out.log")"
+    [[ "$(cd "$c/state" && sha256sum ./*.zone6 | sha256sum)" == "$before" ]] && pass "v6: last known-good lists untouched after rejection" || fail "v6 lists changed"
+
+    c="$WORK/v6none"
+    run_geoip "$c" FAKE6_MODE_cn=http404 FAKE6_MODE_ru=http404 FAKE6_MODE_ir=http404; rc=$?
+    grep -q 'no country list is published' "$c/out.log" && [[ $rc -eq 1 && -s "$c/state/last-success" ]] \
+        && pass "no v6 list published at all counts as a v6 failure; v4 unaffected" || fail "all-404 handling (rc=$rc)"
+
+    c="$WORK/v6reject"
+    run_geoip "$c" FAKE_NFT_REJECT6=1; rc=$?
+    grep -q 'transaction rejected' "$c/state/last-failure6" && [[ $rc -eq 1 && -s "$c/state/last-success" && ! -e "$c/state/last-success6" ]] \
+        && pass "nft rejecting the v6 transaction: failure stamped, v4 stamp kept" || fail "nft reject (rc=$rc): $(cat "$c/state/last-failure6" 2>&1)"
+
+    c="$WORK/v6off"
+    run_geoip "$c" GEOIP_IPV6_ENABLED=false; rc=$?
+    [[ $rc -eq 0 && $(grep -c 6 "$c/curl.log") -eq 0 && ! -e "$c/state/last-success6" ]] && pass "GEOIP_IPV6_ENABLED=false skips the v6 refresh" || fail "v6 ran while disabled"
+
+    # 2026-10: the setting reaches the script through config.env (the cron
+    # run has no environment) — written the way deploy.sh's
+    # write_runtime_config writes it.
+    c="$WORK/v6off-config"
+    mkdir -p "$c"
+    printf '%s\n' '# LoxProx — Runtime Configuration' 'GEOIP_IPV6_ENABLED="false"' 'GEOIP_URL_BASE6=""' > "$c/config.env"
+    run_geoip "$c" LOXPROX_CONFIG="$c/config.env"; rc=$?
+    [[ $rc -eq 0 && $(grep -c 6 "$c/curl.log") -eq 0 && ! -e "$c/state/last-success6" && -s "$c/state/last-success" ]] \
+        && pass "GEOIP_IPV6_ENABLED=\"false\" in LOXPROX_CONFIG is honoured (v4 refreshed, v6 skipped)" \
+        || fail "config.env setting ignored (rc=$rc, v6 fetches: $(grep -c 6 "$c/curl.log"))"
+    c="$WORK/v6on-config"
+    mkdir -p "$c"
+    printf '%s\n' 'GEOIP_IPV6_ENABLED="true"' 'GEOIP_URL_BASE6=""' > "$c/config.env"
+    run_geoip "$c" LOXPROX_CONFIG="$c/config.env"; rc=$?
+    [[ $rc -eq 0 && $(grep -cx cn6 "$c/curl.log") -eq 1 && -s "$c/state/last-success6" ]] \
+        && pass "control: GEOIP_IPV6_ENABLED=\"true\" (and an empty GEOIP_URL_BASE6 = the default) refreshes v6" \
+        || fail "control: v6 not refreshed with the config enabling it (rc=$rc)"
+
+    # 2026-10: switching IPv6 off means no v6 blocking — the set is emptied,
+    # never rebuilt from the *.zone6 lists an enabled run left behind.
+    local v6block
+    c="$WORK/v6switchoff"
+    run_geoip "$c"; rc=$?
+    [[ $rc -eq 0 && $(grep -c '/48' "$c/99-geoip.conf") -eq 210 ]] && pass "v6 loaded first (210 ranges, enabled)" || fail "setup: v6 not loaded (rc=$rc)"
+    run_geoip "$c" GEOIP_IPV6_ENABLED=false; rc=$?
+    v6block=$(awk '/^set geoip_blocklist6 \{/ {on = 1} on {print} on && /^\}/ {exit}' "$c/99-geoip.conf")
+    if [[ $rc -eq 0 && -n "$v6block" ]] && ! grep -q 'elements' <<<"$v6block" && ! grep -q '2001:db8' "$c/99-geoip.conf"; then
+        pass "then GEOIP_IPV6_ENABLED=false: geoip_blocklist6 still declared, without elements"
+    else
+        fail "v6 set after switching off (rc=$rc): $v6block"
+    fi
+    grep -q '^set geoip_blocklist {' "$c/99-geoip.conf" && [[ $(grep -c '/24' "$c/99-geoip.conf") -eq 553 ]] \
+        && pass "…the IPv4 set intact (553 ranges)" || fail "v4 set damaged by switching v6 off"
+    compgen -G "$c/state/*.zone6" >/dev/null || [[ -e "$c/state/last-success6" || -e "$c/state/last-failure6" ]] \
+        && fail "v6 lists or stamps left behind: $(ls "$c/state")" || pass "…v6 lists and stamps removed (nothing to rebuild from, nothing to call stale)"
+    grep -q 'flush set inet filter geoip_blocklist6' "$c/nft.log" && ! grep -q 'add element inet filter geoip_blocklist6' "$c/nft.log.files" \
+        && pass "…and the live v6 set flushed, nothing re-added" || fail "live v6 set not emptied: $(cat "$c/nft.log")"
+
+    # Same switch on a night the v4 download fails: the include is still
+    # rewritten (v4 from its last known-good lists, v6 empty).
+    c="$WORK/v6switchoff-v4fail"
+    run_geoip "$c"
+    run_geoip "$c" GEOIP_IPV6_ENABLED=false FAKE_MODE_cn=timeout; rc=$?
+    v6block=$(awk '/^set geoip_blocklist6 \{/ {on = 1} on {print} on && /^\}/ {exit}' "$c/99-geoip.conf")
+    [[ $rc -eq 1 ]] && ! grep -q 'elements' <<<"$v6block" && [[ $(grep -c '/24' "$c/99-geoip.conf") -eq 553 ]] \
+        && pass "switching v6 off empties the set even when the v4 refresh fails (v4 last known-good kept)" \
+        || fail "v6 off + v4 failure (rc=$rc): $v6block"
+
+    local out
+    out=$( export GEOIP_BLOCKLIST_DIR="$WORK/unit6"; mkdir -p "$WORK/unit6"
+           # shellcheck source=../security-monitoring/geoip-block.sh
+           source "$GEOIP"
+           set +e
+           printf '2001:db8::/32\n\n2a00::/12  \n' > "$WORK/unit6/a"; validate_zone "$WORK/unit6/a" xx 6; echo "rc=$?"
+           printf '2001:db8::/129\n' > "$WORK/unit6/b"; validate_zone "$WORK/unit6/b" xx 6; echo "rc=$?"
+           printf '10.0.0.0/8\n' > "$WORK/unit6/c"; validate_zone "$WORK/unit6/c" xx 6; echo "rc=$?"
+           printf 'deadbeef/32\n' > "$WORK/unit6/d"; validate_zone "$WORK/unit6/d" xx 6; echo "rc=$?" )
+    [[ $(grep -c 'rc=0' <<<"$out") -eq 1 && $(grep -c 'rc=1' <<<"$out") -eq 3 ]] \
+        && pass "v6 validation: /129, an IPv4 CIDR and a colon-less string rejected; blanks tolerated" || fail "v6 verdicts: $out"
 }
 
 # ── gateway-monitor.sh: staleness alert ──────────────────────────────────────
@@ -248,6 +381,63 @@ test_monitor_staleness() {
     grep -qE '^[[:space:]]+check_geoip_staleness$' "$MONITOR" && pass "main() runs check_geoip_staleness" || fail "not wired into main()"
 }
 
+test_monitor_staleness_v6() {
+    echo ""; echo "━━━ gateway-monitor.sh — IPv6 staleness ━━━"
+    : > "$MON/discord.log"; rm -f "$MON/state/"*stale_alerted "$MON/geoip/"* "$MON/99-geoip.conf"
+    local now; now=$(date +%s)
+    printf '%s 553\n' $((now - 3600)) > "$MON/geoip/last-success"
+    run_check
+    [[ "$(grep -c 'IPv6' "$MON/discord.log")" == "0" ]] && pass "no IPv6 stamps (pre-IPv6 install) → no IPv6 alert" || fail "alerted without v6 stamps"
+    printf '%s 210\n' $((now - 4 * 86400)) > "$MON/geoip/last-success6"
+    printf '%s cn: curl exit 28\n' $((now - 600)) > "$MON/geoip/last-failure6"
+    run_check; run_check
+    local msg; msg=$(grep 'GeoIP IPv6 Blocklist Stale' "$MON/discord.log")
+    [[ $(grep -c 'GeoIP IPv6 Blocklist Stale' "$MON/discord.log") -eq 1 ]] && grep -q 'The GeoIP IPv6 blocklist has not refreshed for 4 day(s)' <<<"$msg" \
+        && grep -q 'Last error: cn: curl exit 28' <<<"$msg" && pass "stale v6 list → one IPv6 WARNING, deduplicated, with the v6 reason" || fail "v6 stale: $msg"
+    [[ "$(grep -c 'GeoIP Blocklist Stale' "$MON/discord.log")" == "0" ]] && pass "…while the fresh v4 list stays quiet" || fail "v4 alerted"
+
+    # 2026-10: GEOIP_IPV6_ENABLED=false — the same stale v6 stamps alert nothing.
+    : > "$MON/discord.log"; rm -f "$MON/state/"*stale_alerted
+    ( export GEOIP_IPV6_ENABLED=false; run_check )
+    [[ "$(grep -c 'IPv6' "$MON/discord.log")" == "0" ]] && pass "GEOIP_IPV6_ENABLED=false: stale v6 stamps raise no IPv6 alert" \
+                                                       || fail "alerted on v6 while it is disabled: $(cat "$MON/discord.log")"
+    rm -f "$MON/geoip/"*
+
+    # check_firewall_integrity: a declared but empty geoip_blocklist6 is
+    # CRITICAL while IPv6 blocking is on, and by design while it is off.
+    local fwbin="$WORK/fwbin"
+    mkdir -p "$fwbin"
+    cat > "$fwbin/nft" <<'EOF'
+#!/bin/bash
+case "$*" in
+    "list chain inet filter input")          echo 'chain input { type filter hook input priority filter; policy drop; ip saddr @geoip_blocklist drop; ip6 saddr @geoip_blocklist6 drop; }' ;;
+    "list chain inet filter output")         echo 'chain output { type filter hook output priority filter; policy accept; oifname "lo" accept comment "loxprox-egress" }' ;;
+    "list set inet filter geoip_blocklist")  echo 'set geoip_blocklist { type ipv4_addr; flags interval; elements = { 100.64.0.0/24 } }' ;;
+    "list set inet filter geoip_blocklist6") echo 'set geoip_blocklist6 { type ipv6_addr; flags interval; }' ;;
+esac
+exit 0
+EOF
+    chmod +x "$fwbin/nft"
+    local v6flag
+    for v6flag in false true; do
+        : > "$MON/discord.log"; rm -f "$MON/state/alert_"*
+        ( export PATH="$fwbin:$PATH" LOXPROX_CONFIG="$MON/none.env" LOXPROX_STATE_DIR="$MON/state" LOXPROX_MONITOR_LOG="$MON/monitor.log" \
+                 DISCORD_ALERT_PATH="$MON/discord.sh" LOXPROX_GEOIP_DIR="$MON/geoip" GEOIP_IPV6_ENABLED="$v6flag" \
+                 FW_SET_CHECK_INTERVAL=0
+          # shellcheck source=../security-monitoring/gateway-monitor.sh
+          source "$MONITOR"
+          set +e
+          check_firewall_integrity ) >/dev/null 2>&1
+        if [[ "$v6flag" == "false" ]]; then
+            grep -q 'geoip_blocklist6 is empty' "$MON/discord.log" && fail "empty v6 set alerted although GEOIP_IPV6_ENABLED=false" \
+                                                                   || pass "GEOIP_IPV6_ENABLED=false: the empty v6 set is no firewall alert"
+        else
+            grep -q '^CRITICAL|.*geoip_blocklist6 is empty' "$MON/discord.log" && pass "control: the same empty v6 set with IPv6 on → CRITICAL" \
+                                                                              || fail "control: empty v6 set not reported with IPv6 on"
+        fi
+    done
+}
+
 echo "═══════════════════════════════════════════════════════════════════════════════"
 echo "  LoxProx — GeoIP refresh + staleness tests"
 echo "═══════════════════════════════════════════════════════════════════════════════"
@@ -256,7 +446,9 @@ test_geoip_retries_then_succeeds
 test_geoip_live_failure_keeps_last_known_good
 test_geoip_rejects_bad_lists
 test_geoip_disabled_marker
+test_geoip_ipv6
 test_monitor_staleness
+test_monitor_staleness_v6
 
 echo ""
 echo "═══════════════════════════════════════════════════════════════════════════════"

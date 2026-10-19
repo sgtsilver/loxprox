@@ -1,0 +1,15 @@
+# LoxProx — trap and unknown-path logs (installed by deploy.sh as
+# /etc/crowdsec/acquis.d/loxprox.yaml; acquis.d/nginx.yaml keeps the main
+# access and error logs).
+#
+# Type nginx: both files are written in the loxone_scrubbed format, so the
+# stock crowdsecurity/nginx-logs parser reads them like the main access log
+# and the generic HTTP scenarios see them too. The loxprox/* scenarios tell the
+# files apart by evt.Line.Src (the file name), never by a label.
+# loxprox-trap-hosts.log (the trap's Host/SNI view, for people deciding
+# TRAP_BAN_MODE) is deliberately not read: same requests, other format.
+filenames:
+  - /var/log/nginx/loxprox-trap.log
+  - /var/log/nginx/loxprox-unknown.log
+labels:
+  type: nginx
