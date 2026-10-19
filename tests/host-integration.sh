@@ -1259,9 +1259,75 @@ t_crowdsec() {
     rm -rf "$dir"
 }
 
+# The package's crowdsec-hubupdate.timer runs `cscli hub upgrade` on EVERY
+# installed item nightly, with no snapshot and no rollback. deploy.sh's
+# _loxprox_mask_package_hubupdate against the real unit and the real systemd:
+# masked, stopped, idempotent, and still masked after what the package itself
+# does — its postinst's `systemctl enable --now` and a package reinstall.
+t_crowdsec_hubupdate() {
+    section "CrowdSec — the package's crowdsec-hubupdate.timer is masked (2026-10)"
+    local unit=crowdsec-hubupdate.timer inst out rc ver
+    if [[ -z "$(systemctl list-unit-files --no-legend "$unit" 2>/dev/null)" ]]; then
+        fail "$unit is not shipped by this CrowdSec package — the real-unit checks cannot run"
+        return
+    fi
+    out=$(systemctl is-enabled "$unit" 2>/dev/null)
+    [[ "$out" == enabled ]] && pass "the package enabled $unit (the blanket nightly upgrade)" || note "$unit was '$out' before the mask step"
+
+    inst=$(mktemp -d /var/tmp/loxprox-hubupdate.XXXXXX)
+    install -m 0755 "$REPO/security-monitoring/hub-refresh.sh" "$inst/hub-refresh.sh"
+    if (LOXPROX_INSTALL_DIR="$inst"; _loxprox_mask_package_hubupdate) >>"$LOG_FILE" 2>&1; then
+        pass "_loxprox_mask_package_hubupdate returns 0"
+    else
+        fail "_loxprox_mask_package_hubupdate returned non-zero"
+    fi
+    out=$(systemctl is-enabled "$unit" 2>/dev/null)
+    [[ "$out" == masked ]] && pass "$unit is masked" || fail "$unit is '$out' after the mask step"
+    [[ "$(readlink "/etc/systemd/system/$unit")" == /dev/null ]] \
+        && pass "persistent mask: /etc/systemd/system/$unit → /dev/null" || fail "no persistent mask link: $(ls -l "/etc/systemd/system/$unit" 2>&1)"
+    systemctl is-active --quiet "$unit" && fail "$unit is still active (scheduled)" || pass "$unit stopped — no longer scheduled"
+    if (LOXPROX_INSTALL_DIR="$inst"; _loxprox_mask_package_hubupdate) >>"$LOG_FILE" 2>&1 \
+            && [[ "$(systemctl is-enabled "$unit" 2>/dev/null)" == masked ]]; then
+        pass "a second deploy run: still masked, returns 0"
+    else
+        fail "second run: $(systemctl is-enabled "$unit" 2>&1)"
+    fi
+
+    # The line the package's postinst runs on every configure (with || true).
+    systemctl enable --now "$unit" >/dev/null 2>&1 \
+        && fail "systemctl enable --now succeeded on the masked timer" \
+        || pass "the postinst's 'systemctl enable --now $unit' is refused while masked"
+    [[ "$(systemctl is-enabled "$unit" 2>/dev/null)" == masked ]] && ! systemctl is-active --quiet "$unit" \
+        && pass "…and it stays masked and inactive" || fail "after enable --now: $(systemctl is-enabled "$unit" 2>&1)"
+    # The whole maintainer-script path of a package upgrade, same version.
+    ver=$(dpkg-query -W -f='${Version}' crowdsec 2>/dev/null)
+    DEBIAN_FRONTEND=noninteractive timeout 600 apt-get install -y -qq --reinstall "crowdsec=$ver" >>"$LOG_FILE" 2>&1; rc=$?
+    if (( rc == 0 )); then
+        pass "package reinstall (crowdsec $ver) ran its maintainer scripts"
+    else
+        fail "apt-get install --reinstall crowdsec=$ver exited $rc — log below"
+        tail -15 "$LOG_FILE" | sed 's/^/    /'
+    fi
+    out=$(systemctl is-enabled "$unit" 2>/dev/null)
+    [[ "$out" == masked ]] && ! systemctl is-active --quiet "$unit" \
+        && pass "…and $unit is still masked and inactive afterwards" || fail "after the package reinstall $unit is '$out'"
+
+    # A unit this systemd does not know: nothing to mask, nothing created.
+    note "systemd's is-enabled for an unknown unit prints: '$(systemctl is-enabled loxprox-ci-absent.timer 2>/dev/null)'"
+    # shellcheck disable=SC2034  # read by deploy.sh's _loxprox_mask_package_hubupdate
+    out=$( (LOXPROX_INSTALL_DIR="$inst" CROWDSEC_HUBUPDATE_TIMER=loxprox-ci-absent.timer; _loxprox_mask_package_hubupdate) 2>&1 ); rc=$?
+    if [[ $rc -eq 0 ]] && grep -q 'not present' <<<"$out" \
+            && [[ ! -e /etc/systemd/system/loxprox-ci-absent.timer && ! -L /etc/systemd/system/loxprox-ci-absent.timer ]]; then
+        pass "an absent unit → 'not present', returns 0, no mask link created"
+    else
+        fail "absent unit: rc=$rc out: $out"
+    fi
+    rm -rf "$inst"
+}
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
-(( $# > 0 )) || { echo "usage: $0 <cron|journald|auditd|logrotate|nginx-apparmor|nginx-appsec|nginx-edge|nft-check|debian12-host|crowdsec> ..." >&2; exit 2; }
+(( $# > 0 )) || { echo "usage: $0 <cron|journald|auditd|logrotate|nginx-apparmor|nginx-appsec|nginx-edge|nft-check|debian12-host|crowdsec|crowdsec-hubupdate> ..." >&2; exit 2; }
 for s in "$@"; do
     case "$s" in
         cron)                      t_cron ;;
@@ -1286,6 +1352,7 @@ for s in "$@"; do
         debian12-host)             t_debian12_host ;;
         debian12-host-inner)       t_debian12_host_inner; exit $(( FAILED > 0 )) ;;
         crowdsec)                  t_crowdsec ;;
+        crowdsec-hubupdate)        t_crowdsec_hubupdate ;;
         *) echo "unknown section: $s" >&2; exit 2 ;;
     esac
 done

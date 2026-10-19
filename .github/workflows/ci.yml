@@ -247,7 +247,7 @@ jobs:
         run: sudo CI=true bash tests/host-integration.sh nft-check debian12-host
 
   crowdsec-scenarios:
-    name: Host integration — CrowdSec scenarios, profiles, retention, simulation
+    name: Host integration — CrowdSec scenarios, profiles, retention, simulation, hub-update timer
     # Pinned: the packagecloud CrowdSec repository must carry this release.
     runs-on: ubuntu-24.04
     env:
@@ -296,6 +296,9 @@ jobs:
 
       - name: configure_crowdsec, cscli explain and a replay against the real daemon
         run: sudo CI=true bash tests/host-integration.sh crowdsec
+
+      - name: The package's crowdsec-hubupdate.timer masked by deploy.sh (real unit, real systemd, package reinstall)
+        run: sudo CI=true bash tests/host-integration.sh crowdsec-hubupdate
 
   markdown-lint:
     runs-on: ubuntu-latest

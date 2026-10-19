@@ -1,11 +1,18 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════════════
-# LoxProx — CrowdSec Hub Refresh (weekly)
+# LoxProx — CrowdSec Hub Refresh (daily)
 # ═══════════════════════════════════════════════════════════════════════════════
-# The AppSec virtual-patching rules are how new CVEs reach this gateway, and the
-# hub is otherwise never refreshed after deploy. Weekly (Sunday 04:30, cron):
+# The AppSec virtual-patching rules are how new CVEs reach this gateway. This
+# script is the ONLY unattended hub update. The CrowdSec package ships its own
+# crowdsec-hubupdate.timer, which runs `cscli hub update && cscli hub upgrade`
+# every night: EVERY installed item, no snapshot, no rollback. deploy.sh masks
+# that timer (2026-10), and this script runs daily instead, so the rules stay
+# as fresh as the package timer kept them. (A CrowdSec package upgrade runs
+# `cscli hub upgrade` in its postinst too; unattended-upgrades does not take
+# packages from the CrowdSec repository, so that happens only when an operator
+# upgrades CrowdSec.) Daily (04:30, cron):
 #   1. snapshot the hub state (index, items, installed-item links) to a dated
-#      tarball under /var/lib/loxprox/hub-snapshots/ (the last 4 are kept)
+#      tarball under /var/lib/loxprox/hub-snapshots/ (the last 7 are kept)
 #   2. cscli hub update
 #   3. upgrade ONLY crowdsecurity/appsec-virtual-patching — nothing else is
 #      upgraded unattended (a parser or scenario change can alter what is banned)
@@ -14,7 +21,9 @@
 #      If the reload fails or crowdsec is not active: restore the snapshot,
 #      restart, re-check, CRITICAL alert. AppSec fails closed — with crowdsec
 #      down nginx answers 500 to every request, so this must not wait for a human.
-#   5. one Discord alert listing the OTHER outdated hub items for a human
+#   5. one Discord alert listing the OTHER outdated hub items for a human —
+#      only when that list differs from the one last reported (see
+#      report_outdated); the log lists them on every run
 # ═══════════════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
@@ -42,7 +51,9 @@ CSCLI_TIMEOUT="${HUB_REFRESH_CSCLI_TIMEOUT:-300}"
 HUB_DIR="${LOXPROX_CROWDSEC_HUB_DIR:-/var/lib/crowdsec/hub}"
 CROWDSEC_DIR="${LOXPROX_CROWDSEC_DIR:-/etc/crowdsec}"
 SNAPSHOT_DIR="${LOXPROX_HUB_SNAPSHOT_DIR:-/var/lib/loxprox/hub-snapshots}"
-SNAPSHOT_KEEP=4
+SNAPSHOT_KEEP=7   # a week of daily runs
+# The OTHER outdated items last reported on Discord (report_outdated).
+OUTDATED_STATE="${LOXPROX_HUB_OUTDATED_STATE:-/var/lib/loxprox/hub-outdated-reported}"
 SNAPSHOT_PATHS=("$HUB_DIR")
 for _type in collections parsers scenarios postoverflows appsec-rules appsec-configs contexts; do
     SNAPSHOT_PATHS+=("$CROWDSEC_DIR/$_type")
@@ -71,11 +82,47 @@ installed_versions() {
         || true
 }
 
-# Names of installed hub items with an update available, one per line.
+# Names of installed hub items with an update available, one per line, sorted.
+# Returns 1 when the list is unreadable — that is not "nothing is outdated".
 outdated_items() {
-    timeout "$CSCLI_TIMEOUT" cscli hub list -o json 2>/dev/null \
-        | jq -r '[.. | objects | select((.status? // "") | tostring | test("update-available")) | .name] | unique | .[]' 2>/dev/null \
-        || true
+    local json
+    json=$(timeout "$CSCLI_TIMEOUT" cscli hub list -o json 2>/dev/null) || true
+    [[ -n "$json" ]] || return 1
+    jq -r '[.. | objects | select((.status? // "") | tostring | test("update-available")) | .name] | unique | .[]' <<< "$json" 2>/dev/null
+}
+
+# One INFO alert listing the OTHER outdated hub items ($1: sorted, one per
+# line), sent only when that list differs from the one last reported. The
+# script runs daily, and the same backlog re-sent every morning is noise that
+# teaches people to ignore the channel; a new item, or one dropping out, is
+# news and re-sends the whole current list. An empty list clears the state,
+# so a later backlog is reported again. The state is written only after the
+# alert went out, so a failed send is retried by the next run.
+report_outdated() {
+    local others="$1" last=""
+    if [[ -z "$others" ]]; then
+        rm -f -- "$OUTDATED_STATE" 2>/dev/null || true
+        return 0
+    fi
+    log "Other outdated hub items: $(tr '\n' ' ' <<< "$others")"
+    if [[ -f "$OUTDATED_STATE" ]]; then
+        last=$(cat -- "$OUTDATED_STATE" 2>/dev/null) || last=""
+    fi
+    if [[ "$others" == "$last" ]]; then
+        log "Same outdated items as already reported — no alert (delete ${OUTDATED_STATE} to re-send)"
+        return 0
+    fi
+    if ! "$DISCORD" "INFO" "CrowdSec Hub Items Outdated" "These installed hub items have updates and were NOT upgraded automatically:\n${others//$'\n'/\\n}\n\nReview, then: sudo cscli hub upgrade && sudo systemctl reload crowdsec" 2>/dev/null; then
+        log "WARN: alert 'CrowdSec Hub Items Outdated' could not be sent — the next run tries again"
+        return 0
+    fi
+    if ! { mkdir -p "$(dirname "$OUTDATED_STATE")" \
+            && printf '%s\n' "$others" > "$OUTDATED_STATE.tmp" \
+            && mv -f "$OUTDATED_STATE.tmp" "$OUTDATED_STATE"; } 2>/dev/null; then
+        rm -f -- "$OUTDATED_STATE.tmp" 2>/dev/null || true
+        log "WARN: could not record the reported items in ${OUTDATED_STATE} — the next run reports them again"
+    fi
+    return 0
 }
 
 # Tarball of SNAPSHOT_PATHS (those that exist) into SNAPSHOT_DIR; sets SNAPSHOT.
@@ -161,7 +208,7 @@ rollback() {
         now_version=$(collection_version)
         if (( restored )); then
             log "crowdsec is active again on the previous rules (${PATCH_COLLECTION} ${now_version:-?})"
-            alert "CRITICAL" "CrowdSec Rule Update Rolled Back" "Upgrading ${PATCH_COLLECTION} (${before:-?} -> ${after:-?}) broke crowdsec: ${why}.\nThe hub state from before the upgrade was restored and crowdsec restarted; it is active again with ${PATCH_COLLECTION} ${now_version:-?}. The virtual patches of this update are NOT active.\n${changed_msg}\nCheck: sudo journalctl -u crowdsec -n 80 --no-pager\nThe next weekly run tries the upgrade again."
+            alert "CRITICAL" "CrowdSec Rule Update Rolled Back" "Upgrading ${PATCH_COLLECTION} (${before:-?} -> ${after:-?}) broke crowdsec: ${why}.\nThe hub state from before the upgrade was restored and crowdsec restarted; it is active again with ${PATCH_COLLECTION} ${now_version:-?}. The virtual patches of this update are NOT active.\n${changed_msg}\nCheck: sudo journalctl -u crowdsec -n 80 --no-pager\nThe next daily run (04:30) tries the upgrade again."
         else
             log "crowdsec is active, but the snapshot could not be restored — running the upgraded rules"
             alert "CRITICAL" "CrowdSec Rule Rollback Failed" "Upgrading ${PATCH_COLLECTION} (${before:-?} -> ${after:-?}) broke crowdsec: ${why}.\nRestoring ${SNAPSHOT} failed; crowdsec came back after a restart and runs the UPGRADED rules.\n${changed_msg}\nCheck: sudo journalctl -u crowdsec -n 80 --no-pager; sudo cscli hub list"
@@ -244,10 +291,10 @@ main() {
     fi
 
     local others
-    others=$(outdated_items | grep -vxF "$PATCH_COLLECTION" || true)
-    if [[ -n "$others" ]]; then
-        log "Other outdated hub items: $(echo "$others" | tr '\n' ' ')"
-        alert "INFO" "CrowdSec Hub Items Outdated" "These installed hub items have updates and were NOT upgraded automatically:\n${others//$'\n'/\\n}\n\nReview, then: sudo cscli hub upgrade && sudo systemctl reload crowdsec"
+    if others=$(outdated_items); then
+        report_outdated "$(grep -vxF "$PATCH_COLLECTION" <<< "$others" || true)"
+    else
+        log "Outdated hub items unreadable (cscli hub list) — not reported this run"
     fi
     log "Hub refresh finished"
 }

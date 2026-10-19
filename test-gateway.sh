@@ -1262,8 +1262,24 @@ test_edge() {
     # Schedules, retention, tools.
     grep -qF 'flock -n /run/loxprox-progressive-ban.lock /opt/loxprox/progressive-ban.py' /etc/cron.d/loxprox 2>/dev/null \
         && pass "progressive ban runs under flock" || fail "progressive-ban cron line without flock"
-    grep -qE '^30 4 \* \* 0 root /opt/loxprox/hub-refresh.sh' /etc/cron.d/loxprox 2>/dev/null \
-        && pass "weekly hub refresh scheduled (Sunday 04:30)" || fail "hub-refresh cron line missing"
+    grep -qE '^30 4 \* \* \* root /opt/loxprox/hub-refresh.sh' /etc/cron.d/loxprox 2>/dev/null \
+        && pass "daily hub refresh scheduled (04:30)" || fail "hub-refresh cron line missing or not daily"
+    # 2026-10: the CrowdSec package's own timer upgrades EVERY hub item
+    # nightly with no snapshot or rollback — it must not run beside hub-refresh.sh.
+    local hubupdate
+    hubupdate=$(systemctl is-enabled crowdsec-hubupdate.timer 2>/dev/null) || true
+    case "$hubupdate" in
+        masked)
+            if systemctl is-active --quiet crowdsec-hubupdate.timer 2>/dev/null; then
+                fail "crowdsec-hubupdate.timer is masked but still scheduled (sudo systemctl stop crowdsec-hubupdate.timer)"
+            else
+                pass "crowdsec-hubupdate.timer masked — hub-refresh.sh is the only unattended hub update"
+            fi ;;
+        ""|not-found)
+            pass "crowdsec-hubupdate.timer not present (this CrowdSec package ships none)" ;;
+        *)
+            fail "crowdsec-hubupdate.timer is '$hubupdate' — CrowdSec's package upgrades EVERY hub item nightly, without snapshot or rollback (re-run deploy.sh, or: sudo systemctl mask --now crowdsec-hubupdate.timer)" ;;
+    esac
     if grep -qF '/var/log/nginx/loxprox-trap.log' /etc/logrotate.d/loxone-nginx 2>/dev/null \
             && grep -qE '^[[:space:]]+rotate 90$' /etc/logrotate.d/loxone-nginx; then
         pass "trap / unknown / access logs kept 90 days"

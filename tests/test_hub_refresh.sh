@@ -2,7 +2,7 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 # LoxProx — hub-refresh.sh (2026-10)
 # ═══════════════════════════════════════════════════════════════════════════════
-# The weekly CrowdSec hub refresh runs end to end against a fake `cscli`,
+# The daily CrowdSec hub refresh runs end to end against a fake `cscli`,
 # `systemctl` and Discord sender on PATH, over a fake hub on disk (index, item
 # files, installed-item symlinks) in the CrowdSec layout; nothing touches the
 # host. The snapshot and the rollback use the real tar. Needs jq.
@@ -32,9 +32,11 @@ trap 'rm -rf "${WORK:?}"' EXIT
 FAKEBIN="$WORK/bin"
 mkdir -p "$FAKEBIN"
 
+# Records every send; FAKE_DISCORD_RC makes the send fail (webhook down).
 cat > "$WORK/discord.sh" <<'EOF'
 #!/bin/bash
 printf '%s|%s|%s\n' "$1" "$2" "$3" >> "$FAKE_DISCORD_LOG"
+exit "${FAKE_DISCORD_RC:-0}"
 EOF
 # cscli over the fake hub: versions are the item files' contents, so what it
 # reports follows the files (and a restore of them).
@@ -46,6 +48,7 @@ EOF
 #   FAKE_UPGRADE_NEW_MEMBER  the upgrade installs a NEW rule vpatch-new with this version
 #   FAKE_UPDATE_RC / FAKE_UPGRADE_RC   exit codes of `hub update` / `collections upgrade`
 #   FAKE_HUBLIST             the other hub items (JSON) that `hub list -o json` adds
+#   FAKE_HUBLIST_BROKEN      `hub list` prints nothing and fails (unreadable)
 cat > "$FAKEBIN/cscli" <<'EOF'
 #!/bin/bash
 echo "$*" >> "$FAKE_CSCLI_LOG"
@@ -65,6 +68,7 @@ case "$1 $2" in
     "collections list")
         printf '{"collections":[{"name":"crowdsecurity/nginx","local_version":"0.2"},{"name":"crowdsecurity/appsec-virtual-patching","status":"enabled","local_version":"%s"}]}\n' "$(cat "$coll")" ;;
     "hub list")
+        [[ -z "${FAKE_HUBLIST_BROKEN:-}" ]] || exit 1
         members=$(for f in "$FAKE_CS"/appsec-rules/*.yaml; do
                       [[ -e "$f" ]] || continue
                       printf '{"name":"crowdsecurity/%s","status":"enabled","local_version":"%s"}\n' "$(basename "$f" .yaml)" "$(cat "$f")"
@@ -92,6 +96,8 @@ chmod +x "$WORK/discord.sh" "$FAKEBIN"/*
 
 HUBLIST_CLEAN='{"parsers":[{"name":"crowdsecurity/nginx-logs","status":"enabled","local_version":"1.6"}],"collections":[{"name":"crowdsecurity/appsec-virtual-patching","status":"enabled"}]}'
 HUBLIST_OUTDATED='{"parsers":[{"name":"crowdsecurity/nginx-logs","status":"enabled,update-available","local_version":"1.6"},{"name":"crowdsecurity/syslog-logs","status":"enabled","local_version":"0.8"}],"scenarios":[{"name":"crowdsecurity/http-probing","status":"enabled,update-available","local_version":"0.4"}],"collections":[{"name":"crowdsecurity/appsec-virtual-patching","status":"enabled,update-available"}]}'
+# HUBLIST_OUTDATED plus syslog-logs outdated as well.
+HUBLIST_MORE='{"parsers":[{"name":"crowdsecurity/nginx-logs","status":"enabled,update-available","local_version":"1.6"},{"name":"crowdsecurity/syslog-logs","status":"enabled,update-available","local_version":"0.8"}],"scenarios":[{"name":"crowdsecurity/http-probing","status":"enabled,update-available","local_version":"0.4"}],"collections":[{"name":"crowdsecurity/appsec-virtual-patching","status":"enabled,update-available"}]}'
 
 # A hub as CrowdSec lays it out: index + item files under the hub dir, the
 # installed items as symlinks under the config dir, plus deploy.sh's local
@@ -123,6 +129,7 @@ run_hub() {
     ( export PATH="$FAKEBIN:$PATH" LOXPROX_CONFIG="$WORK/none.env" DISCORD_ALERT_PATH="$WORK/discord.sh" \
              LOXPROX_HUB_LOG="$c/hub.log" LOXPROX_HUB_LOCK="$c/lock" HUB_REFRESH_SETTLE=0 \
              LOXPROX_CROWDSEC_HUB_DIR="$c/hub" LOXPROX_CROWDSEC_DIR="$c/etc" LOXPROX_HUB_SNAPSHOT_DIR="$c/snapshots" \
+             LOXPROX_HUB_OUTDATED_STATE="$c/outdated-state" \
              FAKE_HUB="$c/hub" FAKE_CS="$c/etc" FAKE_HUBLIST="$c/hublist.json" \
              FAKE_DISCORD_LOG="$c/discord.log" FAKE_CSCLI_LOG="$c/cscli.log" FAKE_SYSTEMCTL_LOG="$c/systemctl.log"
       for kv in "$@"; do export "${kv?}"; done
@@ -183,7 +190,7 @@ fi
 [[ "$(stat -c %a "$c/snapshots" 2>/dev/null)" == "700" ]] && pass "snapshot dir is 0700" || fail "snapshot dir mode: $(stat -c %a "$c/snapshots" 2>&1)"
 
 c="$WORK/retention"; mkdir -p "$c/snapshots"
-for i in 1 2 3 4 5; do echo old > "$c/snapshots/hub-2026010${i}-030000.tar.gz"; done
+for i in 1 2 3 4 5 6 7 8; do echo old > "$c/snapshots/hub-2026010${i}-030000.tar.gz"; done
 run_hub retention
 kept=("$c"/snapshots/hub-*.tar.gz) left="" fresh=0
 for f in "${kept[@]}"; do
@@ -191,9 +198,9 @@ for f in "${kept[@]}"; do
     left+="$(basename "$f") "
     [[ "$(basename "$f")" == hub-2026010* ]] || fresh=$((fresh + 1))
 done
-if [[ $(wc -w <<<"$left") -eq 4 && "$fresh" == "1" && "$left" != *20260101* && "$left" != *20260102* \
-        && "$left" == *20260103* && "$left" == *20260105* ]]; then
-    pass "retention: the newest 4 are kept (this run's + 3 older), the 2 oldest removed"
+if [[ $(wc -w <<<"$left") -eq 7 && "$fresh" == "1" && "$left" != *20260101* && "$left" != *20260102* \
+        && "$left" == *20260103* && "$left" == *20260108* ]]; then
+    pass "retention: a week of daily runs — the newest 7 kept (this run's + 6 older), the 2 oldest removed"
 else
     fail "retention left: $left"
 fi
@@ -290,6 +297,59 @@ else
 fi
 [[ "$(grep -c '' "$c/discord.log")" == "1" ]] && pass "exactly one alert" || fail "alerts: $(cat "$c/discord.log")"
 ! grep -qE '^(hub upgrade|parsers upgrade|scenarios upgrade)' "$c/cscli.log" && pass "the outdated items were not upgraded" || fail "upgraded something: $(cat "$c/cscli.log")"
+
+echo ""; echo "━━━ the outdated-items alert is not repeated every day ━━━"
+# Same case as above, run again day after day: the state file carries over.
+st="$c/outdated-state"
+[[ "$(cat "$st" 2>/dev/null)" == $'crowdsecurity/http-probing\ncrowdsecurity/nginx-logs' ]] \
+    && pass "the reported list is recorded (sorted names, auto-upgraded collection excluded)" || fail "state after the first report: $(cat "$st" 2>&1)"
+run_hub outdated
+if [[ $HUB_RC -eq 0 && ! -s "$c/discord.log" ]] && grep -q 'Same outdated items as already reported' "$c/hub.log" \
+        && [[ $(grep -c 'Other outdated hub items: .*nginx-logs' "$c/hub.log") -eq 2 ]]; then   # hub.log spans both runs
+    pass "next day, same outdated items → no alert; the log still lists them"
+else
+    fail "rc=$HUB_RC repeat run: discord=$(cat "$c/discord.log") log=$(tail -3 "$c/hub.log")"
+fi
+echo "$HUBLIST_MORE" > "$c/hublist.json"
+run_hub outdated
+line=$(grep '^INFO|CrowdSec Hub Items Outdated' "$c/discord.log" || true)
+if grep -q 'syslog-logs' <<<"$line" && grep -q 'nginx-logs' <<<"$line" && grep -q 'http-probing' <<<"$line"; then
+    pass "one more item outdated → alert again, with the whole current list"
+else
+    fail "after a new outdated item: $(cat "$c/discord.log")"
+fi
+grep -qx 'crowdsecurity/syslog-logs' "$st" && pass "…and the recorded list follows" || fail "state: $(cat "$st" 2>&1)"
+echo "$HUBLIST_OUTDATED" > "$c/hublist.json"
+run_hub outdated
+line=$(grep '^INFO|CrowdSec Hub Items Outdated' "$c/discord.log" || true)
+[[ -n "$line" ]] && ! grep -q 'syslog-logs' <<<"$line" \
+    && pass "an item dropping out (upgraded by hand) → one alert with the rest" || fail "after an item dropped out: $(cat "$c/discord.log")"
+echo "$HUBLIST_CLEAN" > "$c/hublist.json"
+run_hub outdated
+[[ $HUB_RC -eq 0 && ! -s "$c/discord.log" && ! -e "$st" ]] \
+    && pass "nothing outdated → no alert, the recorded list is cleared" || fail "rc=$HUB_RC discord=$(cat "$c/discord.log") state=$(cat "$st" 2>&1)"
+echo "$HUBLIST_OUTDATED" > "$c/hublist.json"
+run_hub outdated
+grep -q '^INFO|CrowdSec Hub Items Outdated' "$c/discord.log" \
+    && pass "the same items outdated again later → reported again" || fail "not reported after the list had been cleared"
+
+c="$WORK/sendfail"; mkdir -p "$c"; echo "$HUBLIST_OUTDATED" > "$c/hublist.json"
+run_hub sendfail FAKE_DISCORD_RC=1
+if [[ $HUB_RC -eq 0 && ! -e "$c/outdated-state" ]] && grep -q '^INFO|CrowdSec Hub Items Outdated' "$c/discord.log" \
+        && grep -q 'could not be sent' "$c/hub.log"; then
+    pass "the send fails → nothing recorded, exit 0"
+else
+    fail "rc=$HUB_RC state=$(cat "$c/outdated-state" 2>&1) log=$(tail -3 "$c/hub.log")"
+fi
+run_hub sendfail
+grep -q '^INFO|CrowdSec Hub Items Outdated' "$c/discord.log" && [[ -s "$c/outdated-state" ]] \
+    && pass "…so the next run sends it and records it" || fail "not retried: discord=$(cat "$c/discord.log")"
+run_hub sendfail FAKE_HUBLIST_BROKEN=1
+if [[ $HUB_RC -eq 0 && ! -s "$c/discord.log" && -s "$c/outdated-state" ]] && grep -q 'Outdated hub items unreadable' "$c/hub.log"; then
+    pass "hub list unreadable → no alert, the recorded list kept (unreadable is not 'nothing outdated')"
+else
+    fail "rc=$HUB_RC discord=$(cat "$c/discord.log") state=$(cat "$c/outdated-state" 2>&1) log=$(tail -3 "$c/hub.log")"
+fi
 
 echo ""; echo "━━━ failures ━━━"
 run_hub updfail FAKE_UPDATE_RC=1

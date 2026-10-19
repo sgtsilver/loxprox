@@ -234,6 +234,9 @@ CROWDSEC_SCENARIO_DIR="${CROWDSEC_SCENARIO_DIR:-$CROWDSEC_DIR/scenarios}"
 CROWDSEC_PROFILES="${CROWDSEC_PROFILES:-$CROWDSEC_DIR/profiles.yaml}"
 CROWDSEC_CONFIG_LOCAL="${CROWDSEC_CONFIG_LOCAL:-$CROWDSEC_DIR/config.yaml.local}"
 LOXPROX_PASSWD_FILE="${LOXPROX_PASSWD_FILE:-/etc/passwd}"
+# The CrowdSec package's nightly blanket hub upgrade (masked by
+# _loxprox_mask_package_hubupdate; overridable for tests).
+CROWDSEC_HUBUPDATE_TIMER="${CROWDSEC_HUBUPDATE_TIMER:-crowdsec-hubupdate.timer}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
@@ -3513,6 +3516,8 @@ EOF
 
     # Intentionally NOT running 'cscli hub upgrade' — uncontrolled upgrades can
     # break parsers or scenarios. Upgrade manually after testing in staging.
+    # (2026-10: the package's crowdsec-hubupdate.timer ran exactly that every
+    # night; setup_security_monitoring masks it.)
     info "Hub components installed. Run 'cscli hub upgrade' manually when validated."
 
     # Whitelist trusted IPs
@@ -4511,7 +4516,8 @@ EOF
 #   /opt/loxprox/gateway-backup.sh        (cron, daily 02:00)
 #   /opt/loxprox/geoip-block.sh           (cron, daily 03:00)
 #   /opt/loxprox/progressive-ban.py       (cron, every 15 min, under flock)
-#   /opt/loxprox/hub-refresh.sh           (cron, Sunday 04:30)
+#   /opt/loxprox/hub-refresh.sh           (cron, daily 04:30; masks the
+#                                          package's crowdsec-hubupdate.timer)
 #   /opt/loxprox/discord-alert.sh         (alert dispatcher)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -4595,7 +4601,10 @@ EOF
     done
     (( cron_bad == 0 )) || return 1
 
-    ok "Security monitor (60s), daily backup, daily GeoIP, progressive ban (15min, flock), weekly hub refresh installed."
+    # Only now: hub-refresh.sh is installed and cron accepts its schedule.
+    _loxprox_mask_package_hubupdate
+
+    ok "Security monitor (60s), daily backup, daily GeoIP, progressive ban (15min, flock), daily hub refresh installed."
 }
 
 # Single cron file for all periodic jobs.
@@ -4625,11 +4634,51 @@ MAILTO=""
 # Daily GeoIP blocklist refresh (IPv4 + IPv6; the script reads config.env)
 0 3 * * * root /opt/loxprox/geoip-block.sh >> /var/log/loxprox-cron.log 2>&1
 
-# Weekly CrowdSec hub refresh (Sunday 04:30): virtual-patching rules only,
-# the rest is reported, never upgraded unattended.
-30 4 * * 0 root /opt/loxprox/hub-refresh.sh >> /var/log/loxprox-cron.log 2>&1
+# Daily CrowdSec hub refresh (04:30): virtual-patching rules only, behind a
+# snapshot and an automatic rollback; the rest is reported, never upgraded
+# unattended. The package's own nightly crowdsec-hubupdate.timer is masked.
+30 4 * * * root /opt/loxprox/hub-refresh.sh >> /var/log/loxprox-cron.log 2>&1
 EOF
     chmod 644 "$LOXPROX_CRON_FILE"
+}
+
+# 2026-10: the CrowdSec package ships and enables crowdsec-hubupdate.timer
+# (daily, around midnight). It runs `cscli hub update`, then `cscli hub
+# upgrade` and a reload: EVERY installed hub item upgraded unattended, with no
+# snapshot and no rollback. A parser or scenario change can alter what is
+# banned, and AppSec fails closed: a crowdsec that does not come back means a
+# 500 for every request. hub-refresh.sh is meant to be the only unattended
+# hub update (virtual-patching rules only, daily, snapshot + rollback), so the
+# package timer is masked. It is masked only after hub-refresh.sh is
+# installed and cron accepts its schedule, so the rules always keep one
+# refresh path. A unit that does not exist (another package version, a
+# container without systemd) is not an error. The package's postinst runs
+# `systemctl enable --now` on the timer with `|| true`, which a mask refuses;
+# every deploy re-applies the mask and test-gateway.sh checks it.
+_loxprox_mask_package_hubupdate() {
+    local unit="$CROWDSEC_HUBUPDATE_TIMER" state
+    if [[ ! -x "$LOXPROX_INSTALL_DIR/hub-refresh.sh" ]]; then
+        warn "$LOXPROX_INSTALL_DIR/hub-refresh.sh is not installed — $unit left as it is."
+        return 0
+    fi
+    # An unknown unit prints nothing or "not-found", depending on the systemd
+    # version; a masked one prints "masked" (both with a non-zero status).
+    state=$(systemctl is-enabled "$unit" 2>/dev/null) || true
+    case "$state" in
+        ""|not-found)
+            info "$unit not present — nothing to mask."
+            return 0 ;;
+    esac
+    # Idempotent: masking a masked unit changes nothing; --now also stops a
+    # timer that is still scheduled.
+    if systemctl mask --now "$unit" >>"$LOG_FILE" 2>&1 \
+            && [[ "$(systemctl is-enabled "$unit" 2>/dev/null)" == "masked" ]]; then
+        info "$unit masked (was: $state) — hub-refresh.sh is the only unattended hub update."
+    else
+        warn "Could not mask $unit — CrowdSec's package keeps upgrading EVERY hub item nightly, without snapshot or rollback."
+        warn "  Mask it by hand: sudo systemctl mask --now $unit"
+    fi
+    return 0
 }
 
 # Restart cron so it parses /etc/cron.d immediately (cron.service runs with
@@ -5267,6 +5316,9 @@ rollback() {
     fi
 
     # H6.3: restart everything that was stopped, not just nginx.
+    # The crowdsec-hubupdate.timer mask is deliberately kept: rollback restores
+    # config files only — hub-refresh.sh and its cron line stay, and remain
+    # the one unattended hub-update path.
     systemctl start crowdsec crowdsec-firewall-bouncer 2>/dev/null || true
     ok "Rollback from $latest complete. Pre-rollback snapshot: $snapshot_dir"
 }
