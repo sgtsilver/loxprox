@@ -52,6 +52,7 @@ LoxProx sits in front of it and supplies the whole missing security layer.
 
 - **Drop-in & idempotent** — one script; `git pull && sudo bash deploy.sh` re-runs safely and survives upgrades (your nginx hand-edits included).
 - **Defense in depth** — nginx reverse proxy + CrowdSec IDS + AppSec WAF + nftables + AppArmor + auditd, layered.
+- **Scanner elimination** — with TLS, `:1080` serves only the real host name; scanner paths and IP access land in a trap (444, log) and are banned for 7 days, then 90 and 365 (`TRAP_BAN_MODE="observe"` for the first rollout). Every app uses `https://<hostname>:1080`, never the IP.
 - **Transparent** — LAN traffic goes straight to the Miniserver; only internet traffic is inspected, so local users are never slowed down.
 - **Optional HTTPS on `:1080`** — terminate TLS via `acme.sh` + Let's Encrypt (with ZeroSSL fallback), covering the no-TLS device behind it.
 - **Optional zero-open-ports remote access (v2.0)** — frp tunnel via your own relay VPS for CGNAT/DS-Lite connections; self-hosted, no subscription, with its own watchdog. See [Tunnel Setup](docs/TUNNEL-SETUP.md).

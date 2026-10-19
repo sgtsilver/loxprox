@@ -46,7 +46,8 @@ exactly one thing: `/.well-known/acme-challenge/*` (served from
 `/var/www/acme/`). Everything else on `:80` gets a permanent 301 to
 `https://<your-domain>:1080$request_uri` — so a casual visitor hitting
 `http://your-domain/` lands on the HTTPS-on-1080 endpoint, which is what
-you want.
+you want. (That holds for your own host name; a request for the bare IP on
+`:80` is answered with 444 and logged by the trap.)
 
 The widened public surface is just the challenge directory; same threat
 profile as any vanilla Let's Encrypt deployment.
@@ -68,6 +69,24 @@ TLS_ACME_EXTRA=""                    # optional --keylength ec-256 etc.
 > production issuance budget. When everything works, switch to
 > `letsencrypt` and re-run.
 
+
+> **Use the host name, never the IP.** With TLS on, `:1080` and `:80` serve
+> only `TLS_DOMAIN` plus `EXTRA_SERVER_NAMES`. A request for the bare IP, with
+> no SNI, or for a foreign host name goes to a trap server: self-signed
+> `CN=invalid` certificate, connection closed (444), a line in
+> `/var/log/nginx/loxprox-trap.log`, and a HARD ban (7 days, then 90, then
+> 365). Every app, browser and monitoring probe must use
+> `https://<your-domain>:1080`. `http://<your-domain>:1080` still gets the
+> 301 to `https://`. Direct probes from the gateway itself need the name too:
+> `curl --resolve <your-domain>:1080:127.0.0.1 https://<your-domain>:1080/jdev/cfg/api`.
+>
+> **Roll out in observe mode first.** Set `TRAP_BAN_MODE="observe"` in
+> `deploy.conf` for the first deploy: the trap still answers 444 and logs,
+> but bans are withheld. After a few days check
+> `sudo cscli alerts list -s loxprox/scanner-trap --limit 0` and
+> `/var/log/nginx/loxprox-trap-hosts.log` (Host, SNI and user agent per hit)
+> for your own devices, fix them, then set `TRAP_BAN_MODE="ban"` and redeploy. See
+> [`CONFIGURATION-GUIDE.md`](../CONFIGURATION-GUIDE.md) → "`TRAP_BAN_MODE`".
 ---
 
 ## Run the deploy

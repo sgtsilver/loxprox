@@ -43,7 +43,7 @@ Internet ──► Router:1080 ──► Gateway:1080 ──► Loxone:80
 
 | File | Purpose |
 |------|---------|
-| `deploy.sh` | One-shot Debian 12 hardening & installation (~4600 lines, idempotent) |
+| `deploy.sh` | One-shot Debian 12 hardening & installation (~5700 lines, idempotent) |
 | `detect-loxone.sh` | Network autodetector — finds your Miniserver by MAC OUI and API fingerprint |
 | `test-gateway.sh` | 50+ automated checks — run after deploy to verify every control |
 | `set-static-ip.sh` | Pre-deploy VM network configuration |
@@ -74,7 +74,7 @@ Every 60 seconds the watchdog (running as a systemd **system** service, i.e. roo
 
 1. **Gateway ping** — can the VM reach the router?
 2. **DNS resolution** — can it resolve a hostname?
-3. **nginx localhost** — does `curl http://127.0.0.1:1080/` respond?
+3. **nginx localhost** — does the listener answer on `/jdev/cfg/api`? (In TLS mode the probe asks for `TLS_DOMAIN`, resolved to loopback, because a request for `127.0.0.1` hits the Host/SNI trap.) During a TLS-mode deploy the watchdog is disabled and re-armed at the end; if a run stops early it prints `network-watchdog → NOT ARMED` — re-run `sudo bash deploy.sh`, don't start the timer by hand.
 4. **Interface IP** — does the primary interface have the expected static IP?
 5. **dhclient anomaly** — if the interface is configured `static`, is a `dhclient` process still running? (Logged, but does **not** count as a failure.)
 

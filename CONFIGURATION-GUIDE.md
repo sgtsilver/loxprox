@@ -197,8 +197,9 @@ nftables on the gateway already drops `:22` from anything outside `SSH_ALLOWED_S
 If you chose `[K]` or ran an unattended deploy, the box is now running SOFT mode (password auth still on, banner nagging). To swap it for the HARD profile:
 
 ```bash
-# 1. On your workstation — install the key:
-ssh-copy-id root@<gateway-ip>
+# 1. On your workstation — install the key for your sudo user
+#    (root login is switched off in HARD mode once a non-root user has a key):
+ssh-copy-id <your-user>@<gateway-ip>
 
 # 2. On the gateway — re-run only the SSH hardening step:
 sudo bash deploy.sh --finalize-ssh
@@ -354,25 +355,99 @@ escalation below — this is the durable fix, not just the reactive unban.
 
 ### Progressive Ban Escalation
 
-`progressive-ban.py` (cron, every 15 minutes) extends a repeat offender's
-ban past CrowdSec's default 4 hours: 2nd offense → 24h, 3rd → 7 days, 4th+
-→ 30 days. An "offense" is a distinct **attack incident**, not a raw alert
-count — only local scenario/AppSec detections count (CAPI/community-list
-entries, manual bans, and the script's own prior extensions never do), and
-alerts within `PROGRESSIVE_BAN_DEDUP_MINUTES` of each other count as
-**one** incident regardless of which scenario triggered them — a burst
-that trips five different rules at once is one incident, not an instant
-30-day ban.
+Two things set how long an address stays banned: the first ban CrowdSec issues (its remediation profile, written by `deploy.sh` into `/etc/crowdsec/profiles.yaml`) and `progressive-ban.py` (cron, every 15 minutes, under `flock`), which extends a repeat offender's ban along a **ladder**. There are two ladders:
+
+- **HARD** — for scenarios that are unambiguously scanners (those matching `BAN_HARD_SCENARIOS`): `168h 2160h 8760h` = 7 days, then 90 days, then 365 days.
+- **SOFT** — for everything else: `24h 168h 720h 2160h` = 24 hours, 7 days, 30 days, then 90 days.
+
+An "offense" is a distinct **attack incident**, not a raw alert count — only local scenario/AppSec detections count (CAPI/community-list entries, manual bans, simulated alerts and the script's own prior extensions never do), and alerts within `PROGRESSIVE_BAN_DEDUP_MINUTES` of each other count as **one** incident regardless of which scenario triggered them — a burst that trips five different rules at once is one incident, not an instant 90-day ban. An incident is HARD if any alert in it matches `BAN_HARD_SCENARIOS`. The script never shortens a ban and never escalates addresses in the CrowdSec whitelist.
 
 | Key | Default | What it does |
 |---|---|---|
-| `PROGRESSIVE_BAN_WINDOW_DAYS` | `30` | Offenses older than this are forgotten. Lower it (e.g. `7`) for a more forgiving household. |
+| `BAN_HARD_LADDER` | `168h 2160h 8760h` | Ban durations for the 1st, 2nd and 3rd+ HARD offense (`m`, `h` or `d` units). The first value is what CrowdSec issues; the last repeats. Lengthen it for less tolerance. |
+| `BAN_SOFT_LADDER` | `24h 168h 720h 2160h` | Ban durations for the 1st, 2nd, 3rd and 4th+ SOFT offense. Shorten the first rungs (e.g. `4h 24h 168h`) if the household keeps tripping ambiguous scenarios. |
+| `BAN_HARD_SCENARIOS` | a regular expression (see `deploy.conf.example`) | Which scenario names use the HARD ladder: the trap, virtual-patching/CVE probes, and sensitive-file, backdoor, path-traversal, admin-interface and open-proxy probing. One regex that must work in both CrowdSec (Go RE2) and Python — no lookarounds, quotes or backslashes; `deploy.sh` refuses anything else. Change it only if you know why. |
+| `PROGRESSIVE_BAN_WINDOW_DAYS` | `365` | Offenses older than this are forgotten. CrowdSec's own default (7-day alert flush) is replaced by an alert history of at least 400 days so the window is real. Lower it (e.g. `30`) for a more forgiving household. |
 | `PROGRESSIVE_BAN_DEDUP_MINUTES` | `60` | Alerts within this many minutes of each other, from any scenario, count as one incident. Raise it (e.g. `180`) if unrelated-detection bursts still escalate too fast. |
 | `PROGRESSIVE_BAN_WHITELIST_FILE` | `/etc/crowdsec/parsers/s02-enrich/whitelist-loxone.yaml` | Whitelisted IPs (the same file `CROWDSEC_WHITELIST_IPS` writes to) are never escalated. Override only if you maintain a separate whitelist file. |
 
-These keys are read directly from `/etc/loxprox/config.env` (or the
-environment) — `deploy.sh` does not manage them yet, so set overrides
-there by hand; unset values fall back to the defaults above.
+The first four keys go in `deploy.conf`; `deploy.sh` validates them (a typo aborts the deploy), writes the first rung of each ladder into the CrowdSec profile and carries all of them into `/etc/loxprox/config.env`. `PROGRESSIVE_BAN_DEDUP_MINUTES` and `PROGRESSIVE_BAN_WHITELIST_FILE` are not managed by `deploy.sh` yet: set them by hand in `/etc/loxprox/config.env` (or the environment); unset values fall back to the defaults above.
+
+> **Hard bans are long on purpose.** A year-long ban on a shared mobile or Private Relay address can hit an innocent user. That is why only unambiguous scanner behavior is HARD. If a legitimate address is banned, delete the decision (`sudo cscli decisions delete --ip <IP>`) — the offense memory stays, so the next offense still escalates.
+
+### Scanner Elimination & Edge Filtering (2026-10 breach hardening)
+
+On 2026-10-18 the vendor Loxone was breached. Crawlers such as Shodan and Censys fingerprint Loxone endpoints, so the gateway now answers only what a Loxone app legitimately sends and bans everything else for a long time. All keys below are optional and live in `/etc/loxprox/deploy.conf`; the defaults are the recommended hardened values. `deploy.sh` validates them and aborts on a typo instead of silently choosing another behavior.
+
+### What changes for you
+
+- **Use the host name with `https://`, never the IP.** With `ENABLE_TLS=true`, `:1080` and `:80` answer only `TLS_DOMAIN` plus `EXTRA_SERVER_NAMES`. A request for the bare IP, without SNI, or for a foreign `Host` is a **trap hit**: the connection is closed (444, nothing is sent), logged to `/var/log/nginx/loxprox-trap.log`, and the address is banned on the HARD ladder. Every app, browser and monitoring probe must use the host name. (`http://<host>:1080` for the real name still gets the 301 redirect to `https://`.)
+- **The plain admin webservice paths are answered with `403` from the internet** (`fsget`, `fsdel`, `sys/reboot`, `sps/restart`, ...). See `REMOTE_ADMIN_PATHS` — this is a path filter, not a lock on the Miniserver.
+- **Scanner paths are traps.** `/.env`, `/.git`, `*.php`, `/wp-*`, `/cgi-bin/`, `/vendor/phpunit`, `/HNAP1`, `/boaform`, `/actuator`, and the methods `CONNECT`, `TRACE`, `TRACK`, `PROPFIND` are answered with 444 and a HARD ban on the first hit. No Loxone endpoint matches any of them.
+- **Auth and WebSocket limits.** Loxone authentication endpoints: 3 requests per second per untrusted address (burst 30). `/ws/`: at most 6 concurrent connections per untrusted address. `LAN_SUBNET` and `CROWDSEC_WHITELIST_IPS` are never limited, denied (admin/unknown) or counted.
+
+### `EXTRA_SERVER_NAMES` — more host names for the gate
+
+| Key | Default | What it does |
+|---|---|---|
+| `EXTRA_SERVER_NAMES` | `""` | Space-separated extra host names `:1080` accepts besides `TLS_DOMAIN`, e.g. `"home.example.net"`. Ignored without TLS (plain HTTP accepts every Host). |
+
+**When to change:** you reach the same WAN IP under a second DNS name. These names only pass the Host/SNI gate. The certificate is still issued for `TLS_DOMAIN` only, so a client using another name gets a certificate mismatch unless you issue the certificate for that name too (`TLS_ACME_EXTRA="-d home.example.net"`). Allowed forms: dotted names (`home.example.net`), `*.example.com`, `.example.com` (the name and every subdomain) and `www.example.*`; anything else aborts the deploy. With the tunnel on, `TUNNEL_PUBLIC_HOST` is accepted automatically.
+
+### `UNKNOWN_PATH_MODE` and `REMOTE_ADMIN_PATHS`
+
+| Key | Default | What it does |
+|---|---|---|
+| `UNKNOWN_PATH_MODE` | `log` | What happens to a path that is neither trap, admin nor a known app endpoint. `log` = proxied as usual **and** written to `/var/log/nginx/loxprox-unknown.log` (the learning phase; the `loxprox/unknown-path` scenario only alerts). `deny` = untrusted sources get a local 404 (still logged) and `loxprox/unknown-path` bans (SOFT ladder). |
+| `REMOTE_ADMIN_PATHS` | `deny` | `deny` = Loxone admin/file-system webservices answer `403` to internet clients (logged; no LoxProx scenario bans on it, but repeated 403s/404s still count toward the stock `crowdsecurity/http-probing` scenario, which can lead to a SOFT ban). `allow` = they are proxied like any app path. It filters plain HTTP paths only: the same commands can still reach the Miniserver inside the encrypted command form (`jdev/sys/enc` / `fenc`, app class) or over the authenticated WebSocket, so the Miniserver's own credentials remain the real control. |
+
+**When to change:**
+- Keep `UNKNOWN_PATH_MODE="log"` for a few weeks and read `loxprox-unknown.log`. Switch to `deny` only when it lists no path your family's apps actually use.
+- Set `REMOTE_ADMIN_PATHS="allow"` only if you configure the Miniserver remotely through the gateway (Loxone Config over the internet). Prefer doing that from the LAN, which is exempt anyway.
+
+### Monitor alerts, updates and GeoIP IPv6
+
+| Key | Default | What it does |
+|---|---|---|
+| `SESSION_ALERT_ENABLED` | `true` | Discord alert when a remote client holds a session on the Loxone port from an ASN (provider network) the gateway has not seen before. Client addresses are masked in the alert. Needs `mmdb-bin` and the GeoLite2 databases CrowdSec ships (`deploy.sh` installs `mmdb-bin`). |
+| `ASN_LEARNING_DAYS` | `7` | The first this-many days after the first monitor run only learn ASNs silently. Raise it if the family travels or changes carriers often. |
+| `AUTH_RATE_ALERT_PER_CYCLE` | `20` | Alert when more Loxone authentication requests (`getkey`, `getkey2`, `getjwt`, `gettoken`, `authwithtoken`, `refreshjwt`, in both the `jdev/` and `dev/` spellings) than this reach the gateway in one 60-second monitor cycle, all clients together. The normal level is a handful per **day**, so 20 in a minute is loud. Raise it if a large household logs in at once. |
+| `SEC_UPDATE_MAX_AGE_DAYS` | `2` | Alert ("Security Updates Not Installing") when a pending Debian-Security update has not been installed after this many days — the symptom of unattended-upgrades being stuck. |
+| `GEOIP_IPV6_ENABLED` | `true` | Also drop IPv6 traffic from the denylisted countries (CN, RU, KP, IR) with the `geoip_blocklist6` set. `"false"` empties the IPv6 set at the next GeoIP refresh (IPv4 only). `geoip-block.sh` reads this from `config.env` itself. |
+| `GEOIP_URL_BASE6` | `""` | Source of the IPv6 country lists. Empty = the ipdeny.com IPv6 lists. Must be an `https://` URL; change it only to use a mirror. |
+
+Other alerts you will see, no keys needed:
+- **New CrowdSec Ban** (WARNING) covers SOFT bans only, at most 15 entries per message. HARD (scanner) bans are summarised in one INFO **Daily HARD Ban Digest** at 08:00, sent even when the count is 0. With `TRAP_BAN_MODE="observe"` it also reports the number of observed trap hits and a line reminding you to review the trap log.
+- **Firewall Integrity Failure**: the input policy and the rules are checked every cycle, the content of the GeoIP sets hourly.
+- **Weekly hub refresh** (Sunday 04:30) snapshots the CrowdSec hub before it upgrades `crowdsecurity/appsec-virtual-patching` (the last 4 snapshots are kept in `/var/lib/loxprox/hub-snapshots/`) and rolls back if CrowdSec does not come back. You get **CrowdSec Rule Update Rolled Back**, **CrowdSec Down — Gateway Serving Errors** or **CrowdSec Rule Rollback Failed** (CRITICAL), or **CrowdSec Hub Snapshot Failed** (WARNING; the upgrade is skipped).
+
+Ladder values with a `d` unit are converted to hours for the CrowdSec profile (CrowdSec has no day unit).
+
+### `TRAP_BAN_MODE` — observe first, then ban
+
+| Key | Default | What it does |
+|---|---|---|
+| `TRAP_BAN_MODE` | `ban` | `ban` = a trap hit bans the address (HARD ladder). `observe` = `loxprox/scanner-trap` runs in CrowdSec simulation: the trap still answers 444 and still logs to `loxprox-trap.log`, and CrowdSec still raises the alert, but no ban is issued. |
+
+**When to change:** for the first rollout, to find your own devices that still use the IP or a wrong name before they get a 7-day ban.
+
+1. Set `TRAP_BAN_MODE="observe"` in `deploy.conf` and deploy.
+2. After a few days run `sudo cscli alerts list -s loxprox/scanner-trap --limit 0` (cscli 1.8.1 shows only 50 by default) and read `/var/log/nginx/loxprox-trap.log`. `/var/log/nginx/loxprox-trap-hosts.log` is the place to look: it holds the Host, SNI and user agent of every trap hit (CrowdSec does not read it; it is kept 90 days). Any address of your own (family phones, monitoring) in there is a client to fix: re-add it with `https://<your-host>:1080`.
+3. Set `TRAP_BAN_MODE="ban"` and redeploy. Or switch immediately with `sudo cscli simulation disable loxprox/scanner-trap && sudo systemctl reload crowdsec` — and change `deploy.conf` as well, otherwise the next deploy re-enables observe mode.
+
+While in observe mode, scanners are logged but not banned.
+
+`loxprox/auth-bf` and (while `UNKNOWN_PATH_MODE="log"`) `loxprox/unknown-path` are always simulated. If `deploy.sh` cannot confirm a simulation with `cscli simulation status`, it removes that scenario rather than let it ban, and reports the CrowdSec step as degraded; fix it with `sudo cscli simulation enable <scenario>` and re-run `sudo bash deploy.sh`.
+
+### `SSH_ALLOW_USERS` and HARD-mode root login
+
+| Key | Default | What it does |
+|---|---|---|
+| `SSH_ALLOW_USERS` | `""` | Space-separated `AllowUsers` patterns (`user` or `user@host`). Empty = no `AllowUsers` line, so any account with a key may log in. |
+
+**When to change:** set it (e.g. `"admin"`) to restrict SSH to your admin account. `deploy.sh` refuses to write a list that would lock everyone out (no listed account with a login shell, or, in HARD mode, none of them has an authorized key) and says so in the log. `--finalize-ssh` reads `deploy.conf`, so the key applies there too.
+
+**Root login.** In HARD mode (`--finalize-ssh`, see "SSH Key Bootstrap") the drop-in now sets `PermitRootLogin no` only when a non-root account has an authorized key, sudo rights (`sudo`, `wheel` or `admin`) and a login shell. Otherwise (for example when root's key is the only key on the box) it stays `prohibit-password` and the deploy warns — copy your key to a sudo user (`ssh-copy-id <user>@<gateway-ip>`) and re-run `sudo bash deploy.sh --finalize-ssh`. In SOFT mode root login stays allowed (a root password may be the only way in until a key exists).
 
 ### Discord Alerting
 
@@ -436,6 +511,7 @@ The gateway already shields the no-TLS Miniserver behind it; for many home deplo
 | `TLS_ACME_SERVER` | `"letsencrypt"` | Also accepts `letsencrypt_test` (staging — use first while debugging), `zerossl`, `buypass`, `buypass_test`, `sslcom`, or a full directory URL. |
 | `TLS_ACME_FALLBACK_SERVER` | `"zerossl"` | v2.0: secondary CA tried automatically when the primary `--issue` fails (CA outage, rate limit). Set `""` to disable. |
 | `TLS_ACME_EXTRA` | `""` | Passthrough to `acme.sh --issue` (e.g. `--keylength ec-256`). |
+| `EXTRA_SERVER_NAMES` | `""` | Extra host names `:1080` accepts besides `TLS_DOMAIN`. Everything else — the bare IP included — is a trap hit and gets banned. See "Scanner Elimination & Edge Filtering". |
 
 **Example:**
 
@@ -450,13 +526,17 @@ TLS_ACME_EXTRA=""
 ### What happens on `sudo bash deploy.sh` with `ENABLE_TLS=true`
 
 1. `acme.sh` is installed from a SHA256-pinned GitHub release tarball — no `curl | bash`.
-2. A small `/etc/nginx/conf.d/loxprox-acme.conf` is written: `:80` `default_server` that serves only `/.well-known/acme-challenge/` from `/var/www/acme/` and 301s everything else to `https://$host:1080$request_uri`.
+2. A small `/etc/nginx/conf.d/loxprox-acme.conf` is written: a `:80` server for your own host names (`TLS_DOMAIN` plus `EXTRA_SERVER_NAMES`) that serves only `/.well-known/acme-challenge/` from `/var/www/acme/` and 301s everything else to `https://$host:1080$request_uri`. Any other `Host` on `:80` (IP scans) falls to the trap server in step 5, which answers 444.
 3. The cert is issued (or renewed) via `acme.sh --issue --webroot --server $TLS_ACME_SERVER`. "Cert still valid, skipped" is treated as success.
 4. The cert is installed at `/etc/loxprox/tls/{fullchain.pem,privkey.pem}` (mode `0640 root`), with `--reloadcmd "systemctl reload nginx"` recorded for the renewal cron.
-5. The existing site file is mutated between explicit markers (`# LOXPROX-TLS-BEGIN` / `# LOXPROX-TLS-END`) and `listen 1080;` is swapped for `listen 1080 ssl;`. Operator hand-edits outside the marker block (WebSocket location, custom headers) are untouched. The strict regex on the listen line refuses anything other than canonical `listen 1080;` — no silent mutation.
+5. The existing site file is mutated between explicit markers (`# LOXPROX-TLS-BEGIN` / `# LOXPROX-TLS-END`) and `listen 1080;` is swapped for `listen 1080 ssl;`. Operator hand-edits outside the marker block (WebSocket location, custom headers) are untouched. The strict regex on the listen line refuses anything other than canonical `listen 1080;` — no silent mutation. The same step gates the real server on your host names (`server_name` is no longer `_`) and appends the trap default servers for `:1080` and `:80` between `# LOXPROX-TRAP-BEGIN` / `# LOXPROX-TRAP-END`, with a self-signed `CN=invalid` certificate (`/etc/loxprox/tls/trap-*.pem`) so scanners that connect by IP complete the handshake and are logged and banned.
 6. The auto-renewal cron is **verified** after every TLS-enabled deploy (not assumed). Missing? It is restored from `acme.sh --install-cronjob` and the exact cron line plus manual-renewal recipe is logged.
 
 > ⚠️ **Enabling TLS does not auto-migrate existing clients.** Once `:1080` is HTTPS-only, every Loxone app/browser still configured as `http://<host>:1080` will fail in a `301` redirect loop until you update it to `https://`. Plan to update **every** saved connection (each phone, tablet, browser) when you flip `ENABLE_TLS=true`. See Troubleshooting → "The Loxone app can't connect after I enabled TLS."
+>
+> ⚠️ **Never use the IP address with TLS on.** Since the 2026-10 hardening, `:1080` answers only your host name(s). A client configured with the gateway's IP gets a closed connection and is banned on the HARD ladder (7 days on the first request). Use `https://<your-host>:1080` everywhere.
+
+> **Network watchdog during the deploy.** With TLS on, the deploy disables the network watchdog until its Host/SNI-aware version is installed (an older watchdog would read the trap's 444 for `127.0.0.1` as an outage and reboot the box), and re-arms it at the end. A run that stops early prints `network-watchdog → NOT ARMED`. The fix is to re-run `sudo bash deploy.sh`, not to start the timer by hand.
 
 ### Toggle-off behavior (`ENABLE_TLS="false"`)
 
@@ -464,7 +544,7 @@ Set `ENABLE_TLS="false"` and re-run `sudo bash deploy.sh`. The script:
 
 - Strips the marker block from the site file.
 - Reverts the listen line to plain `listen 1080;`.
-- Removes the `:80` ACME listener.
+- Removes the `:80` ACME listener, the trap servers and the host-name gate (`server_name _` again — every Host is served).
 - Cancels the per-domain renewal in `acme.sh`.
 - **Keeps** cert files under `/etc/loxprox/tls/` so re-enabling later doesn't pay re-issuance time.
 
@@ -631,7 +711,7 @@ curl -v http://$LOXONE_IP:$LOXONE_PORT/jdev/cfg/api
 
 After flipping `ENABLE_TLS=true`, `:1080` speaks **HTTPS only**. A client still configured as `http://<host>:1080` sends cleartext to the TLS port; nginx answers every request with a `301` to `https://…`, and the Loxone app (which doesn't follow redirects on its API calls) retries in a loop. Symptom in `loxone-access.log`: the same client hitting `GET /jdev/cfg/api?cacheBstr=…` with status `301` over and over.
 
-**This is not a ban** — `cscli decisions list` shows nothing for the IP. The fix is client-side and applies to **every** app/browser that connects:
+**This is not a ban** — `cscli decisions list` shows nothing for the IP. (The opposite symptom — the connection is closed at once and the IP **is** banned — means the client uses the gateway's IP or a name outside `TLS_DOMAIN` / `EXTRA_SERVER_NAMES`: the Host/SNI gate treated it as a scanner. Unban with `sudo cscli decisions delete --ip <IP>` and fix the client the same way.) The fix is client-side and applies to **every** app/browser that connects:
 
 1. In the Loxone app, edit the Miniserver connection (or delete and re-add it).
 2. Set the address to **`https://<your-host>:1080`** — verify the scheme is `https` **and** the `:1080` port is still present (the app stores scheme and port separately).
@@ -647,4 +727,5 @@ Before running `deploy.sh`, verify:
 - [ ] `LAN_SUBNET` matches your network
 - [ ] `SSH_ALLOWED_SUBNETS` includes your current network
 - [ ] Router port forwarding: external 1080 → `GATEWAY_IP`:1080
+- [ ] With TLS on: every app and device uses `https://<your-host>:1080` — never the IP
 - [ ] Discord webhook is set (or intentionally left empty)

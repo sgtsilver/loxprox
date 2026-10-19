@@ -22,6 +22,12 @@ Port-Forward-Setup, z. B. mit `ENABLE_TLS`) oder deine Relay-Domain
 (Tunnel-Setup, siehe [TUNNEL-SETUP.de.md](TUNNEL-SETUP.de.md)). Unten
 `<HOST>` genannt.
 
+> **Immer der Hostname mit `https://` — nie die IP des Gateways.** Bei
+> aktivem TLS behandelt das Gateway eine Verbindung auf die nackte IP (oder auf
+> einen Namen, den es nicht kennt) als Scanner: Die Verbindung wird geschlossen
+> und die Adresse gebannt, bei der ersten Anfrage für 7 Tage. Trage in jedes
+> Handy, Tablet und jeden Browser `https://<HOST>:1080` ein, nie eine IP-Adresse.
+
 ## QR-Code erzeugen (einmalig, auf einem Linux-/macOS-Rechner)
 
 Die Loxone App versteht Deep-Links der Form `loxone://ms?host=...`:
@@ -64,7 +70,12 @@ Nichts umzuschalten, nichts zu erklären.
    Falls nein, liegt das Problem am Pfad (Tunnel/Forward/DNS), nicht am
    Handy — siehe Troubleshooting in [TUNNEL-SETUP.de.md](TUNNEL-SETUP.de.md)
    bzw. [TLS-SETUP.de.md](TLS-SETUP.de.md).
-2. **Von CrowdSec blockiert?** Geteilte/VPN-IPs landen gelegentlich auf
+2. **Sofort gebannt, schon beim ersten Versuch?** Das Handy wurde vermutlich mit
+   der IP des Gateways oder einem falschen Namen statt `https://<HOST>:1080`
+   eingerichtet — das Gateway bannt das als Scan. Ban aufheben
+   (`sudo cscli decisions delete --ip <IP>`) und die gespeicherte Verbindung
+   korrigieren.
+3. **Von CrowdSec blockiert?** Geteilte/VPN-IPs landen gelegentlich auf
    Blocklisten. iPhones nutzen standardmäßig **iCloud Private Relay**, dessen
    geteilte Egress-IPs überdurchschnittlich oft auf Blocklisten landen —
    siehe [`SECURITY.de.md`](../SECURITY.de.md#legitimer-nutzer-geblockt)
@@ -72,10 +83,10 @@ Nichts umzuschalten, nichts zu erklären.
    Person `https://ip.sb` öffnen lassen und prüfen:
    `sudo cscli decisions list` → `sudo cscli decisions delete --ip <deren-ip>`
    (auf dem Relay beim Tunnel-Setup, sonst auf dem Gateway).
-3. **App hängt bei „Verbindung wird hergestellt":** bekannte
+4. **App hängt bei „Verbindung wird hergestellt":** bekannte
    Gen-1-App-Macke — App-Cache leeren (Android) oder Miniserver löschen und
    neu anlegen (iOS), dann den QR-Code neu scannen.
-4. **Der ganze Haushalt teilt sich eine öffentliche IP?** Was Rate Limits,
+5. **Der ganze Haushalt teilt sich eine öffentliche IP?** Was Rate Limits,
    Bans und die Progressive-Ban-Eskalation angeht, ist jeder hinter
    demselben Heimrouter diese eine IP. Ein einzelnes störendes Gerät (eine
    hängende Refresh-Schleife, eine fehlerhafte Automatisierung) kann das

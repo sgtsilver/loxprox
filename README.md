@@ -51,6 +51,7 @@ LoxProx setzt sich davor und liefert die gesamte fehlende Sicherheitsschicht.
 **Auf einen Blick**
 
 - **Drop-in & idempotent** — ein Script; `git pull && sudo bash deploy.sh` läuft gefahrlos erneut und übersteht Upgrades (inkl. deiner nginx-Handanpassungen).
+- **Scanner-Abwehr** — mit TLS bedient `:1080` nur den echten Hostnamen; Scanner-Pfade und IP-Zugriffe landen in einer Falle (444, Log) und werden 7 Tage, dann 90 und 365 Tage gebannt (`TRAP_BAN_MODE="observe"` für den ersten Rollout). Jede App nutzt `https://<hostname>:1080`, nie die IP.
 - **Defense in Depth** — nginx Reverse-Proxy + CrowdSec IDS + AppSec WAF + nftables + AppArmor + auditd, geschichtet.
 - **Transparent** — LAN-Traffic geht direkt zum Miniserver; nur Internet-Traffic wird geprüft, lokale Nutzer werden also nie ausgebremst.
 - **Optional HTTPS auf `:1080`** — TLS-Terminierung per `acme.sh` + Let's Encrypt (mit ZeroSSL-Fallback), deckt das No-TLS-Gerät dahinter ab.

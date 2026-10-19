@@ -27,9 +27,14 @@ ss -tlnp | grep 1080
 # Erwartet: LISTEN 0.0.0.0:1080 (nginx)
 ```
 
-Proxy lokal testen:
+Proxy lokal testen. Ohne TLS:
 ```bash
 curl -v http://127.0.0.1:1080/jdev/cfg/api
+```
+
+Mit TLS landet `127.0.0.1` im Host/SNI-Trap (die Verbindung wird mit 444 geschlossen). Frag deshalb nach dem echten Namen, auf Loopback aufgelöst:
+```bash
+curl -v --resolve <domain>:1080:127.0.0.1 https://<domain>:1080/jdev/cfg/api
 ```
 
 Wenn das fehlschlägt, **nicht weitermachen**. Erst die Nginx-Config fixen.

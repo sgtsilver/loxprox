@@ -50,7 +50,8 @@ hier wird **ausschließlich für die ACME-Validierung** verwendet. Der
 andere auf `:80` bekommt einen permanenten 301 auf
 `https://<deine-domain>:1080$request_uri` — wer also zufällig
 `http://deine-domain/` aufruft, landet auf dem HTTPS-Endpoint auf 1080,
-was genau das ist, was du willst.
+was genau das ist, was du willst. (Das gilt für deinen eigenen Hostnamen; eine
+Anfrage für die nackte IP auf `:80` beantwortet der Trap mit 444 und loggt sie.)
 
 Die erweiterte öffentliche Angriffsfläche ist nur das Challenge-Verzeichnis;
 dasselbe Threat-Profil wie jedes ganz normale Let's-Encrypt-Deployment.
@@ -71,6 +72,25 @@ TLS_ACME_EXTRA=""                    # optional --keylength ec-256 etc.
 > der `:80`-Weiterleitung unsicher bist. Staging hat keine Rate Limits und
 > verbrennt dein wöchentliches Produktions-Issuance-Budget nicht. Wenn alles
 > läuft, auf `letsencrypt` umstellen und neu laufen lassen.
+
+> **Hostname benutzen, nie die IP.** Mit TLS bedienen `:1080` und `:80` nur
+> `TLS_DOMAIN` plus `EXTRA_SERVER_NAMES`. Eine Anfrage für die nackte IP, ohne
+> SNI oder für einen fremden Hostnamen landet in einem Trap-Server:
+> selbstsigniertes `CN=invalid`-Zertifikat, Verbindung geschlossen (444), eine
+> Zeile in `/var/log/nginx/loxprox-trap.log` und ein HARD-Ban (7 Tage, dann 90,
+> dann 365). Jede App, jeder Browser und jede Monitoring-Probe muss
+> `https://<deine-domain>:1080` verwenden. `http://<deine-domain>:1080` bekommt
+> weiter den 301 auf `https://`. Auch direkte Tests auf dem Gateway selbst
+> brauchen den Namen:
+> `curl --resolve <deine-domain>:1080:127.0.0.1 https://<deine-domain>:1080/jdev/cfg/api`.
+>
+> **Zuerst im Observe-Modus ausrollen.** Setze beim ersten Deploy
+> `TRAP_BAN_MODE="observe"` in `deploy.conf`: Der Trap antwortet weiter mit 444
+> und loggt, aber es wird nicht gebannt. Prüfe nach ein paar Tagen
+> `sudo cscli alerts list -s loxprox/scanner-trap --limit 0` und
+> `/var/log/nginx/loxprox-trap-hosts.log` (Host, SNI und User-Agent je Treffer)
+> auf eigene Geräte, korrigiere sie, setze dann `TRAP_BAN_MODE="ban"` und deploye neu. Siehe
+> [`CONFIGURATION-GUIDE.de.md`](../CONFIGURATION-GUIDE.de.md) → "`TRAP_BAN_MODE`".
 
 ---
 

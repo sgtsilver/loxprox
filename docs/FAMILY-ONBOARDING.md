@@ -19,6 +19,12 @@ Your public hostname — either your dynamic-DNS name (classic port-forward
 setup, e.g. with `ENABLE_TLS`) or your relay domain (tunnel setup, see
 [TUNNEL-SETUP.md](TUNNEL-SETUP.md)). Referred to as `<HOST>` below.
 
+> **Always the host name, with `https://` — never the gateway's IP.** With
+> TLS on, the gateway treats a connection to its bare IP (or any name it does
+> not know) as a scanner: the connection is closed and the address is banned,
+> for 7 days on the first request. Enter `https://<HOST>:1080` in every phone,
+> tablet and browser, and never an IP address.
+
 ## Generate the QR code (once, on any Linux/macOS machine)
 
 The Loxone app understands deep links of the form `loxone://ms?host=...`:
@@ -59,7 +65,11 @@ to switch, nothing to explain.
    If not, the problem is the path (tunnel/forward/DNS), not the phone —
    see the troubleshooting section of [TUNNEL-SETUP.md](TUNNEL-SETUP.md) or
    [TLS-SETUP.md](TLS-SETUP.md).
-2. **Blocked by CrowdSec?** Shared/VPN IPs occasionally land on blocklists.
+2. **Banned right away, from the first try?** The phone was probably set up
+   with the gateway's IP or a wrong name instead of `https://<HOST>:1080` — the
+   gateway bans that as a scan. Unban it (`sudo cscli decisions delete --ip <IP>`)
+   and fix the saved connection.
+3. **Blocked by CrowdSec?** Shared/VPN IPs occasionally land on blocklists.
    iPhones default to **iCloud Private Relay**, whose shared egress IPs land
    on blocklists disproportionately often — see
    [`SECURITY.md`](../SECURITY.md#legitimate-user-blocked) ("Roaming /
@@ -67,10 +77,10 @@ to switch, nothing to explain.
    `https://ip.sb` and check:
    `sudo cscli decisions list` → `sudo cscli decisions delete --ip <their-ip>`
    (on the relay if you run the tunnel, on the gateway otherwise).
-3. **App stuck on "establishing connection":** known Gen 1 app quirk —
+4. **App stuck on "establishing connection":** known Gen 1 app quirk —
    clear the app cache (Android) or delete + re-add the Miniserver (iOS),
    then rescan the QR code.
-4. **Whole household sharing one public IP?** As far as rate limits, bans,
+5. **Whole household sharing one public IP?** As far as rate limits, bans,
    and progressive-ban escalation are concerned, everyone behind the same
    home router **is** that one IP. One misbehaving device (a stuck refresh
    loop, a buggy automation) can trip the rate limiter or a ban for the
