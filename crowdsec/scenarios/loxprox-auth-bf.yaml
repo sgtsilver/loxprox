@@ -1,0 +1,35 @@
+# LoxProx — many Loxone authentication requests from one address (installed by
+# deploy.sh into /etc/crowdsec/scenarios/).
+#
+# A password guess against a Miniserver needs a fresh key/salt first
+# (jdev/sys/getkey2/{user}, getkey), then the hashed attempt (getjwt /
+# gettoken, usually wrapped in jdev/sys/enc/), so a brute-force run shows up
+# as a stream of these paths. The match is on the path as the access log
+# WRITES it: the loxone_scrubbed format replaces everything after the command
+# with "<redacted>" (/jdev/sys/getkey2/<redacted>); the prefix match below
+# covers that form and the bare "getkey". A family app needs a handful per
+# connection, so the bucket allows a burst of 30 and three per minute
+# sustained.
+#
+# Read from the main access log only (evt.Line.Src, see
+# loxprox-scanner-trap.yaml). In CrowdSec SIMULATION mode in this release
+# (deploy.sh): it alerts, it does not ban, until the threshold has been
+# checked against real roaming-phone traffic. SOFT ladder when enabled.
+type: leaky
+format: 2.0
+name: loxprox/auth-bf
+description: "Burst of Loxone authentication requests from one address"
+filter: "evt.Meta.log_type == 'http_access-log' && evt.Line.Src endsWith 'loxone-access.log' && evt.Meta.http_path matches '^/j?dev/sys/(getkey2?|getjwt|gettoken|authwithtoken|refreshjwt)(/|$)'"
+groupby: evt.Meta.source_ip
+capacity: 30
+leakspeed: 20s
+blackhole: 5m
+labels:
+  service: http
+  confidence: 2
+  spoofable: 0
+  classification:
+    - attack.T1110
+  behavior: "http:bruteforce"
+  label: "LoxProx Loxone auth brute force"
+  remediation: true

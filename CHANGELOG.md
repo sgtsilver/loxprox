@@ -2,6 +2,223 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+The theme of this release: **scanner elimination — much longer bans and much
+less tolerance.**
+On 2026-10-18 Loxone, the vendor, was breached and customer data leaked.
+Crawlers such as Shodan and Censys fingerprint Loxone endpoints, and a
+gateway that answers them politely stays on their lists. This release makes
+the gateway stop answering: anything that is not the Loxone app talking to
+the real host name gets no response at all, and the address is banned for
+much longer. The family's roaming phones (mobile carriers, iCloud Private
+Relay) keep working.
+
+An audit of the live gateway for this work also found two protections that
+were documented but not real:
+
+- `SECURITY.md` said `server_tokens off` was set. Nothing set it, and the
+  gateway answered `Server: nginx/<version>`;
+- unattended-upgrades matched Debian's security archive by name. Once
+  bookworm became oldstable, the archive was renamed to `oldstable-security`,
+  nothing matched, and security updates had silently stopped.
+
+Both are fixed and covered by tests. A v2.3.0 install upgrades in place with
+`sudo bash deploy.sh` over SSH; read **Behaviour changes you must act on**
+first.
+
+### Behaviour changes you must act on
+
+- **Use the host name with `https://`, never the IP.** With TLS on, `:1080`
+  and `:80` answer only `TLS_DOMAIN` plus `EXTRA_SERVER_NAMES`. A bare IP, a
+  missing SNI or a foreign `Host` is a trap hit: a 444, an entry in the trap
+  log and a HARD ban (7 days on the first offence). Re-add every Loxone app
+  and device with the host name. Cleartext `http://<name>:1080` for the real
+  name still gets the 301 redirect to HTTPS (grace redirect, never banned).
+  Without TLS the gate does not exist and every Host is served as before.
+- **The plain admin webservice paths are now answered with `403` from the
+  internet.** That covers the file-system and system-control commands
+  (`fsget`, `fsdel`, `sys/reboot`, `sps/restart`, the `cfg` setters and so
+  on); the LAN and `CROWDSEC_WHITELIST_IPS` are exempt. No LoxProx scenario
+  bans on a 403, but repeated 403s/404s still count toward the stock
+  `crowdsecurity/http-probing` scenario, which can lead to a SOFT ban. This
+  filters plain HTTP paths only: the same commands can still reach the
+  Miniserver inside the encrypted command form (`jdev/sys/enc` / `fenc`) or
+  over the authenticated WebSocket, so the Miniserver's own credentials
+  remain the real control. Set `REMOTE_ADMIN_PATHS="allow"` if you need
+  remote Loxone Config access through the gateway.
+- **Root SSH login is off in HARD mode.** `--finalize-ssh` now writes
+  `PermitRootLogin no` only when a non-root account has an authorized key,
+  sudo rights (sudo/wheel/admin) and a login shell. Otherwise (for example
+  when root's key is the only key on the box) it stays `prohibit-password`
+  with a warning, so the step cannot lock you out. Copy your key to a sudo user and
+  re-run `sudo bash deploy.sh --finalize-ssh`.
+- **Probing `:1080` on the gateway itself changed.** In TLS mode
+  `curl http://127.0.0.1:1080` now hits the trap. Use
+  `curl --resolve <domain>:1080:127.0.0.1 https://<domain>:1080/jdev/cfg/api`.
+  The network watchdog, the tunnel watchdog, `test-gateway.sh` and the
+  deploy's own health probe already do this.
+- **Bans are much longer.** The first offence of an unambiguous scanner
+  scenario now costs 7 days (was 4 hours), repeat offences 90 and then 365
+  days. See Security.
+
+### Security
+
+- **Host/SNI gate and trap (TLS mode).** The real `:1080` server answers
+  only the gateway's names. Everything else lands in a trap default server:
+  a self-signed `CN=invalid` certificate so the handshake completes, then a
+  444 (connection closed) and `/var/log/nginx/loxprox-trap.log`. `:80`
+  behaves the same except for the ACME HTTP-01 path of the real name. The
+  nginx site is regenerated (template version 6).
+- **Path classes** (`map $uri $loxprox_path_class`).
+  - *Trap* paths (`/.env`, `/.git`, `*.php`, `/wp-*`, `/cgi-bin/`,
+    `/vendor/phpunit`, `/HNAP1`, `/boaform`, `/actuator`) and the methods
+    CONNECT, TRACE, TRACK and PROPFIND get a 444, the trap log and a HARD
+    ban. They are checked before the rate limits and the AppSec subrequest.
+  - *Admin* webservices get a 403 from the internet (`REMOTE_ADMIN_PATHS`).
+  - *Unknown* paths are proxied and written to
+    `/var/log/nginx/loxprox-unknown.log` (`UNKNOWN_PATH_MODE="log"`, the
+    learning phase) or answered with a local 404 (`"deny"`).
+- **Limits.** Loxone authentication endpoints are limited to 3 requests per
+  second per untrusted address (burst 30), and `/ws/` to 6 concurrent
+  connections per untrusted address. The LAN and `CROWDSEC_WHITELIST_IPS`
+  are never counted.
+- **Two ban ladders and a year of memory.**
+  - HARD, for scenarios matching `BAN_HARD_SCENARIOS`: `168h 2160h 8760h`
+    (7 days, 90 days, 365 days).
+  - SOFT, for everything else: `24h 168h 720h 2160h` (24 hours, 7, 30 and 90
+    days).
+  - `profiles.yaml` is now managed by `deploy.sh` (the original is kept as
+    `profiles.yaml.loxprox-orig`) and issues the first rung;
+    `progressive-ban.py` extends repeat offenders and never shortens a ban.
+  - Offences are remembered for `PROGRESSIVE_BAN_WINDOW_DAYS` (365).
+    CrowdSec's default flush forgot alerts after 7 days, so the old "30-day"
+    window was really 7. `config.yaml.local` now keeps alert history for at
+    least 400 days.
+  - `progressive-ban.py` runs under `flock -n`, so a slow run makes the next
+    one skip instead of overlapping.
+- **Three CrowdSec scenarios** in the new `crowdsec/` directory, installed to
+  `/etc/crowdsec/scenarios/` with their acquisition in
+  `/etc/crowdsec/acquis.d/loxprox.yaml`: `loxprox/scanner-trap` (a trigger;
+  one trap hit is a HARD ban), `loxprox/unknown-path` and `loxprox/auth-bf`.
+  The last two run in CrowdSec **simulation mode** in this release: they
+  alert but do not ban, until their thresholds are checked against real
+  roaming-phone traffic. (`unknown-path` is simulated only while
+  `UNKNOWN_PATH_MODE="log"`.) A CrowdSec that rejects the new files is
+  rolled back to the previous ones, so a bad ladder value cannot leave the
+  gateway without CrowdSec. If a learning scenario's simulation cannot be
+  confirmed, the deploy removes that scenario instead of letting it ban, and
+  reports the step degraded. Ladder values may use `d` units; they are
+  converted to hours for the CrowdSec profile.
+- **Firewall.** An IPv6 GeoIP set (`geoip_blocklist6`) and its drop rule sit
+  next to the IPv4 ones; the denylist stays CN, RU, KP and IR. nginx's
+  worker (`www-data`) may now reach only loopback and the Miniserver
+  (`loxprox-egress` output rules); root keeps its egress for acme.sh, apt,
+  the CrowdSec CAPI and Discord.
+- **`server_tokens off`** is now actually set (see above). The line is
+  skipped only if your own `nginx.conf` already sets `server_tokens`.
+- **SSH.** HARD mode turns root login off (see above). The new optional
+  `SSH_ALLOW_USERS` writes an `AllowUsers` line, which `deploy.sh` refuses to
+  write unless a listed account has a login shell (HARD mode also requires
+  a key). `--finalize-ssh` now reads `deploy.conf`, so the key applies there
+  too. A drop-in that sshd rejects is now
+  replaced by the previous one instead of being deleted.
+- **unattended-upgrades** matches by codename and label (`Origins-Pattern`)
+  instead of by archive name, so Debian security updates install again. The
+  CrowdSec repository is deliberately excluded: its upgrades are staged by
+  hand.
+- **Log retention.** The access, trap and unknown-path logs are kept 90 days
+  (they back a one-year offence history). Error and AppSec logs stay at 14
+  days.
+- **Token commands are scrubbed from the logs too.** `authwithtoken`,
+  `refreshjwt`, `refreshtoken`, `checktoken`, `killtoken` and `getvisusalt`
+  paths, and the deprecated `dev/` spelling of every command, are redacted in
+  the access, trap and unknown-path logs.
+
+### Added
+
+- **Monitor alerts** (all Discord): *Remote Session From a New ASN*,
+  *Firewall Integrity Failure*, *Security Updates Not Installing*,
+  *CrowdSec Update Available*, *High Loxone Auth Request Rate* (the
+  `getkey`/`getkey2`/`getjwt`/`gettoken`/`authwithtoken`/`refreshjwt`
+  commands, `jdev/` and `dev/` spellings) and *GeoIP IPv6 Blocklist Stale*.
+  *New CrowdSec Ban* now covers SOFT bans only (at most 15 entries per
+  message); HARD bans are summarised in an INFO *Daily HARD Ban Digest* at
+  08:00, sent even when the count is 0. The firewall set-content check runs
+  hourly. progressive-ban extensions carry the reason
+  `repeat-offender-hard-<n>` (HARD) or `repeat-offender-<n>` (SOFT). The session alert learns provider networks
+  silently for `ASN_LEARNING_DAYS` days first. `mmdb-bin` and `jq` are
+  installed for these checks.
+- **Weekly CrowdSec hub refresh** (`security-monitoring/hub-refresh.sh`,
+  Sunday 04:30). It upgrades only `crowdsecurity/appsec-virtual-patching`,
+  reloads CrowdSec only if that collection changed, and reports every other
+  outdated hub item on Discord without upgrading it. It snapshots the hub
+  first (4 kept in `/var/lib/loxprox/hub-snapshots/`) and rolls back if
+  CrowdSec does not come back (CRITICAL *CrowdSec Rule Update Rolled Back*,
+  *CrowdSec Down — Gateway Serving Errors* or *CrowdSec Rule Rollback
+  Failed*; WARNING *CrowdSec Hub Snapshot Failed* skips the upgrade).
+- **`test-gateway.sh`** gets an *Edge filtering, bans & host config*
+  section; the new checks and scripts have CI tests.
+- **New configuration keys** (all optional, documented in
+  `deploy.conf.example` and `CONFIGURATION-GUIDE.md`): `EXTRA_SERVER_NAMES`,
+  `UNKNOWN_PATH_MODE`, `REMOTE_ADMIN_PATHS`, `BAN_HARD_LADDER`,
+  `BAN_SOFT_LADDER`, `BAN_HARD_SCENARIOS`, `PROGRESSIVE_BAN_WINDOW_DAYS`,
+  `SESSION_ALERT_ENABLED`, `ASN_LEARNING_DAYS`, `AUTH_RATE_ALERT_PER_CYCLE`
+  (default 20), `SEC_UPDATE_MAX_AGE_DAYS`, `GEOIP_IPV6_ENABLED`,
+  `GEOIP_URL_BASE6`, `SSH_ALLOW_USERS` and `TRAP_BAN_MODE` (`ban` or `observe`;
+  observe withholds trap bans while you check your own devices). Invalid values abort the deploy
+  instead of silently selecting another behaviour.
+
+### Fixed
+
+- **Network watchdog reboot loop on upgrade.** In TLS mode the Host/SNI gate
+  answers a request for `127.0.0.1` with 444, which an older watchdog reads as
+  "nginx is dead" (heal, restart networking, reboot). The deploy disables the
+  watchdog timer before the gate goes live and re-arms it at the end, once
+  the new, Host-aware version is installed. A run that stops early prints
+  `network-watchdog → NOT ARMED`; re-run `sudo bash deploy.sh` (do not start
+  the timer by hand).
+- **The watchdogs and `test-gateway.sh` probe under the real name**, resolved
+  to loopback, and probe an app-class path, so `UNKNOWN_PATH_MODE="deny"`
+  can never hide a Miniserver outage.
+- The deploy summary's "Verify proxy" hint now prints the working command.
+
+### Upgrade notes — from v2.3.0
+
+Upgrade in place with `sudo bash deploy.sh` over SSH.
+
+- **Roll out in observe mode first.** Set `TRAP_BAN_MODE="observe"` in
+  `deploy.conf` and deploy: the trap still answers 444 and logs, but
+  `loxprox/scanner-trap` runs in CrowdSec simulation and bans nothing. After
+  a few days check `sudo cscli alerts list -s loxprox/scanner-trap --limit 0` (cscli 1.8.1
+  shows only 50 by default) and `/var/log/nginx/loxprox-trap-hosts.log`
+  (Host, SNI and user agent per trap hit; not read by CrowdSec, kept 90
+  days) for your own devices, fix them, then set
+  `TRAP_BAN_MODE="ban"` and redeploy (or `sudo cscli simulation disable
+  loxprox/scanner-trap && sudo systemctl reload crowdsec`, and change
+  `deploy.conf` too, or the next deploy re-enables observe mode).
+- **Before you deploy in `ban` mode, make sure every client uses the host
+  name.** A client still on the IP is banned on its first request after the
+  deploy (7 days). If one does get banned: `sudo cscli decisions delete --ip <IP>`, then
+  re-add the connection with `https://<your-domain>:1080`.
+- **Root SSH:** put your key on a sudo user first, otherwise HARD mode keeps
+  `prohibit-password` and warns.
+- **Network watchdog.** In TLS mode the deploy disables the network watchdog
+  and re-arms it at the end. If a run stops early it prints
+  `network-watchdog → NOT ARMED`; the fix is to re-run `sudo bash deploy.sh`,
+  not to start the timer by hand.
+- **Security updates start installing** after the first deploy, because
+  unattended-upgrades matches again. Expect an apt run, and a reboot at
+  03:00 if a kernel update is among them.
+- **Learning phase.** Leave `UNKNOWN_PATH_MODE="log"` for a few weeks and
+  read `/var/log/nginx/loxprox-unknown.log`. Switch to `"deny"` only when
+  it shows no path the family's apps really use.
+- **Bans already issued** keep their length until `progressive-ban.py`
+  (every 15 minutes) finds a longer target for that address; it only ever
+  lengthens a ban.
+- If your own `/etc/crowdsec/acquis.yaml` reads all of `/var/log/nginx/*`,
+  the deploy warns that the new logs are read twice; narrow that entry.
+
 ## [2.3.0] — 2026-10-06
 
 The v2.3 theme: **a calm ops console, and protections that actually run.**

@@ -1,0 +1,34 @@
+# LoxProx — one request answered by the gateway's trap is enough (installed by
+# deploy.sh into /etc/crowdsec/scenarios/).
+#
+# /var/log/nginx/loxprox-trap.log only ever receives requests no Loxone app
+# sends: a Host/SNI that is not one of the gateway's names (IP scans, Shodan /
+# Censys sweeps), scanner-only paths (/.env, /.git, *.php, /wp-*, /cgi-bin/,
+# /vendor/phpunit, /HNAP1, /boaform, /actuator) and the methods CONNECT, TRACE,
+# TRACK, PROPFIND. nginx answers all of them with 444 (connection closed).
+#
+# The trap log is read with type nginx (acquis.d/loxprox.yaml), so the stock
+# crowdsecurity/nginx-logs parser handles it like the main access log. This
+# scenario tells the file apart by evt.Line.Src, the acquisition's source file:
+# the full path, or only the base name when CrowdSec's metrics level is
+# "aggregated" — hence the suffix match. tests/host-integration.sh (crowdsec)
+# proves both directions with `cscli explain`.
+#
+# The name matches BAN_HARD_SCENARIOS, so the loxprox_hard_ip profile bans
+# with the first HARD duration.
+type: trigger
+format: 2.0
+name: loxprox/scanner-trap
+description: "Request answered by the LoxProx trap (foreign host name, scanner-only path or method)"
+filter: "evt.Meta.log_type == 'http_access-log' && evt.Line.Src endsWith 'loxprox-trap.log'"
+groupby: evt.Meta.source_ip
+blackhole: 1m
+labels:
+  service: http
+  confidence: 3
+  spoofable: 0
+  classification:
+    - attack.T1595
+  behavior: "http:scan"
+  label: "LoxProx trap hit"
+  remediation: true

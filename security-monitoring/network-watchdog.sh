@@ -16,7 +16,8 @@
 #
 # HOW IT WORKS:
 #   Every 60 seconds it runs five local health checks (gateway ping, DNS,
-#   nginx localhost, interface IP, dhclient anomaly). A 502/504 from the local
+#   nginx localhost — under TLS_DOMAIN in TLS mode, see NGINX_LOCAL below —,
+#   interface IP, dhclient anomaly). A 502/504 from the local
 #   nginx counts as HEALTHY — nginx answered, so the listener is alive and only
 #   the Miniserver behind it is down; that case raises its own alert and never
 #   heals, restarts or reboots anything. If checks fail for two consecutive
@@ -60,7 +61,18 @@ IFACE="${WATCHDOG_IFACE:-$(ip route show default 2>/dev/null | awk '/default/ &&
 IFACE="${IFACE:-$(ip -o link show | awk -F': ' '/^[0-9]+: e/ && !n++ {print $2}')}"
 GATEWAY_IP="${WATCHDOG_GATEWAY:-$(ip route show default 2>/dev/null | awk '/default/ && !n++ {print $3}')}"
 GATEWAY_IP="${GATEWAY_IP:-192.168.1.1}"
-NGINX_LOCAL="${WATCHDOG_NGINX_URL:-http://127.0.0.1:1080/}"
+# 2026-10: the local nginx probe. WATCHDOG_NGINX_URL, when set, is used as is.
+# Otherwise the probe asks for an app-class path (the Loxone-documented
+# reachability check), never "/": with UNKNOWN_PATH_MODE=deny nginx answers
+# "/" itself and a Miniserver outage would stay invisible. And in TLS mode
+# the :1080 listener is gated on Host/SNI — a request for 127.0.0.1 lands in
+# the trap and gets 444 (curl: 000), which this watchdog would read as "nginx
+# is dead" and heal and reboot for. So it asks for TLS_DOMAIN (config.env),
+# resolved to loopback; with no domain (plain mode) it keeps 127.0.0.1.
+NGINX_LOCAL="${WATCHDOG_NGINX_URL:-}"
+NGINX_PROBE_PATH="/jdev/cfg/api"
+ENABLE_TLS="${ENABLE_TLS:-false}"
+TLS_DOMAIN="${TLS_DOMAIN:-}"
 
 # EXPECTED_IP is the VM's own static IP. It must come from
 # WATCHDOG_EXPECTED_IP — never fall back to GATEWAY_IP, which by now has been
@@ -164,13 +176,39 @@ check_dns() {
     fi
 }
 
-nginx_local_status() {
+probe_status() {
     # curl still prints its %{http_code} template on a failed transfer, so never
     # append a fallback with `|| echo` — that concatenates two codes. Normalise
     # anything that is not a 3-digit status to 000 (= nginx did not answer).
     local code
-    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$NGINX_LOCAL" 2>/dev/null) || true
+    code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "$@" 2>/dev/null) || true
     [[ "$code" =~ ^[0-9]{3}$ ]] || code="000"
+    echo "$code"
+}
+
+nginx_local_status() {
+    if [[ -n "$NGINX_LOCAL" ]]; then
+        probe_status "$NGINX_LOCAL"
+        return 0
+    fi
+    if [[ -z "$TLS_DOMAIN" ]]; then
+        probe_status "http://127.0.0.1:1080${NGINX_PROBE_PATH}"
+        return 0
+    fi
+    # The listener's real scheme can differ from ENABLE_TLS (a TLS deploy step
+    # that degraded leaves plain HTTP), so the other scheme is the fallback —
+    # both with the real name. Plain HTTP with that Host on a TLS listener is
+    # the 497 → 301 grace redirect: an answer, so nginx is alive.
+    local code
+    local -a https=(--resolve "${TLS_DOMAIN}:1080:127.0.0.1" "https://${TLS_DOMAIN}:1080${NGINX_PROBE_PATH}")
+    local -a plain=(-H "Host: ${TLS_DOMAIN}" "http://127.0.0.1:1080${NGINX_PROBE_PATH}")
+    if [[ "${ENABLE_TLS,,}" == "true" ]]; then
+        code=$(probe_status "${https[@]}")
+        [[ "$code" != "000" ]] || code=$(probe_status "${plain[@]}")
+    else
+        code=$(probe_status "${plain[@]}")
+        [[ "$code" != "000" ]] || code=$(probe_status "${https[@]}")
+    fi
     echo "$code"
 }
 
@@ -179,10 +217,11 @@ check_nginx_local() {
     # is provably alive and the Miniserver behind it is what is down. Treating
     # that as an nginx failure made every Miniserver outage escalate into a heal
     # and then a gateway reboot, twice an hour, for a fault a reboot cannot fix.
-    # In TLS mode the plain-HTTP probe hits error_page 497 and gets the 301.
+    # 2026-10: 404 likewise — nginx (UNKNOWN_PATH_MODE=deny) or the Miniserver
+    # answered; an answer can never justify a reboot.
     case "$(nginx_local_status)" in
-        200|301|302|401|403|502|504) return 0 ;;
-        *)                           return 1 ;;
+        200|301|302|401|403|404|502|504) return 0 ;;
+        *)                               return 1 ;;
     esac
 }
 
@@ -430,7 +469,7 @@ main() {
             if [[ ! -f "$BACKEND_FLAG" ]]; then
                 : > "$BACKEND_FLAG"
                 send_discord "HIGH" "Miniserver Unreachable — Gateway Healthy" \
-                    "nginx on the gateway answers on ${NGINX_LOCAL} but returns 502/504, which means the listener is alive and the Loxone Miniserver behind it is not responding.\n\nThe gateway is NOT being restarted or rebooted — that would not fix a backend fault and would drop every live session once the Miniserver returns.\n\nCheck:\n1. Miniserver powered on and on the network (ping ${LOXONE_IP:-<LOXONE_IP unset>})\n2. Miniserver web interface reachable from the LAN\n3. Miniserver rebooting after a Loxone Config update — this clears itself\n\nThis alert fires once; recovery will be reported when the Miniserver answers again."
+                    "nginx on the gateway answers on ${NGINX_LOCAL:-127.0.0.1:1080${NGINX_PROBE_PATH}} but returns 502/504, which means the listener is alive and the Loxone Miniserver behind it is not responding.\n\nThe gateway is NOT being restarted or rebooted — that would not fix a backend fault and would drop every live session once the Miniserver returns.\n\nCheck:\n1. Miniserver powered on and on the network (ping ${LOXONE_IP:-<LOXONE_IP unset>})\n2. Miniserver web interface reachable from the LAN\n3. Miniserver rebooting after a Loxone Config update — this clears itself\n\nThis alert fires once; recovery will be reported when the Miniserver answers again."
                 log "BACKEND: nginx answers 502/504 — Miniserver down; alerting, no heal/reboot"
             else
                 log "BACKEND: Miniserver still unreachable; alert already sent"
@@ -499,4 +538,7 @@ main() {
     handle_reboot "${failed[*]}" "$diag"
 }
 
-main "$@"
+# Only run when executed, not when sourced (tests source it for the probe functions).
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

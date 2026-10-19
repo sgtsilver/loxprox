@@ -43,12 +43,44 @@ warn() {
 # "Decision creation failed" (the decision existed) and the nftables / SSH
 # warnings. Capture the output first, then match the captured text.
 
-# The gateway's TLS mode lives in deploy.conf (write_runtime_config never puts
-# ENABLE_TLS into config.env). Echoes the scheme the :1080 listener speaks.
+# The gateway's TLS mode lives in deploy.conf (config.env carries it only
+# since 2026-10). Echoes the scheme the :1080 listener speaks.
 _gateway_scheme() {
     local tls=""
     [[ -f /etc/loxprox/deploy.conf ]] && tls=$(awk -F'"' '/^ENABLE_TLS=/{print $2}' /etc/loxprox/deploy.conf)
     if [[ "${tls,,}" == "true" ]]; then echo https; else echo http; fi
+}
+
+# A runtime value: config.env (always written quoted by deploy.sh), else
+# deploy.conf sourced in a subshell (operators may write it unquoted). Empty
+# when neither has the key.
+_gw_conf() {
+    local key="$1" v=""
+    [[ -f /etc/loxprox/config.env ]] \
+        && v=$(awk -F'"' -v k="$key" 'index($0, k "=") == 1 {print $2; exit}' /etc/loxprox/config.env)
+    if [[ -z "$v" && -f /etc/loxprox/deploy.conf ]]; then
+        v=$(set +u; source /etc/loxprox/deploy.conf >/dev/null 2>&1; printf '%s' "${!key:-}")
+    fi
+    printf '%s' "$v"
+}
+
+_gateway_domain() { _gw_conf TLS_DOMAIN; }
+
+# 2026-10: every local probe of :1080 goes through here. In TLS mode the
+# listener is gated on Host/SNI — a request for 127.0.0.1 is answered by the
+# trap (444, curl prints 000) — so the gateway's own name is sent, resolved to
+# loopback. -k: the check is about the proxy, not the certificate (test_tls).
+#   _gw_curl PATH [curl options…]
+_gw_curl() {
+    local path="$1" domain scheme
+    shift
+    scheme=$(_gateway_scheme)
+    domain=$(_gateway_domain)
+    if [[ "$scheme" == "https" && -n "$domain" ]]; then
+        curl -k --resolve "${domain}:1080:127.0.0.1" "$@" "https://${domain}:1080${path}"
+    else
+        curl -k "$@" "${scheme}://127.0.0.1:1080${path}"
+    fi
 }
 
 # Exact count of requests CrowdSec's AppSec engine has evaluated, or nothing
@@ -171,9 +203,9 @@ test_network() {
 test_proxy() {
     test_header "Nginx Proxy"
 
-    # ENABLE_TLS lives in deploy.conf, NOT config.env — write_runtime_config
-    # never emits it, so a config.env read comes back empty and silently
-    # selects the non-TLS branch (the bug that skipped test_tls for a year).
+    # ENABLE_TLS is read from deploy.conf: config.env only carries it since
+    # 2026-10, and an older config.env read came back empty and silently
+    # selected the non-TLS branch (the bug that skipped test_tls for a year).
     local enable_tls="false"
     if [[ -f /etc/loxprox/deploy.conf ]]; then
         enable_tls=$(awk -F'"' '/^ENABLE_TLS=/{print $2}' /etc/loxprox/deploy.conf)
@@ -194,13 +226,10 @@ test_proxy() {
     # Test localhost proxy. In TLS mode the :1080 listener is `listen 1080
     # ssl` (setup_tls in deploy.sh) — a plain-HTTP request never reaches the
     # proxied response, it lands on the error_page 497 grace redirect
-    # instead, so the API check has to speak TLS to get a real answer.
+    # instead, so the API check has to speak TLS to get a real answer — under
+    # the gateway's name (_gw_curl), since 2026-10's Host/SNI gate.
     local status
-    if [[ "${enable_tls,,}" == "true" ]]; then
-        status=$(curl -sk -o /dev/null -w "%{http_code}" --connect-timeout 5 https://127.0.0.1:1080/jdev/cfg/api 2>/dev/null)
-    else
-        status=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://127.0.0.1:1080/jdev/cfg/api 2>/dev/null)
-    fi
+    status=$(_gw_curl /jdev/cfg/api -s -o /dev/null -w "%{http_code}" --connect-timeout 5 2>/dev/null)
     if [[ "$status" == "200" || "$status" == "401" ]]; then
         pass "Proxy responds to Loxone API (HTTP $status)"
     else
@@ -213,18 +242,21 @@ test_proxy() {
         # listener must come back as a clean 301, not the raw 400 that used
         # to trip CrowdSec's http-probing scenario against Loxone apps still
         # configured for http://gateway:1080.
+        # 2026-10: sent for the gateway's own name — a family device still on
+        # http://<name>:1080 must keep getting the 301, never the trap.
         local http_status
-        http_status=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://127.0.0.1:1080/jdev/cfg/api 2>/dev/null)
+        http_status=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 \
+            -H "Host: $(_gateway_domain)" http://127.0.0.1:1080/jdev/cfg/api 2>/dev/null)
         if [[ "$http_status" == "301" ]]; then
-            pass "Plain HTTP on :1080 redirects to HTTPS (301 grace redirect)"
+            pass "Plain HTTP on :1080 for the gateway's name redirects to HTTPS (301 grace redirect)"
         else
-            fail "Plain HTTP on :1080 returned HTTP $http_status (expected 301 redirect)"
+            fail "Plain HTTP on :1080 for the gateway's name returned HTTP $http_status (expected 301 redirect)"
         fi
     fi
 
     # Test security headers
     local headers
-    headers=$(curl -sI --connect-timeout 5 http://127.0.0.1:1080/jdev/cfg/api 2>/dev/null)
+    headers=$(_gw_curl /jdev/cfg/api -sI --connect-timeout 5 2>/dev/null)
     if grep -qi "X-Frame-Options" <<<"$headers"; then
         pass "X-Frame-Options header present"
     else
@@ -251,9 +283,8 @@ test_proxy() {
     # appear on a PROXIED response: nginx adds its header and, unless the site
     # hides it (template v4+), passes the Miniserver's own copy through too
     # (live: "X-Frame-Options: deny" next to "SAMEORIGIN"). Check one.
-    local proxied_url="http://127.0.0.1:1080/jdev/cfg/api" proxied_headers proxied_status
-    [[ "${enable_tls,,}" == "true" ]] && proxied_url="https://127.0.0.1:1080/jdev/cfg/api"
-    proxied_headers=$(curl -sk -D - -o /dev/null --connect-timeout 5 --max-time 10 "$proxied_url" 2>/dev/null | tr -d '\r')
+    local proxied_url="/jdev/cfg/api on :1080" proxied_headers proxied_status
+    proxied_headers=$(_gw_curl /jdev/cfg/api -s -D - -o /dev/null --connect-timeout 5 --max-time 10 2>/dev/null | tr -d '\r')
     proxied_status=$(awk 'NR == 1 {print $2}' <<<"$proxied_headers")
     if [[ -z "$proxied_headers" ]]; then
         fail "No response from $proxied_url — cannot check proxied security headers"
@@ -286,7 +317,7 @@ test_proxy() {
     local limited=0
     for _ in {1..5}; do
         local s
-        s=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:1080/jdev/cfg/api 2>/dev/null)
+        s=$(_gw_curl /jdev/cfg/api -s -o /dev/null -w "%{http_code}" 2>/dev/null)
         [[ "$s" == "503" ]] && limited=1
     done
     if [[ "$limited" -eq 0 ]]; then
@@ -325,7 +356,7 @@ test_crowdsec() {
     sleep 5
 
     local decisions
-    decisions=$(cscli decisions list 2>/dev/null)
+    decisions=$(cscli decisions list --ip "$test_ip" --limit 0 2>/dev/null)   # cscli lists 100 by default
     if grep -qF "$test_ip" <<<"$decisions"; then
         pass "Decision created successfully"
     else
@@ -429,7 +460,7 @@ test_appsec() {
     local appsec_before appsec_after scheme
     scheme=$(_gateway_scheme)
     appsec_before=$(_appsec_processed)
-    curl -sk -o /dev/null --connect-timeout 5 "${scheme}://127.0.0.1:1080/jdev/cfg/api" 2>/dev/null
+    _gw_curl /jdev/cfg/api -s -o /dev/null --connect-timeout 5 2>/dev/null
     sleep 2
     appsec_after=$(_appsec_processed)
     if [[ -z "$appsec_before" || -z "$appsec_after" ]]; then
@@ -442,7 +473,7 @@ test_appsec() {
 
     # LOW-010: AppSec 401 error detection
     local appsec_status
-    appsec_status=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 http://127.0.0.1:1080/crowdsec-appsec 2>/dev/null)
+    appsec_status=$(_gw_curl /crowdsec-appsec -s -o /dev/null -w "%{http_code}" --connect-timeout 5 2>/dev/null)
     if [[ "$appsec_status" == "401" ]]; then
         warn "AppSec returned 401 — bouncer API key may be misconfigured"
     else
@@ -641,9 +672,9 @@ test_tunnel() {
 # ── TLS Tests (v2.0.1, only when ENABLE_TLS=true) ───────────────────────────
 
 test_tls() {
-    # ENABLE_TLS lives in deploy.conf, NOT config.env (write_runtime_config
-    # never emits it) — the old config.env read was always empty, so this
-    # whole section was silently skipped on every TLS-mode gateway.
+    # ENABLE_TLS is read from deploy.conf (config.env carries it only since
+    # 2026-10) — the old config.env read was always empty, so this whole
+    # section was silently skipped on every TLS-mode gateway.
     local enable_tls="false"
     if [[ -f /etc/loxprox/deploy.conf ]]; then
         enable_tls=$(awk -F'"' '/^ENABLE_TLS=/{print $2}' /etc/loxprox/deploy.conf)
@@ -674,12 +705,27 @@ test_tls() {
         grep -q 'error_page 497' "$nginx_site" \
             && pass "nginx site has error_page 497 redirect" \
             || fail "nginx site missing error_page 497 redirect"
+
+        # 2026-10 Host/SNI gate: real names on the proxy server, trap default
+        # servers for :1080 and :80, and the trap's own certificate.
+        if grep -q '# LOXPROX-TLS-SERVER-NAMES' "$nginx_site" && grep -q '# LOXPROX-TRAP-BEGIN' "$nginx_site"; then
+            pass "Host/SNI gate in place: $(awk '/# LOXPROX-TLS-SERVER-NAMES/ {sub(/;.*/, ""); sub(/^[[:space:]]*/, ""); print}' "$nginx_site") + trap default servers"
+        else
+            fail "Host/SNI gate missing from $nginx_site (no LOXPROX-TLS-SERVER-NAMES / LOXPROX-TRAP-BEGIN) — re-run deploy.sh"
+        fi
+        [[ -s /etc/loxprox/tls/trap-fullchain.pem && -s /etc/loxprox/tls/trap-privkey.pem ]] \
+            && pass "trap certificate present (/etc/loxprox/tls/trap-fullchain.pem)" \
+            || fail "trap certificate missing (/etc/loxprox/tls/trap-*.pem)"
     else
         fail "nginx site file missing ($nginx_site)"
     fi
 
     if [[ -f /etc/nginx/conf.d/loxprox-acme.conf ]]; then
         pass "ACME challenge conf present"
+        # listen directives only: the file's header comment names the trap's default_server.
+        grep -qE '^[[:space:]]*listen[^;]*default_server' /etc/nginx/conf.d/loxprox-acme.conf \
+            && fail "ACME listener still claims default_server — foreign Hosts on :80 get the 301, not the trap" \
+            || pass "ACME listener answers the gateway's names only (the :80 default is the trap)"
     else
         fail "ACME challenge conf missing (/etc/nginx/conf.d/loxprox-acme.conf)"
     fi
@@ -950,6 +996,282 @@ test_operations() {
     fi
 }
 
+# ── Edge filtering, bans, host config (2026-10 breach hardening) ────────────
+
+_line_count() { if [[ -f "$1" ]]; then wc -l < "$1"; else echo 0; fi; }
+
+# Packets the loxprox-egress drop rule has counted so far (empty if absent).
+_egress_drops() {
+    local chain
+    chain=$(nft list chain inet filter output 2>/dev/null) || chain=""
+    awk '/loxprox-egress/ && / drop / { for (i = 1; i < NF; i++) if ($i == "packets") print $(i + 1) }' <<<"$chain"
+}
+
+# Prints "ok …" when unattended-upgrades' OWN matcher — the installed
+# /usr/bin/unattended-upgrade imported as a module, reading the live apt
+# config — accepts the Debian main and security origins of this release and
+# every Debian-Security package file apt knows, and rejects the CrowdSec
+# repository's origin; "miss …" / "error …" otherwise. Also proves the old
+# archive-based form would NOT have matched (the bug being fixed).
+_uu_origin_check() {
+    python3 - <<'PY' 2>&1
+import importlib.machinery, importlib.util, sys, types
+try:
+    import apt_pkg
+    loader = importlib.machinery.SourceFileLoader("uu", "/usr/bin/unattended-upgrade")
+    spec = importlib.util.spec_from_loader("uu", loader)
+    uu = importlib.util.module_from_spec(spec)
+    loader.exec_module(uu)
+    apt_pkg.init_config()
+    apt_pkg.init_system()
+    allowed = uu.get_allowed_origins()
+    cn = uu.get_distro_codename()
+except Exception as exc:  # report, never raise: this is a probe
+    print("error", type(exc).__name__, exc)
+    sys.exit(0)
+
+def origin(**kw):
+    base = dict(origin="", label="", archive="", component="main", site="deb.debian.org", codename="")
+    base.update(kw)
+    return types.SimpleNamespace(**base)
+
+problems = []
+must = {
+    "security": origin(origin="Debian", archive="oldstable-security", codename=cn + "-security", label="Debian-Security"),
+    "main": origin(origin="Debian", archive="oldstable", codename=cn, label="Debian"),
+}
+for name, o in must.items():
+    if not uu.is_allowed_origin(o, allowed):
+        problems.append("synthetic " + name)
+crowdsec = origin(origin="packagecloud.io/crowdsec/crowdsec", archive=cn, codename=cn, label="crowdsec", site="packagecloud.io")
+if uu.is_allowed_origin(crowdsec, allowed):
+    problems.append("crowdsec repository allowed")
+if uu.match_whitelist_string("o=Debian,a=" + cn + "-security", must["security"]):
+    problems.append("control: archive form matched (control cannot fail)")
+live = 0
+try:
+    for pf in apt_pkg.Cache(None).file_list:
+        if (pf.label or "") == "Debian-Security" and (pf.codename or "").startswith(cn):
+            live += 1
+            if not uu.is_allowed_origin(pf, allowed):
+                problems.append("live %s/%s" % (pf.archive, pf.codename))
+except Exception as exc:
+    problems.append("apt cache unreadable: %s" % exc)
+if problems:
+    print("miss", "; ".join(problems))
+else:
+    print("ok", "patterns=%d" % len(allowed), "live-security-files=%d" % live)
+PY
+}
+
+# One synthetic loxone_scrubbed line → the scenario names `cscli explain`
+# says the event would pour into. The file name decides which loxprox/*
+# scenario sees it (evt.Line.Src). Read-only: explain runs CrowdSec with
+# -no-api, so nothing is alerted and no decision is created.
+#   _cs_explain FILE_BASENAME IP "METHOD PATH" STATUS
+_cs_explain() {
+    local dir out
+    dir=$(mktemp -d /var/tmp/loxprox-explain.XXXXXX) || return 1
+    printf '%s - - [%s] "%s HTTP/1.1" %s 0 "-" "Mozilla/5.0 (loxprox-selftest)"\n' \
+        "$2" "$(LC_ALL=C date '+%d/%b/%Y:%H:%M:%S %z')" "$3" "$4" > "$dir/$1"
+    out=$(cscli explain --file "$dir/$1" --type nginx 2>&1) || true
+    rm -rf "$dir"
+    printf '%s\n' "$out"
+}
+
+test_edge() {
+    test_header "Edge filtering, bans & host config (2026-10)"
+
+    local site=/etc/nginx/sites-available/loxone
+    local trap_log=/var/log/nginx/loxprox-trap.log unknown_log=/var/log/nginx/loxprox-unknown.log
+    local hosts_log=/var/log/nginx/loxprox-trap-hosts.log hosts_before=0 hosts_after last
+    local scheme code before after want hdrs
+    scheme=$(_gateway_scheme)
+
+    # nginx: classes, limits and logs are in the generated site.
+    if [[ -f "$site" ]]; then
+        for want in 'map $uri $loxprox_path_class' 'zone=loxone_auth' 'limit_conn loxone_ws_conn 6' \
+                    'loxprox-trap.log' 'loxprox-unknown.log' 'authwithtoken|refreshjwt'; do
+            grep -qF "$want" "$site" && pass "site carries: $want" || fail "site lacks '$want' (template < v6? re-run deploy.sh)"
+        done
+        if [[ "$(_gw_conf REMOTE_ADMIN_PATHS)" != "allow" ]]; then
+            grep -qE '"0:admin"[[:space:]]+403;' "$site" && pass "admin endpoints answer 403 to untrusted sources" \
+                || fail "REMOTE_ADMIN_PATHS=deny but the site has no admin denial"
+        fi
+    fi
+
+    hdrs=$(_gw_curl /jdev/cfg/api -sI --connect-timeout 5 --max-time 10 2>/dev/null | tr -d '\r')
+    if grep -qiE '^Server: nginx/' <<<"$hdrs"; then
+        fail "Server header discloses the nginx version ($(grep -i '^Server:' <<<"$hdrs"))"
+    elif grep -qi '^Server:' <<<"$hdrs"; then
+        pass "Server header carries no version ($(grep -i '^Server:' <<<"$hdrs"))"
+    else
+        warn "no Server header in the response — server_tokens not checkable"
+    fi
+
+    # Trap: a scanner path under the real name, and (TLS) the bare IP. These
+    # hits come from 127.0.0.1, which CrowdSec's whitelists never ban.
+    before=$(_line_count "$trap_log")
+    hosts_before=$(_line_count "$hosts_log")
+    code=$(_gw_curl /.env -s -o /dev/null -w '%{http_code}' --max-time 5 2>/dev/null) || true
+    [[ "$code" == "000" ]] && pass "scanner path /.env: connection closed without a response (444)" \
+                           || fail "scanner path /.env answered HTTP $code (expected 444)"
+    if [[ "$scheme" == "https" ]]; then
+        code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 https://127.0.0.1:1080/ 2>/dev/null) || true   # trap-probe
+        [[ "$code" == "000" ]] && pass "HTTPS for the bare IP (no SNI, foreign Host): 444" \
+                               || fail "HTTPS for the bare IP answered HTTP $code — the Host/SNI gate is missing"
+        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:1080/ 2>/dev/null) || true
+        [[ "$code" == "000" ]] && pass "cleartext on :1080 with a foreign Host: 444 (only the real name gets the 301)" \
+                               || fail "cleartext on :1080 with a foreign Host answered HTTP $code"
+        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:80/ 2>/dev/null) || true
+        [[ "$code" == "000" ]] && pass ":80 with a foreign Host: 444" || fail ":80 with a foreign Host answered HTTP $code"
+    fi
+    sleep 1
+    after=$(_line_count "$trap_log")
+    (( after > before )) && pass "trap log recorded the probes ($trap_log: +$((after - before)))" \
+                         || fail "trap log did not grow ($trap_log)"
+    # The trap servers' Host/SNI view (TLS mode only: without TLS there are no
+    # trap servers). The three bare-IP probes above must each add a line.
+    if [[ "$scheme" == "https" ]]; then
+        hosts_after=$(_line_count "$hosts_log")
+        last=$( [[ -f "$hosts_log" ]] && tail -n 1 "$hosts_log" ) || last=""
+        if (( hosts_after - hosts_before >= 3 )) && [[ "$last" == *' host="127.0.0.1" '* ]]; then
+            pass "trap-hosts log grew with the trap log (+$((hosts_after - hosts_before)), host= and sni= recorded)"
+        else
+            fail "trap-hosts log did not record the bare-IP probes ($hosts_log: +$((hosts_after - hosts_before)), last: ${last:-none})"
+        fi
+    fi
+
+    before=$(_line_count "$unknown_log")
+    _gw_curl /loxprox-selftest-unknown -s -o /dev/null --max-time 5 2>/dev/null || true
+    sleep 1
+    after=$(_line_count "$unknown_log")
+    (( after > before )) && pass "unknown path logged ($unknown_log)" || fail "unknown path not logged to $unknown_log"
+
+    # Firewall: IPv6 GeoIP set + rule, nginx egress restricted to the Miniserver.
+    local ruleset n drops_before drops_after
+    ruleset=$(nft list table inet filter 2>/dev/null) || ruleset=""
+    grep -q 'set geoip_blocklist6' <<<"$ruleset" && grep -q 'ip6 saddr @geoip_blocklist6 drop' <<<"$ruleset" \
+        && pass "nftables: geoip_blocklist6 declared and dropped on input" \
+        || fail "nftables: geoip_blocklist6 set or its ip6 drop rule missing"
+    n=$(grep -c 'loxprox-egress' <<<"$ruleset")
+    (( n >= 5 )) && pass "nftables output chain carries the $n loxprox-egress rules" \
+                 || fail "nftables output chain has $n loxprox-egress rule(s), expected 5"
+    if command -v setpriv >/dev/null 2>&1; then
+        local lox_ip lox_port
+        lox_ip=$(_gw_conf LOXONE_IP)
+        lox_port=$(_gw_conf LOXONE_PORT)
+        code=$(setpriv --reuid=www-data --regid=www-data --clear-groups \
+            curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://${lox_ip}:${lox_port:-80}/jdev/cfg/api" 2>/dev/null) || true
+        [[ "$code" != "000" ]] && pass "nginx's user (www-data) reaches the Miniserver (HTTP $code)" \
+                               || fail "www-data cannot reach the Miniserver at ${lox_ip}:${lox_port:-80} — egress rule wrong?"
+        # 192.0.2.1 is TEST-NET-1 (RFC 5737): never routed, so nothing leaves
+        # the box either way — the drop rule's counter shows who stopped it.
+        drops_before=$(_egress_drops)
+        setpriv --reuid=www-data --regid=www-data --clear-groups \
+            curl -s -o /dev/null --max-time 2 http://192.0.2.1/ >/dev/null 2>&1 || true
+        drops_after=$(_egress_drops)
+        if [[ "$drops_before" =~ ^[0-9]+$ && "$drops_after" =~ ^[0-9]+$ ]] && (( drops_after > drops_before )); then
+            pass "www-data egress to anything else is dropped (loxprox-egress counter $drops_before → $drops_after)"
+        else
+            fail "www-data egress to 192.0.2.1 was not counted by the loxprox-egress drop rule ('$drops_before' → '$drops_after')"
+        fi
+    fi
+
+    # sshd: what the running config says, not just the drop-in.
+    local dropin=/etc/ssh/sshd_config.d/99-loxprox.conf eff want_root
+    eff=$(sshd -T 2>/dev/null) || eff=""
+    want_root=$(awk '$1 == "PermitRootLogin" {print $2}' "$dropin" 2>/dev/null)
+    eff=$(awk '$1 == "permitrootlogin" {print $2}' <<<"$eff")
+    if [[ "$want_root" == "no" && "$eff" == "no" ]]; then
+        pass "sshd: PermitRootLogin no (effective)"
+    elif [[ "$want_root" == "prohibit-password" ]]; then
+        warn "sshd: PermitRootLogin prohibit-password — only root has a key; add one for a sudo user, then deploy.sh --finalize-ssh"
+    elif [[ -n "$want_root" && "$eff" != "$want_root" ]]; then
+        fail "sshd: drop-in says PermitRootLogin $want_root, effective is '$eff' — another sshd_config.d file wins"
+    else
+        warn "sshd: PermitRootLogin is '$eff' (SOFT mode or no LoxProx drop-in)"
+    fi
+    if [[ -n "$(_gw_conf SSH_ALLOW_USERS)" ]]; then
+        grep -q '^AllowUsers ' "$dropin" 2>/dev/null && pass "sshd: $(grep '^AllowUsers ' "$dropin")" \
+            || fail "SSH_ALLOW_USERS is set but the drop-in has no AllowUsers (refused as a lockout? see the deploy log)"
+    fi
+
+    # unattended-upgrades: the matcher accepts the security archive again.
+    local uu_conf=/etc/apt/apt.conf.d/50unattended-upgrades uu_out
+    if grep -q 'Origins-Pattern' "$uu_conf" 2>/dev/null && ! grep -q 'Allowed-Origins' "$uu_conf"; then
+        pass "unattended-upgrades uses Origins-Pattern (codename + label)"
+    else
+        fail "$uu_conf still uses Allowed-Origins (archive match — misses oldstable-security)"
+    fi
+    if command -v python3 >/dev/null 2>&1 && [[ -x /usr/bin/unattended-upgrade ]]; then
+        uu_out=$(_uu_origin_check | tail -n 1)   # the verdict is the last line
+        case "$uu_out" in
+            ok*)   pass "unattended-upgrades' own matcher accepts Debian main + security, rejects CrowdSec's repo (${uu_out#ok })" ;;
+            miss*) fail "unattended-upgrades origin check: ${uu_out#miss }" ;;
+            *)     warn "unattended-upgrades origin check could not run: $uu_out" ;;
+        esac
+    fi
+
+    # CrowdSec: scenarios, simulation, profiles, retention, log routing.
+    local cs sim out
+    cs=$(cscli scenarios list 2>/dev/null) || cs=""
+    for want in loxprox/scanner-trap loxprox/unknown-path loxprox/auth-bf; do
+        grep -qF "$want" <<<"$cs" && pass "CrowdSec scenario installed: $want" || fail "CrowdSec scenario missing: $want"
+    done
+    sim=$(cscli simulation status 2>&1) || sim=""
+    grep -qF loxprox/auth-bf <<<"$sim" && pass "loxprox/auth-bf in simulation (alerts only)" \
+                                      || fail "loxprox/auth-bf is NOT in simulation — it bans"
+    if [[ "$(_gw_conf UNKNOWN_PATH_MODE)" != "deny" ]]; then
+        grep -qF loxprox/unknown-path <<<"$sim" && pass "loxprox/unknown-path in simulation (UNKNOWN_PATH_MODE=log)" \
+                                              || fail "loxprox/unknown-path is NOT in simulation while UNKNOWN_PATH_MODE=log"
+    fi
+    # TRAP_BAN_MODE: observe = the trap logs + alerts but must not ban yet;
+    # ban = it must not be left in simulation.
+    if [[ "$(_gw_conf TRAP_BAN_MODE)" == "observe" ]]; then
+        if grep -qF loxprox/scanner-trap <<<"$sim"; then
+            warn "trap bans withheld (TRAP_BAN_MODE=observe) — check 'cscli alerts list -s loxprox/scanner-trap --limit 0' and $hosts_log, then set TRAP_BAN_MODE=ban"
+        else
+            fail "TRAP_BAN_MODE=observe, but loxprox/scanner-trap is NOT in simulation — trap hits ban"
+        fi
+    elif grep -qF loxprox/scanner-trap <<<"$sim"; then
+        fail "TRAP_BAN_MODE=ban, but loxprox/scanner-trap is in simulation — trap hits do NOT ban"
+    else
+        pass "loxprox/scanner-trap bans (TRAP_BAN_MODE=ban)"
+    fi
+    if [[ "$(awk '/^name:/ {print $2; exit}' /etc/crowdsec/profiles.yaml 2>/dev/null)" == "loxprox_hard_ip" ]]; then
+        pass "CrowdSec profiles: loxprox_hard_ip first ($(awk '/duration:/ {print $2; exit}' /etc/crowdsec/profiles.yaml))"
+    else
+        fail "/etc/crowdsec/profiles.yaml does not start with the loxprox_hard_ip profile"
+    fi
+    out=$(cscli config show-yaml 2>/dev/null) || out=""
+    grep -qE '^[[:space:]]+max_age:[[:space:]]+[0-9]+d' <<<"$out" && grep -qE '^[[:space:]]+max_items:[[:space:]]+100000' <<<"$out" \
+        && pass "CrowdSec keeps $(awk '$1 == "max_age:" {print $2; exit}' <<<"$out") / 100000 alerts (config.yaml.local merged)" \
+        || fail "cscli config show-yaml does not show the LoxProx flush settings (config.yaml.local)"
+    if command -v cscli >/dev/null 2>&1; then
+        out=$(_cs_explain loxprox-trap.log 198.51.100.7 "GET /.env" 444)
+        grep -qF 'loxprox/scanner-trap' <<<"$out" && pass "cscli explain: a trap-log line fires loxprox/scanner-trap" \
+                                                  || fail "cscli explain: trap-log line did not reach loxprox/scanner-trap"
+        out=$(_cs_explain loxone-access.log 198.51.100.7 "GET /jdev/cfg/api" 200)
+        grep -qF 'loxprox/scanner-trap' <<<"$out" && fail "cscli explain: a normal access-log line fired loxprox/scanner-trap" \
+                                                  || pass "cscli explain: a normal access-log line does not reach loxprox/scanner-trap"
+    fi
+
+    # Schedules, retention, tools.
+    grep -qF 'flock -n /run/loxprox-progressive-ban.lock /opt/loxprox/progressive-ban.py' /etc/cron.d/loxprox 2>/dev/null \
+        && pass "progressive ban runs under flock" || fail "progressive-ban cron line without flock"
+    grep -qE '^30 4 \* \* 0 root /opt/loxprox/hub-refresh.sh' /etc/cron.d/loxprox 2>/dev/null \
+        && pass "weekly hub refresh scheduled (Sunday 04:30)" || fail "hub-refresh cron line missing"
+    if grep -qF '/var/log/nginx/loxprox-trap.log' /etc/logrotate.d/loxone-nginx 2>/dev/null \
+            && grep -qE '^[[:space:]]+rotate 90$' /etc/logrotate.d/loxone-nginx; then
+        pass "trap / unknown / access logs kept 90 days"
+    else
+        fail "/etc/logrotate.d/loxone-nginx does not keep the trap/unknown/access logs 90 days"
+    fi
+    command -v mmdblookup >/dev/null 2>&1 && pass "mmdb-bin installed (session alert ASN lookups)" \
+                                          || fail "mmdblookup missing (apt install mmdb-bin)"
+}
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 main() {
@@ -970,6 +1292,7 @@ main() {
     test_backup
     test_tunnel
     test_tls
+    test_edge
     test_gui
     test_version
     test_operations

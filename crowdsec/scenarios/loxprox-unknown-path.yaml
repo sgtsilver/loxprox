@@ -1,0 +1,32 @@
+# LoxProx — several distinct paths outside the known Loxone endpoints from one
+# address (installed by deploy.sh into /etc/crowdsec/scenarios/).
+#
+# /var/log/nginx/loxprox-unknown.log receives every request whose path is in
+# none of the gateway's classes (trap, admin, app). With UNKNOWN_PATH_MODE=log
+# those requests are still proxied — the log is how the app's real endpoint
+# list is learned — so deploy.sh keeps this scenario in CrowdSec SIMULATION
+# mode (alerts, no bans) while the mode is "log". distinct: a client polling
+# one endpoint the class list is missing never fills the bucket; a scanner
+# walking six different unknown paths within ~12 minutes does.
+#
+# Log file told apart by evt.Line.Src (see loxprox-scanner-trap.yaml).
+# Not in BAN_HARD_SCENARIOS: an overflow uses the SOFT ladder.
+type: leaky
+format: 2.0
+name: loxprox/unknown-path
+description: "Distinct requests for paths outside the known Loxone app/admin endpoints"
+filter: "evt.Meta.log_type == 'http_access-log' && evt.Line.Src endsWith 'loxprox-unknown.log'"
+groupby: evt.Meta.source_ip
+distinct: evt.Meta.http_path
+capacity: 5
+leakspeed: 2m
+blackhole: 5m
+labels:
+  service: http
+  confidence: 1
+  spoofable: 0
+  classification:
+    - attack.T1595
+  behavior: "http:scan"
+  label: "LoxProx unknown-path probing"
+  remediation: true

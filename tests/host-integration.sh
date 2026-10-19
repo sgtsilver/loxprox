@@ -461,7 +461,7 @@ CTR=loxprox-ci-nginx
 t_nginx_container_setup() {
     systemctl() { true; }
     # shellcheck disable=SC2034  # consumed by deploy.sh's configure_nginx
-    LOXONE_IP=127.0.0.1 LOXONE_PORT=8081 ENABLE_APPSEC=false
+    LOXONE_IP=127.0.0.1 LOXONE_PORT=8081 ENABLE_APPSEC=false TLS_DOMAIN=loxprox.test
     mkdir -p /etc/loxprox/tls /var/log/nginx
     openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=loxprox.test \
         -keyout /etc/loxprox/tls/privkey.pem -out /etc/loxprox/tls/fullchain.pem >/dev/null 2>&1
@@ -479,7 +479,7 @@ EMU
     configure_nginx >/dev/null 2>&1 || { echo "configure_nginx failed"; nginx -t; exit 1; }
     _loxprox_site_enable_tls >/dev/null 2>&1 || { echo "TLS mutation failed"; exit 1; }
     nginx -t || exit 1
-    printf 'ENABLE_TLS="true"\nENABLE_APPSEC="false"\n' > /etc/loxprox/deploy.conf
+    printf 'ENABLE_TLS="true"\nENABLE_APPSEC="false"\nTLS_DOMAIN="loxprox.test"\n' > /etc/loxprox/deploy.conf
     echo "container ready: $(grep -c . "$NGINX_SITE") site lines, $(ls /etc/nginx/modules-enabled | wc -l) dynamic modules enabled"
 }
 
@@ -510,7 +510,7 @@ ngx_lifecycle() {
         [ -f /run/nginx.pid.oldbin ] || exit 14
         kill -QUIT "$(cat /run/nginx.pid.oldbin)" || exit 15; sleep 2
         [ ! -e /run/nginx.pid.oldbin ] || exit 16
-        curl -fsk -o /dev/null https://127.0.0.1:1080/jdev/cfg/api || exit 17
+        curl -fsk --resolve loxprox.test:1080:127.0.0.1 -o /dev/null https://loxprox.test:1080/jdev/cfg/api || exit 17
         nginx -s quit; sleep 1
         exit 0'
 }
@@ -551,7 +551,8 @@ t_nginx_apparmor() {
     docker exec "$CTR" nginx
     sleep 1
     local hdrs
-    hdrs=$(docker exec "$CTR" curl -sk -D - -o /dev/null https://127.0.0.1:1080/jdev/cfg/api | tr -d '\r')
+    # 2026-10: under the gateway's name — 127.0.0.1 over TLS is the trap's.
+    hdrs=$(docker exec "$CTR" curl -sk --resolve loxprox.test:1080:127.0.0.1 -D - -o /dev/null https://loxprox.test:1080/jdev/cfg/api | tr -d '\r')
     [[ "$(grep -ci '^x-frame-options:' <<<"$hdrs")" == "1" ]] && grep -qi '^x-frame-options: SAMEORIGIN' <<<"$hdrs" \
         && pass "HTTPS-proxied response: exactly one X-Frame-Options (SAMEORIGIN), Miniserver's 'deny' hidden" \
         || fail "HTTPS-proxied X-Frame-Options: $(grep -i '^x-frame-options' <<<"$hdrs" | tr '\n' ';')"
@@ -694,7 +695,7 @@ server {
     listen 127.0.0.1:7422;
     location / {
         default_type application/json;
-        if ($http_x_crowdsec_appsec_uri ~ "^/(\.git/|jdev/sys/enc/)") {
+        if ($http_x_crowdsec_appsec_uri ~ "^/(\.git/|ci-blocked/|jdev/sys/enc/)") {
             return 403 '{"action":"ban","http_status":403}';
         }
         return 200 '{"action":"allow","http_status":200}';
@@ -741,7 +742,12 @@ t_nginx_appsec() {
 
     code=$(appsec_get '/jdev/cfg/api')
     [[ "$code" == "200" ]] && pass "allowed request proxied to the Miniserver (HTTP 200)" || fail "allowed request: HTTP $code"
-    code=$(appsec_get '/.git/config?sk=CI-SECRET-QUERY')
+    # 2026-10: /.git is a trap path — answered (444) in the rewrite phase,
+    # before the AppSec subrequest that would have 403'd it, so it leaves no
+    # detection line (the count of two below proves it).
+    code=$(appsec_get '/.git/config')
+    [[ "$code" == "000" ]] && pass "trap path /.git/config closed (444) before AppSec is asked" || fail "trap path: HTTP $code"
+    code=$(appsec_get '/ci-blocked/config?sk=CI-SECRET-QUERY')
     [[ "$code" == "403" ]] && pass "AppSec 403 → nginx refuses the request (HTTP 403)" || fail "blocked request: HTTP $code"
     code=$(appsec_get '/jdev/sys/enc/CI-SECRET-BLOB')
     [[ "$code" == "403" ]] && pass "second blocked request (HTTP 403)" || fail "second blocked request: HTTP $code"
@@ -751,9 +757,11 @@ t_nginx_appsec() {
     sed 's/^/      /' <<<"${lines:-<empty>}"
     [[ "$(grep -c . <<<"$lines")" == "2" ]] && pass "exactly the two blocked requests were logged, the allowed one was not" \
                                             || fail "expected 2 detection lines, got $(grep -c . <<<"$lines")"
-    grep -q '127.0.0.1 "GET /.git/config HTTP/1.1" appsec=403 status=403' <<<"$lines" \
+    grep -q '127.0.0.1 "GET /ci-blocked/config HTTP/1.1" appsec=403 status=403' <<<"$lines" \
         && pass "line carries client address, method, path, appsec=403, status=403" \
-        || fail "no well-formed line for /.git/config"
+        || fail "no well-formed line for /ci-blocked/config"
+    docker exec "$APPSEC_CTR" grep -q '"GET /.git/config HTTP/1.1" 444' /var/log/nginx/loxprox-trap.log \
+        && pass "the trap path is in the trap log (444)" || fail "trap path missing from loxprox-trap.log"
     grep -q '"GET /jdev/sys/enc/<redacted> HTTP/1.1"' <<<"$lines" \
         && pass "Loxone credential path redacted (F3 scrub) in the detection log" \
         || fail "Loxone credential path not redacted"
@@ -786,7 +794,7 @@ PY
     docker exec "$APPSEC_CTR" bash /workspace/tests/host-integration.sh nginx-appsec-v4 \
         || { fail "control: could not switch the site to the v4 header source"; docker rm -f "$APPSEC_CTR" >/dev/null 2>&1; return; }
     sleep 1
-    code=$(appsec_get '/.git/config')
+    code=$(appsec_get '/ci-blocked/config')
     sleep 1
     lines=$(docker exec "$APPSEC_CTR" cat "$APPSEC_LOG" 2>/dev/null)
     if [[ "$code" == "403" && "$(grep -c . <<<"$lines")" == "2" ]]; then
@@ -797,9 +805,455 @@ PY
     docker rm -f "$APPSEC_CTR" >/dev/null 2>&1
 }
 
+# ── 2026-10 breach hardening ────────────────────────────────────────────────
+
+# Lines of a container's output → this run's counters: "  ✓ x" passes,
+# "  ✗ x" fails, anything else is context.
+relay_results() {
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            "  ✓ "*) pass "${line#  ✓ }" ;;
+            "  ✗ "*) fail "${line#  ✗ }" ;;
+            *)       note "$line" ;;
+        esac
+    done
+}
+
+EDGE_CTR=loxprox-ci-edge
+
+# Runs INSIDE the Debian 12 container: the gateway's own site (deploy.sh) in
+# mode $1 — tls (UNKNOWN_PATH_MODE=log), tls-deny (=deny) or plain — in front
+# of a Miniserver stand-in. LAN_SUBNET is 192.168.1.0/24, so requests to the
+# container's own eth0 address are "internet" (untrusted), loopback trusted.
+t_nginx_edge_setup() {
+    local mode="${1:-tls}"
+    systemctl() { true; }
+    # shellcheck disable=SC2034  # consumed by deploy.sh's configure_nginx / TLS block
+    LOXONE_IP=127.0.0.1 LOXONE_PORT=8081 ENABLE_APPSEC=false TLS_DOMAIN=loxprox.test \
+        EXTRA_SERVER_NAMES=alt.loxprox.test LAN_SUBNET=192.168.1.0/24 REMOTE_ADMIN_PATHS=deny UNKNOWN_PATH_MODE=log
+    # shellcheck disable=SC2034
+    CROWDSEC_WHITELIST_IPS=("192.168.1.0/24")
+    [[ "$mode" == "tls-deny" ]] && UNKNOWN_PATH_MODE=deny
+    mkdir -p /etc/loxprox/tls /var/log/nginx "$ACME_WEBROOT/.well-known/acme-challenge"
+    [[ -s /etc/loxprox/tls/fullchain.pem ]] || openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=loxprox.test \
+        -keyout /etc/loxprox/tls/privkey.pem -out /etc/loxprox/tls/fullchain.pem >/dev/null 2>&1
+    printf 'ci-token-content\n' > "$ACME_WEBROOT/.well-known/acme-challenge/ci-token"
+    cat > /etc/nginx/conf.d/ci-miniserver-emulator.conf <<'EMU'
+server {
+    listen 127.0.0.1:8081;
+    # A slow body keeps a proxied /ws/ connection open for the limit_conn check.
+    location /ws/ { limit_rate 1; return 200 "0123456789012345678901234567890123456789\n"; }
+    location / { return 200 "miniserver\n"; }
+}
+EMU
+    configure_nginx >/dev/null 2>&1 || { echo "configure_nginx failed"; nginx -t; exit 1; }
+    if [[ "$mode" == "plain" ]]; then
+        _loxprox_site_disable_tls >/dev/null 2>&1
+        rm -f "$NGINX_ACME_CONF"
+    else
+        _loxprox_site_enable_tls >/dev/null 2>&1 || { echo "TLS block failed"; exit 1; }
+    fi
+    nginx -t || exit 1
+    echo "edge container ready ($mode): $(grep -c . "$NGINX_SITE") site lines"
+}
+
+edge_code() {   # edge_code CURL_ARGS… → HTTP status; 000 = closed without a response (444)
+    docker exec "$EDGE_CTR" curl -sk -o /dev/null -w '%{http_code}' --max-time 10 "$@" 2>/dev/null || true
+}
+
+edge_lines() {  # edge_lines FILE → line count inside the container
+    docker exec "$EDGE_CTR" sh -c "[ -f '$1' ] && wc -l < '$1' || echo 0"
+}
+
+edge_mode() {
+    docker exec "$EDGE_CTR" bash /workspace/tests/host-integration.sh nginx-edge-setup "$1" \
+        && docker exec "$EDGE_CTR" nginx -s reload && sleep 1
+}
+
+t_nginx_edge() {
+    section "nginx-extras (Debian 12) — Host/SNI gate, path classes, limits, scrub, server_tokens (2026-10)"
+    command -v docker >/dev/null || { fail "docker missing"; return; }
+    local trap=/var/log/nginx/loxprox-trap.log unknown=/var/log/nginx/loxprox-unknown.log access=/var/log/nginx/loxone-access.log
+    local ip code before after hdrs p n
+    docker rm -f "$EDGE_CTR" >/dev/null 2>&1
+    docker run -d --name "$EDGE_CTR" -e CI=true -v "$REPO:/workspace:ro" -w /workspace debian:12 sleep infinity >/dev/null
+    docker exec "$EDGE_CTR" sh -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx-extras curl procps openssl >/dev/null 2>&1' \
+        || { fail "could not install nginx-extras in the container"; docker rm -f "$EDGE_CTR" >/dev/null 2>&1; return; }
+    docker exec "$EDGE_CTR" sh -c 'nginx -s quit 2>/dev/null; sleep 1; pkill -x nginx; true'
+    if docker exec "$EDGE_CTR" bash /workspace/tests/host-integration.sh nginx-edge-setup tls; then
+        pass "nginx -t accepts the v6 site with the TLS block and both trap servers"
+    else
+        fail "edge setup (tls) failed"; docker rm -f "$EDGE_CTR" >/dev/null 2>&1; return
+    fi
+    docker exec "$EDGE_CTR" /usr/sbin/nginx || { fail "nginx did not start"; docker rm -f "$EDGE_CTR" >/dev/null 2>&1; return; }
+    sleep 1
+    ip=$(docker exec "$EDGE_CTR" hostname -i | awk '{print $1}')
+    note "untrusted source = the container's own address $ip (LAN_SUBNET 192.168.1.0/24)"
+    local R=(--resolve loxprox.test:1080:127.0.0.1) X=(--resolve "loxprox.test:1080:$ip")
+
+    # ── Host/SNI gate
+    code=$(edge_code "${R[@]}" https://loxprox.test:1080/jdev/cfg/api)
+    [[ "$code" == "200" ]] && pass "real name (TLS_DOMAIN) proxied (HTTP 200)" || fail "real name: HTTP $code"
+    code=$(edge_code --resolve alt.loxprox.test:1080:127.0.0.1 https://alt.loxprox.test:1080/jdev/cfg/api)
+    [[ "$code" == "200" ]] && pass "EXTRA_SERVER_NAMES name proxied" || fail "extra name: HTTP $code"
+    before=$(edge_lines "$trap")
+    code=$(edge_code https://127.0.0.1:1080/)
+    [[ "$code" == "000" ]] && pass "bare IP, no SNI: 444 (closed, no bytes)" || fail "bare IP over TLS: HTTP $code"
+    code=$(edge_code "${R[@]}" -H 'Host: evil.example' https://loxprox.test:1080/)
+    [[ "$code" == "000" ]] && pass "real SNI but foreign Host: 444" || fail "foreign Host: HTTP $code"
+    code=$(edge_code http://127.0.0.1:1080/)
+    [[ "$code" == "000" ]] && pass "cleartext to :1080 with a foreign Host (497): 444" || fail "cleartext foreign Host: HTTP $code"
+    hdrs=$(docker exec "$EDGE_CTR" curl -s -D - -o /dev/null --max-time 10 -H 'Host: loxprox.test' http://127.0.0.1:1080/jdev/cfg/api | tr -d '\r')
+    grep -q '^HTTP/1.1 301' <<<"$hdrs" && grep -qi '^Location: https://loxprox.test:1080/jdev/cfg/api' <<<"$hdrs" \
+        && pass "cleartext for the real name keeps the 301 to https (the family device)" || fail "real-name cleartext: $(head -1 <<<"$hdrs")"
+    grep -qx 'Server: nginx' <<<"$hdrs" && pass "server_tokens off: 'Server: nginx' without a version" || fail "Server header: $(grep -i '^Server' <<<"$hdrs")"
+    code=$(edge_code http://127.0.0.1:80/)
+    [[ "$code" == "000" ]] && pass ":80 with a foreign Host: 444" || fail ":80 foreign Host: HTTP $code"
+    code=$(docker exec "$EDGE_CTR" curl -s --max-time 10 -H 'Host: loxprox.test' http://127.0.0.1/.well-known/acme-challenge/ci-token)
+    [[ "$code" == "ci-token-content" ]] && pass ":80 real name: ACME challenge served" || fail "ACME challenge: '$code'"
+    code=$(edge_code -H 'Host: loxprox.test' http://127.0.0.1/anything)
+    [[ "$code" == "301" ]] && pass ":80 real name: 301 to https" || fail ":80 real name: HTTP $code"
+    sleep 1
+    after=$(edge_lines "$trap")
+    (( after - before == 4 )) && pass "the 4 foreign-host requests are in the trap log" || fail "trap log grew by $((after - before)), expected 4"
+    docker exec "$EDGE_CTR" grep -q '" 301 ' "$trap" && fail "a 301 (real name) was logged as a trap hit" || pass "the real name's 301 is never a trap hit"
+    # R5: the host diagnostics log saw the same four, with Host and SNI.
+    docker exec "$EDGE_CTR" grep -q 'host="evil.example" sni="loxprox.test" "GET /" 444' /var/log/nginx/loxprox-trap-hosts.log \
+        && pass "trap-hosts log names Host and SNI (host=\"evil.example\" sni=\"loxprox.test\")" || fail "trap-hosts log lacks the foreign-Host hit"
+    docker exec "$EDGE_CTR" grep -q 'host="127.0.0.1" sni="-" "GET /" 444' /var/log/nginx/loxprox-trap-hosts.log \
+        && pass "trap-hosts log: a cleartext hit carries sni=\"-\"" || fail "trap-hosts log: no cleartext line with sni=\"-\""
+    [[ "$(edge_lines /var/log/nginx/loxprox-trap-hosts.log)" -ge 4 ]] && pass "trap-hosts log has the :1080 and :80 trap hits" \
+                                                                    || fail "trap-hosts log: $(docker exec "$EDGE_CTR" cat /var/log/nginx/loxprox-trap-hosts.log)"
+
+    # R1: the SHIPPED network watchdog's probe against this gated nginx. With
+    # a config.env that carries TLS_DOMAIN it sees a healthy listener; with a
+    # pre-2026-10 config.env (no TLS_DOMAIN) it asks 127.0.0.1, gets the
+    # trap's 444 and reads 000 — the reason deploy.sh disables the old
+    # watchdog before the gate goes live.
+    local wd
+    wd=$(docker exec "$EDGE_CTR" bash -c '
+        printf "ENABLE_TLS=\"true\"\nTLS_DOMAIN=\"loxprox.test\"\n" > /var/tmp/wd-new.env
+        printf "ENABLE_TLS=\"true\"\n" > /var/tmp/wd-old.env
+        for cfg in new old; do
+            ( export LOXPROX_CONFIG=/var/tmp/wd-$cfg.env WATCHDOG_IFACE=lo WATCHDOG_GATEWAY=127.0.0.1 DISCORD_ALERT_PATH=/bin/true
+              source /workspace/security-monitoring/network-watchdog.sh
+              printf "%s=%s " "$cfg" "$(nginx_local_status)" )
+        done' 2>&1)
+    [[ "$wd" == *"new=200"* ]] && pass "shipped watchdog with TLS_DOMAIN: healthy (${wd%% *})" || fail "watchdog with TLS_DOMAIN: '$wd'"
+    [[ "$wd" == *"old=000"* ]] && pass "shipped watchdog without TLS_DOMAIN: 000 from the trap — why the pause exists" \
+                               || fail "watchdog without TLS_DOMAIN: '$wd'"
+
+    # ── trap paths and methods on the real name
+    before=$(edge_lines "$trap")
+    n=0
+    for p in /.env /api/.env /.git/config /wp-login.php /index.php /cgi-bin/luci \
+             /vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php /HNAP1/ /boaform/admin/formLogin /actuator/health; do
+        code=$(edge_code "${R[@]}" "https://loxprox.test:1080$p")
+        if [[ "$code" == "000" ]]; then n=$((n + 1)); else fail "trap path $p: HTTP $code"; fi
+    done
+    (( n == 10 )) && pass "10 scanner paths: 444"
+    n=0
+    for p in TRACK PROPFIND TRACE; do
+        code=$(edge_code "${R[@]}" -X "$p" https://loxprox.test:1080/)
+        if [[ "$code" == "000" ]]; then n=$((n + 1)); else fail "method $p: HTTP $code"; fi
+    done
+    (( n == 3 )) && pass "TRACK / PROPFIND / TRACE: 444 (TRACE via nginx's own 405 → error_page)"
+    sleep 1
+    after=$(edge_lines "$trap")
+    (( after - before == 13 )) && pass "all 13 in the trap log" || fail "trap log grew by $((after - before)), expected 13"
+    # CONNECT with an origin-form target may already fail nginx's request-line
+    # parser (400) before the method's 405; either way it is never proxied.
+    code=$(edge_code "${R[@]}" -X CONNECT https://loxprox.test:1080/)
+    [[ "$code" == "000" || "$code" == "400" ]] && pass "CONNECT refused, never proxied (HTTP $code)" || fail "CONNECT: HTTP $code"
+    local bad_lines
+    bad_lines=$(docker exec "$EDGE_CTR" grep -cvE '^[0-9a-f.:]+ - [^ ]+ \[[^]]+\] "[A-Z]+ [^ ]* HTTP/1\.[01]" [0-9]{3} [0-9]+ "[^"]*" "[^"]*"$' "$trap" || true)
+    [[ "$bad_lines" == "0" ]] && pass "every trap-log line has the combined shape crowdsecurity/nginx-logs parses" \
+                              || fail "$bad_lines trap-log line(s) not in the loxone_scrubbed shape"
+
+    # ── admin / app / unknown, trusted vs untrusted
+    code=$(edge_code "${X[@]}" https://loxprox.test:1080/dev/fsget/log/def.log)
+    [[ "$code" == "403" ]] && pass "admin path from the internet: 403" || fail "admin from untrusted: HTTP $code"
+    code=$(edge_code "${R[@]}" https://loxprox.test:1080/dev/fsget/log/def.log)
+    [[ "$code" == "200" ]] && pass "admin path from a trusted source: proxied" || fail "admin from loopback: HTTP $code"
+    before=$(edge_lines "$unknown")
+    n=0
+    for p in /jdev/cfg/api /jdev/cfg/apiKey /jdev/sys/getcertificate /dev/sys/getcertificate /favicon.ico \
+             /resources/favicon/x.png /get /data/LoxAPP3.json /jdev/sps/LoxAPPversion3 /stats/statistics.json; do
+        code=$(edge_code "${X[@]}" "https://loxprox.test:1080$p")
+        if [[ "$code" == "200" ]]; then n=$((n + 1)); else fail "app path $p from untrusted: HTTP $code"; fi
+    done
+    (( n == 10 )) && pass "10 app paths from the internet: proxied"
+    after=$(edge_lines "$unknown")
+    (( after == before )) && pass "app paths never reach the unknown log" || fail "app paths written to the unknown log"
+    code=$(edge_code "${X[@]}" https://loxprox.test:1080/ci/unknown/path)
+    sleep 1
+    [[ "$code" == "200" ]] && pass "UNKNOWN_PATH_MODE=log: unknown path proxied" || fail "unknown (log mode): HTTP $code"
+    docker exec "$EDGE_CTR" sh -c "tail -1 $unknown" | grep -q '"GET /ci/unknown/path HTTP/1.1" 200' \
+        && pass "…and written to the unknown log" || fail "unknown path not in the unknown log"
+
+    # ── scrub: a token command never reaches a log in clear
+    edge_code "${R[@]}" https://loxprox.test:1080/jdev/sys/authwithtoken/CI-SECRET-TOKEN/ciuser >/dev/null
+    sleep 1
+    if docker exec "$EDGE_CTR" grep -q 'CI-SECRET-TOKEN' "$access"; then
+        fail "authwithtoken token hash written to the access log"
+    else
+        docker exec "$EDGE_CTR" grep -q '"GET /jdev/sys/authwithtoken/<redacted> HTTP/1.1"' "$access" \
+            && pass "authwithtoken logged as /jdev/sys/authwithtoken/<redacted>" || fail "authwithtoken request not found in the access log"
+    fi
+
+    # ── limits: untrusted auth requests 3/s burst 30; trusted never limited
+    local burst
+    burst=$(docker exec "$EDGE_CTR" sh -c "for i in \$(seq 45); do curl -sk -o /dev/null -w '%{http_code}\n' --resolve loxprox.test:1080:$ip https://loxprox.test:1080/jdev/sys/getkey2/ciuser; done" | grep -c '^503$' || true)
+    (( burst >= 1 )) && pass "45 rapid auth requests from the internet: $burst rejected (loxone_auth 3r/s, burst 30)" || fail "auth burst never limited"
+    burst=$(docker exec "$EDGE_CTR" sh -c "for i in \$(seq 45); do curl -sk -o /dev/null -w '%{http_code}\n' --resolve loxprox.test:1080:127.0.0.1 https://loxprox.test:1080/jdev/sys/getkey2/ciuser; done" | grep -c '^503$' || true)
+    [[ "$burst" == "0" ]] && pass "the same burst from a trusted source: none rejected" || fail "trusted source rate-limited ($burst × 503)"
+    sleep 2
+    code=$(docker exec "$EDGE_CTR" sh -c "for i in 1 2 3 4 5 6; do curl -sk -o /dev/null --max-time 8 --resolve loxprox.test:1080:$ip https://loxprox.test:1080/ws/rfc6455 & done; sleep 2; curl -sk -o /dev/null -w '%{http_code}' --max-time 3 --resolve loxprox.test:1080:$ip https://loxprox.test:1080/ws/rfc6455; wait" || true)
+    [[ "$code" == "503" ]] && pass "7th concurrent /ws/ socket from one internet address: 503 (limit 6)" || fail "7th /ws/ socket: HTTP $code"
+    code=$(docker exec "$EDGE_CTR" sh -c "for i in 1 2 3 4 5 6; do curl -sk -o /dev/null --max-time 8 --resolve loxprox.test:1080:127.0.0.1 https://loxprox.test:1080/ws/rfc6455 & done; sleep 2; curl -sk -o /dev/null -w '%{http_code}' --max-time 3 --resolve loxprox.test:1080:127.0.0.1 https://loxprox.test:1080/ws/rfc6455; wait" || true)
+    [[ "$code" != "503" ]] && pass "7 concurrent /ws/ sockets from a trusted source: not limited" || fail "trusted /ws/ sockets limited"
+
+    # ── UNKNOWN_PATH_MODE=deny
+    if edge_mode tls-deny; then
+        before=$(edge_lines "$unknown")
+        code=$(edge_code "${X[@]}" https://loxprox.test:1080/ci/unknown/deny)
+        [[ "$code" == "404" ]] && pass "UNKNOWN_PATH_MODE=deny: unknown path from the internet → 404" || fail "deny mode, untrusted: HTTP $code"
+        code=$(edge_code "${R[@]}" https://loxprox.test:1080/ci/unknown/deny)
+        [[ "$code" == "200" ]] && pass "deny mode, trusted source: still proxied" || fail "deny mode, trusted: HTTP $code"
+        code=$(edge_code "${X[@]}" https://loxprox.test:1080/jdev/cfg/api)
+        [[ "$code" == "200" ]] && pass "deny mode: app paths unaffected" || fail "deny mode app path: HTTP $code"
+        sleep 1
+        after=$(edge_lines "$unknown")
+        (( after - before == 2 )) && pass "deny mode still writes the unknown log" || fail "unknown log grew by $((after - before)), expected 2"
+    else
+        fail "switching the container to tls-deny failed"
+    fi
+
+    # ── plain mode (ENABLE_TLS=false): no gate, classes still apply
+    if edge_mode plain; then
+        code=$(edge_code http://127.0.0.1:1080/jdev/cfg/api)
+        [[ "$code" == "200" ]] && pass "plain mode: any Host served (server_name _)" || fail "plain mode: HTTP $code"
+        code=$(edge_code http://127.0.0.1:1080/.env)
+        [[ "$code" == "000" ]] && pass "plain mode: trap paths still 444" || fail "plain mode trap path: HTTP $code"
+        docker exec "$EDGE_CTR" grep -q 'LOXPROX-TRAP' "$NGINX_SITE" && fail "trap servers left in plain mode" || pass "plain mode: no trap servers, no default_server"
+    else
+        fail "switching the container to plain mode failed"
+    fi
+    docker rm -f "$EDGE_CTR" >/dev/null 2>&1
+}
+
+# Runs INSIDE a Debian 12 container with CAP_NET_ADMIN (its own network
+# namespace): deploy.sh's ruleset checked — and loaded — by Debian 12's nft.
+t_nft_check_inner() {
+    systemctl() { true; }
+    local d
+    d=$(mktemp -d)
+    # shellcheck disable=SC2034  # consumed by deploy.sh's setup_firewall
+    NFTABLES_CONF="$d/nftables.conf" NFTABLES_D_DIR="$d/nftables.d" LOXONE_IP=192.168.1.100 LOXONE_PORT=80 \
+        LAN_SUBNET=192.168.1.0/24 ENABLE_GUI=true GUI_PORT=1081 ENABLE_TLS=true
+    # shellcheck disable=SC2034
+    SSH_ALLOWED_SUBNETS=("192.168.1.0/24" "10.0.0.0/24")
+    setup_firewall >/dev/null 2>&1
+    nft -c -f "$NFTABLES_CONF" && pass "nft -c accepts the generated ruleset (placeholder sets)" || fail "nft -c rejects the ruleset: $(nft -c -f "$NFTABLES_CONF" 2>&1 | head -3)"
+    printf '%s\n' '# Generated: ci' 'set geoip_blocklist {' '    type ipv4_addr' '    flags interval' '    elements = { 198.51.100.0/24 }' '}' \
+        'set geoip_blocklist6 {' '    type ipv6_addr' '    flags interval' '    elements = { 2001:db8::/32 }' '}' > "$NFTABLES_D_DIR/99-geoip.conf"
+    nft -c -f "$NFTABLES_CONF" && pass "nft -c accepts it with geoip-block.sh's two-set include" || fail "two-set include rejected"
+    printf '%s\n' 'set geoip_blocklist {' '    type ipv4_addr' '    flags interval' '}' > "$NFTABLES_D_DIR/99-geoip.conf"
+    nft -c -f "$NFTABLES_CONF" >/dev/null 2>&1 && fail "control: a v4-only include was accepted (the check cannot fail)" \
+                                               || pass "control: a v4-only include is rejected — the IPv6 set must be declared"
+    setup_firewall >/dev/null 2>&1
+    nft -c -f "$NFTABLES_CONF" && pass "setup_firewall repairs an old v4-only include (v6 placeholder appended)" || fail "old include not repaired"
+    if nft -f "$NFTABLES_CONF"; then
+        local out
+        out=$(nft list chain inet filter output)
+        [[ "$(grep -c 'loxprox-egress' <<<"$out")" == "5" ]] && pass "loaded: 5 loxprox-egress rules in the output chain" || fail "output chain after load: $out"
+        grep -q 'skuid' <<<"$out" && pass "loaded: www-data resolved for meta skuid ($(grep -m1 -o 'skuid [^ ]*' <<<"$out"))" || fail "skuid rule missing after load"
+        grep -q 'ip6 saddr @geoip_blocklist6 drop' <<<"$(nft list chain inet filter input)" && pass "loaded: ip6 GeoIP drop rule active" || fail "ip6 drop rule not loaded"
+    else
+        fail "nft -f could not load the ruleset in the container's namespace"
+    fi
+}
+
+t_nft_check() {
+    section "nftables (Debian 12 nft 1.0.6) — generated ruleset (2026-10)"
+    command -v docker >/dev/null || { fail "docker missing"; return; }
+    relay_results < <(docker run --rm --cap-add NET_ADMIN -e CI=true -v "$REPO:/workspace:ro" -w /workspace debian:12 bash -c '
+        apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nftables >/dev/null 2>&1 || { echo "  ✗ nftables install failed"; exit 0; }
+        nft --version
+        bash /workspace/tests/host-integration.sh nft-check-inner' 2>&1)
+}
+
+# Runs INSIDE a Debian 12 container: unattended-upgrades' own matcher against
+# the generated config and the container's real apt sources, and sshd -t / -T
+# against the generated drop-in.
+t_debian12_host_inner() {
+    systemctl() { true; }
+    setup_unattended_upgrades >/dev/null 2>&1
+    local out
+    # shellcheck source=../test-gateway.sh
+    out=$( (source "$REPO/test-gateway.sh"; _uu_origin_check) | tail -n 1)
+    case "$out" in
+        ok*live-security-files=0) fail "u-u matcher ran, but apt knows no Debian-Security file: $out" ;;
+        ok*) pass "unattended-upgrades' matcher: main + security accepted, CrowdSec repo rejected, live security files matched ($out)" ;;
+        *)   fail "unattended-upgrades origin check: $out" ;;
+    esac
+    out=$(unattended-upgrade --dry-run -d 2>&1 | grep -m1 'Allowed origins are' || true)
+    grep -q 'codename=bookworm-security,label=Debian-Security' <<<"$out" \
+        && pass "unattended-upgrade --dry-run reads the patterns: ${out#*: }" || fail "dry run: '${out:-no Allowed origins line}'"
+
+    ssh-keygen -A >/dev/null 2>&1
+    mkdir -p /run/sshd
+    id loxci >/dev/null 2>&1 || useradd -m -s /bin/bash loxci
+    install -d -m 0700 -o loxci -g loxci /home/loxci/.ssh
+    ssh-keygen -q -t ed25519 -N '' -f /var/tmp/loxci_key <<<y >/dev/null 2>&1
+    install -m 0600 -o loxci -g loxci /var/tmp/loxci_key.pub /home/loxci/.ssh/authorized_keys
+    # Control first: a keyed account that cannot become root keeps root's key login.
+    SSH_ALLOW_USERS="loxci" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
+    grep -qx 'PermitRootLogin prohibit-password' "$SSHD_DROPIN" \
+        && pass "keyed account outside sudo → PermitRootLogin prohibit-password (no root lockout)" || fail "root login off without a sudo-capable account"
+    usermod -aG sudo loxci
+    SSH_ALLOW_USERS="loxci" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
+    sshd -t && pass "sshd -t accepts the HARD drop-in" || fail "sshd -t rejects the drop-in: $(sshd -t 2>&1 | head -2)"
+    out=$(sshd -T 2>/dev/null)
+    grep -qx 'permitrootlogin no' <<<"$out" && pass "effective: permitrootlogin no" || fail "effective permitrootlogin: $(grep permitrootlogin <<<"$out")"
+    grep -qx 'allowusers loxci' <<<"$out" && pass "effective: allowusers loxci" || fail "effective allowusers: $(grep allowusers <<<"$out")"
+    grep -qx 'passwordauthentication no' <<<"$out" && pass "effective: passwordauthentication no" || fail "password auth not off"
+    SSH_ALLOW_USERS="ghost" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
+    grep -q '^AllowUsers' "$SSHD_DROPIN" && fail "AllowUsers for an account that does not exist (lockout)" || pass "AllowUsers refused for a non-existent account"
+    echo 'PermitRootLogin maybe' >> "$SSHD_DROPIN"
+    sshd -t >/dev/null 2>&1 && fail "control: sshd -t accepted a broken drop-in" || pass "control: sshd -t rejects a broken drop-in (the guard can fire)"
+}
+
+t_debian12_host() {
+    section "Debian 12 — unattended-upgrades origins + sshd drop-in (2026-10)"
+    command -v docker >/dev/null || { fail "docker missing"; return; }
+    relay_results < <(docker run --rm -e CI=true -v "$REPO:/workspace:ro" -w /workspace debian:12 bash -c '
+        apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unattended-upgrades python3-apt lsb-release openssh-server >/dev/null 2>&1 \
+            || { echo "  ✗ package install failed"; exit 0; }
+        bash /workspace/tests/host-integration.sh debian12-host-inner' 2>&1)
+}
+
+# The real CrowdSec (packagecloud, installed by the CI step) driven by
+# deploy.sh's configure_crowdsec: the daemon must start with the managed
+# files, and the scenarios must route by log file. Synthetic events use
+# TEST-NET addresses (RFC 5737) only; their decisions are deleted again.
+t_crowdsec() {
+    section "CrowdSec — LoxProx scenarios, profiles, retention, simulation, explain, replay (2026-10)"
+    command -v cscli >/dev/null || { fail "cscli missing — install crowdsec first"; return; }
+    mkdir -p /var/log/nginx
+    local f out dir dec
+    for f in loxone-access loxone-error loxprox-trap loxprox-unknown; do touch "/var/log/nginx/$f.log"; done
+    touch /var/log/auth.log   # deploy.sh's SSH acquisition; journald-only runners have none
+    # shellcheck disable=SC2034  # consumed by deploy.sh's configure_crowdsec
+    ENABLE_APPSEC=false UNKNOWN_PATH_MODE=log
+    # shellcheck disable=SC2034
+    CROWDSEC_WHITELIST_IPS=("192.168.1.0/24")
+    # deploy.sh's configure_crowdsec with TRAP_BAN_MODE=$1. The firewall bouncer
+    # is not under test (and would program the runner's firewall).
+    cs_configure() {
+        # shellcheck disable=SC2034  # consumed by deploy.sh's configure_crowdsec
+        ( TRAP_BAN_MODE="$1"
+          systemctl() { case " $* " in *" crowdsec-firewall-bouncer"*) return 0 ;; esac; command systemctl "$@"; }
+          configure_crowdsec ) >>"$LOG_FILE" 2>&1
+    }
+    if cs_configure ban; then
+        pass "configure_crowdsec returns 0 against the real CrowdSec ($(cscli version 2>&1 | awk '/version:/ {print $2; exit}'))"
+    else
+        fail "configure_crowdsec failed — deploy log and crowdsec journal below"
+        tail -25 "$LOG_FILE" | sed 's/^/    /'
+        journalctl -u crowdsec -n 25 --no-pager -o cat | sed 's/^/    /'
+    fi
+    systemctl is-active --quiet crowdsec && pass "crowdsec active with the managed profiles.yaml, config.yaml.local, scenarios and acquisition" \
+                                         || fail "crowdsec NOT active"
+    grep -q 'LOXPROX-MANAGED' "$CROWDSEC_PROFILES" && pass "managed profiles.yaml in place (not rolled back)" || fail "profiles.yaml rolled back — CrowdSec rejected it"
+    out=$(cscli config show-yaml 2>/dev/null)
+    grep -qE '^ +max_age: +400d$' <<<"$out" && grep -qE '^ +max_items: +100000$' <<<"$out" \
+        && pass "config.yaml.local merged: flush max_age 400d, max_items 100000" || fail "merged config lacks the flush settings: $(grep -A3 'flush:' <<<"$out" | tr '\n' ' ')"
+    out=$(cscli scenarios list 2>&1)
+    for f in loxprox/scanner-trap loxprox/unknown-path loxprox/auth-bf; do
+        grep -qF "$f" <<<"$out" && pass "scenario loaded: $f" || fail "scenario not listed: $f"
+    done
+    out=$(cscli simulation status 2>&1)
+    grep -qF loxprox/auth-bf <<<"$out" && grep -qF loxprox/unknown-path <<<"$out" && ! grep -qF loxprox/scanner-trap <<<"$out" \
+        && pass "simulation: auth-bf + unknown-path alert only, scanner-trap bans" || fail "simulation status: $out"
+
+    # Log routing, proven both ways with cscli explain (read-only, -no-api).
+    explain() { (source "$REPO/test-gateway.sh"; _cs_explain "$@"); }
+    out=$(explain loxprox-trap.log 198.51.100.7 "GET /.env" 444)
+    grep -qF 'crowdsecurity/nginx-logs' <<<"$out" && pass "explain: crowdsecurity/nginx-logs parses a trap-log line" || fail "trap-log line not parsed"
+    grep -qF 'loxprox/scanner-trap' <<<"$out" && pass "explain: a trap-log line fires loxprox/scanner-trap" || { fail "trap-log line did not reach loxprox/scanner-trap"; note "$out"; }
+    out=$(explain loxone-access.log 198.51.100.7 "GET /.env" 444)
+    grep -qF 'loxprox/scanner-trap' <<<"$out" && fail "explain: the same line in the access log fired scanner-trap" || pass "explain: the same line in loxone-access.log does not (routing by evt.Line.Src)"
+    out=$(explain loxone-access.log 198.51.100.7 "GET /jdev/cfg/api" 200)
+    grep -qF 'loxprox/' <<<"$out" && fail "explain: a normal app line reached a loxprox scenario" || pass "explain: a normal app line reaches no loxprox scenario"
+    out=$(explain loxprox-unknown.log 198.51.100.7 "GET /ci/unknown" 200)
+    grep -qF 'loxprox/unknown-path' <<<"$out" && pass "explain: an unknown-log line pours into loxprox/unknown-path" || fail "unknown-log line not routed"
+    out=$(explain loxone-access.log 198.51.100.7 "GET /jdev/sys/getkey2/<redacted>" 200)
+    grep -qF 'loxprox/auth-bf' <<<"$out" && pass "explain: a scrubbed getkey2 line pours into loxprox/auth-bf" || fail "auth line not routed to auth-bf"
+    out=$(explain loxprox-unknown.log 198.51.100.7 "GET /jdev/sys/getkey2/<redacted>" 200)
+    grep -qF 'loxprox/auth-bf' <<<"$out" && fail "auth-bf counted a line from the unknown log" || pass "auth-bf reads the main access log only"
+
+    # End to end through the running LAPI and the managed profiles: an agent
+    # (-no-api) replays the lines and pushes the alerts.
+    local now
+    now=$(LC_ALL=C date '+%d/%b/%Y:%H:%M:%S %z')
+
+    # TRAP_BAN_MODE=observe (deploy.conf switch): the trap hit becomes an
+    # alert whose decision is only simulated — nothing enforces it.
+    if cs_configure observe; then
+        out=$(cscli simulation status 2>&1)
+        grep -qF loxprox/scanner-trap <<<"$out" && pass "TRAP_BAN_MODE=observe: deploy put scanner-trap in simulation before the restart" \
+                                               || fail "observe mode: scanner-trap not simulated: $out"
+        dir=$(mktemp -d /var/tmp/loxprox-replay.XXXXXX)
+        printf '198.51.100.9 - - [%s] "GET /.env HTTP/1.1" 444 0 "-" "ci"\n' "$now" > "$dir/loxprox-trap.log"
+        timeout 180 crowdsec -c /etc/crowdsec/config.yaml -dsn "file://$dir/loxprox-trap.log" -type nginx -no-api >>"$LOG_FILE" 2>&1 \
+            || note "observe replay exited $? (see $LOG_FILE)"
+        sleep 5
+        local alerts enforced
+        alerts=$(cscli alerts list --ip 198.51.100.9 --limit 0 -o json 2>/dev/null \
+                 | jq -r '[.[]? | select(.scenario == "loxprox/scanner-trap")] | length' 2>/dev/null)
+        dec=$(cscli decisions list --limit 0 -o json 2>/dev/null)
+        enforced=$(jq -r '[.[]?.decisions[]? | select(.value == "198.51.100.9" and (.simulated | not))] | length' <<<"$dec" 2>/dev/null)
+        out="alerts=${alerts:-?} enforced=${enforced:-?}"
+        [[ "$out" =~ ^alerts=[1-9][0-9]*\ enforced=0$ ]] \
+            && pass "observe mode: the replayed trap hit is an alert, its decision simulated only — no ban ($out)" \
+            || fail "observe replay: '${out:-none}'"
+        cscli decisions delete --ip 198.51.100.9 >/dev/null 2>&1 || true
+        cscli alerts delete --ip 198.51.100.9 >/dev/null 2>&1 || true
+        rm -rf "$dir"
+    else
+        fail "configure_crowdsec with TRAP_BAN_MODE=observe failed"
+    fi
+    # Back to ban: the next deploy takes the trap out of simulation again.
+    cs_configure ban || fail "configure_crowdsec with TRAP_BAN_MODE=ban failed"
+    out=$(cscli simulation status 2>&1)
+    grep -qF loxprox/scanner-trap <<<"$out" && fail "TRAP_BAN_MODE=ban: scanner-trap still simulated: $out" \
+                                           || pass "TRAP_BAN_MODE=ban: deploy took scanner-trap out of simulation"
+
+    dir=$(mktemp -d /var/tmp/loxprox-replay.XXXXXX)
+    printf '198.51.100.7 - - [%s] "GET /.env HTTP/1.1" 444 0 "-" "ci"\n' "$now" > "$dir/loxprox-trap.log"
+    for f in $(seq 1 12); do
+        printf '198.51.100.8 - - [%s] "GET /ci-probe-%s HTTP/1.1" 404 0 "-" "ci"\n' "$now" "$f"
+    done > "$dir/loxone-access.log"
+    for f in loxprox-trap.log loxone-access.log; do
+        timeout 180 crowdsec -c /etc/crowdsec/config.yaml -dsn "file://$dir/$f" -type nginx -no-api >>"$LOG_FILE" 2>&1 \
+            || note "replay of $f exited $? (see $LOG_FILE)"
+    done
+    sleep 5
+    dec=$(cscli decisions list --limit 0 -o json 2>/dev/null)
+    out=$(jq -r '[.[]?.decisions[]? | select(.value == "198.51.100.7")][0] | "\(.scenario) \(.duration)"' <<<"$dec" 2>/dev/null)
+    [[ "$out" =~ ^loxprox/scanner-trap\ 16[78]h ]] && pass "trap hit → loxprox_hard_ip profile → first HARD ban ($out)" || fail "trap replay decision: '${out:-none}'"
+    out=$(jq -r '[.[]?.decisions[]? | select(.value == "198.51.100.8")][0] | "\(.scenario) \(.duration)"' <<<"$dec" 2>/dev/null)
+    [[ "$out" =~ ^crowdsecurity/http-probing\ 2[34]h ]] && pass "an ambiguous scenario → default profile → first SOFT ban ($out)" || fail "SOFT replay decision: '${out:-none}'"
+    cscli decisions delete --ip 198.51.100.7 >/dev/null 2>&1 || true
+    cscli decisions delete --ip 198.51.100.8 >/dev/null 2>&1 || true
+    rm -rf "$dir"
+}
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
-(( $# > 0 )) || { echo "usage: $0 <cron|journald|auditd|logrotate|nginx-apparmor|nginx-appsec> ..." >&2; exit 2; }
+(( $# > 0 )) || { echo "usage: $0 <cron|journald|auditd|logrotate|nginx-apparmor|nginx-appsec|nginx-edge|nft-check|debian12-host|crowdsec> ..." >&2; exit 2; }
 for s in "$@"; do
     case "$s" in
         cron)                      t_cron ;;
@@ -817,6 +1271,13 @@ for s in "$@"; do
         nginx-appsec)              t_nginx_appsec ;;
         nginx-appsec-setup)        t_nginx_appsec_setup; exit $? ;;
         nginx-appsec-v4)           t_nginx_appsec_v4; exit $? ;;
+        nginx-edge)                t_nginx_edge ;;
+        nginx-edge-setup)          t_nginx_edge_setup "${2:-tls}"; exit $? ;;
+        nft-check)                 t_nft_check ;;
+        nft-check-inner)           t_nft_check_inner; exit $(( FAILED > 0 )) ;;
+        debian12-host)             t_debian12_host ;;
+        debian12-host-inner)       t_debian12_host_inner; exit $(( FAILED > 0 )) ;;
+        crowdsec)                  t_crowdsec ;;
         *) echo "unknown section: $s" >&2; exit 2 ;;
     esac
 done

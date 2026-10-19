@@ -38,14 +38,14 @@ Das sind bewusst gesetzte Grenzen für das **aktuelle (Gen-1-)** Deployment — 
 
 | Threat | Likelihood | Impact | Mitigation |
 |--------|-----------|--------|------------|
-| **Internet-Scanning / Reconnaissance** | Sicher | Hoch | nftables DROP per Default, CrowdSec CAPI |
+| **Internet-Scanning / Reconnaissance** | Sicher | Hoch | nftables DROP per Default, Host/SNI-Gate + Trap (444, kein Fingerprint), HARD-Ban-Leiter (7 Tage → 90 Tage → 365 Tage), CrowdSec CAPI |
 | **Brute Force gegen Web-UI** | Hoch | Kritisch | nginx Rate Limits, CrowdSec-Scenarios |
 | **Application-Layer-DDoS** | Mittel | Hoch | nginx Connection-Limits, Timeouts, CrowdSec |
 | **Volumetrischer DDoS** | Niedrig | Kritisch | *Am Gateway nicht stoppbar — nur ISP/Cloud* |
 | **Credential Stuffing** | Hoch | Kritisch | Rate Limits + CrowdSec http-cve |
 | **Ausnutzung von Loxone-CVEs** | Mittel | Kritisch | AppSec WAF (Virtual Patching), WAF-Regeln |
 | **Lateral Movement (LAN → Miniserver)** | Niedrig | Hoch | Proxmox-Firewall, VLAN-Isolation |
-| **Lateral Movement (LAN → Gateway via SSH)** | Niedrig | Kritisch | `setup_ssh_hardening` — CIS §5.2 Drop-in, Key-only, `PermitRootLogin no`, `MaxAuthTries 4` |
+| **Lateral Movement (LAN → Gateway via SSH)** | Niedrig | Kritisch | `setup_ssh_hardening` — CIS §5.2 Drop-in, Key-only, `PermitRootLogin no` (HARD-Modus, sobald ein sudo-fähiger Nicht-Root-User einen Key hat), `MaxAuthTries 4`, optional `SSH_ALLOW_USERS` |
 | **Passives Abgreifen des Tokens auf dem Hop Gateway → Miniserver** | Niedrig | Hoch | *Klartext aus Notwendigkeit — Gen 1 kann kein TLS. Diesen Hop auf einem dedizierten VLAN/Link isolieren, damit der oben modellierte LAN-interne Angreifer das weitergereichte Loxone-Token nicht mitschneiden kann. Siehe Hinweis unten.* |
 | **Passwort-Extraktion aus Config-Datei** | Mittel | Hoch | *Nur physische Zugangskontrolle* |
 | **Cloud-DNS-Hijacking (CVE-2020-27488)** | Niedrig | Hoch | Cloud DNS abschalten, statische IP verwenden |
@@ -56,7 +56,7 @@ Das Gateway terminiert TLS auf `:1080` und proxyt **Klartext-HTTP** zum Miniserv
 
 ### SSH-Modell — nur LAN-seitig
 
-Das Gateway exponiert `:22` ausschließlich gegenüber `SSH_ALLOWED_SUBNETS` via nftables. Aus dem Internet ist SSH auf diesem Host nie sichtbar — es gibt **keinen** `endlessh`-artigen Tarpit, weil es auf Port 22 keine öffentliche Angriffsfläche gibt, die ihn absorbieren müsste. Die Härtung greift ausschließlich im Inside-the-LAN-Angreifer-Szenario: ein kompromittiertes Laptop, Smart-TV oder IoT-Toaster, der vom LAN aufs Gateway pivotieren will. `deploy.sh` liefert ein CIS-Debian-12-§5.2-Drop-in (Key-only, kein Root, VERBOSE-Log) inklusive First-Deploy-Bootstrap, der das Lock-yourself-out-Henne-Ei-Problem verhindert (siehe `CONFIGURATION-GUIDE.md` → "SSH Key Bootstrap").
+Das Gateway exponiert `:22` ausschließlich gegenüber `SSH_ALLOWED_SUBNETS` via nftables. Aus dem Internet ist SSH auf diesem Host nie sichtbar — es gibt **keinen** `endlessh`-artigen Tarpit, weil es auf Port 22 keine öffentliche Angriffsfläche gibt, die ihn absorbieren müsste. Die Härtung greift ausschließlich im Inside-the-LAN-Angreifer-Szenario: ein kompromittiertes Laptop, Smart-TV oder IoT-Toaster, der vom LAN aufs Gateway pivotieren will. `deploy.sh` liefert ein CIS-Debian-12-§5.2-Drop-in (Key-only, VERBOSE-Log; Root-Login aus im HARD-Modus, sobald ein sudo-fähiger Nicht-Root-User mit Key existiert, sonst `prohibit-password` mit Warnung, damit du dich nie aussperrst) inklusive First-Deploy-Bootstrap, der das Lock-yourself-out-Henne-Ei-Problem verhindert (siehe `CONFIGURATION-GUIDE.md` → "SSH Key Bootstrap").
 
 ### Tunnel-Pfad (v2.0, optional) — wo die Durchsetzung lebt
 
@@ -113,7 +113,8 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 - Forward Policy: DROP
 - CrowdSec Bouncer verwaltet die dynamische `table ip crowdsec` für Live-Blocks
 - Statische Regeln in `table inet filter` werden bei Reload nie überschrieben
-- GeoIP-Drop-Set (`@geoip_blocklist`, `/etc/nftables.d/99-geoip.conf`): ipdeny.com-Listen für CN, RU, KP und IR, beim Deploy geladen und nachts um 03:00 Uhr von `geoip-block.sh` aktualisiert. Jede Liste wird mit Backoff erneut versucht und muss eine Prüfung bestehen, bevor sie die aktive ersetzen darf (nur IPv4-CIDR-Zeilen, damit eine HTML-Fehlerseite nie in nftables landet; eine Mindestanzahl; nicht mehr als 50 % kleiner als die letzte gültige Liste). Scheitert eine Liste, bleibt das letzte gültige Set geladen, und der Grund je Land (curl-Fehler, HTTP-Status, Prüfung) steht in `/var/log/loxprox-cron.log`. Ist die Liste seit 3 Tagen nicht aktualisiert, gibt es eine Discord-WARNING und einen Eintrag in der "Was zu tun ist"-Liste des Panels. Hinweis: Ein gesperrtes Land sperrt auch den eigenen Zugriff von dort (Reisen).
+- GeoIP-Drop-Sets (`@geoip_blocklist` für IPv4, `@geoip_blocklist6` für IPv6, `/etc/nftables.d/99-geoip.conf`): ipdeny.com-Listen für CN, RU, KP und IR, beim Deploy geladen und nachts um 03:00 Uhr von `geoip-block.sh` aktualisiert. Jede Liste wird mit Backoff erneut versucht und muss eine Prüfung bestehen, bevor sie die aktive ersetzen darf (nur CIDR-Zeilen, damit eine HTML-Fehlerseite nie in nftables landet; eine Mindestanzahl; nicht mehr als 50 % kleiner als die letzte gültige Liste). Scheitert eine Liste, bleibt das letzte gültige Set geladen, und der Grund je Land (curl-Fehler, HTTP-Status, Prüfung) steht in `/var/log/loxprox-cron.log`. Ist die Liste seit 3 Tagen nicht aktualisiert, gibt es eine Discord-WARNING und einen Eintrag in der "Was zu tun ist"-Liste des Panels; die IPv6-Liste hat eigene Zeitstempel und einen eigenen Alert. `GEOIP_IPV6_ENABLED="false"` leert das IPv6-Set (nur noch IPv4). Hinweis: Ein gesperrtes Land sperrt auch den eigenen Zugriff von dort (Reisen).
+- Egress-Beschränkung (Output-Chain-Regeln mit dem Kommentar `loxprox-egress`): Die Policy bleibt accept, weil root ausgehenden Verkehr für acme.sh, apt, die CrowdSec-CAPI und Discord braucht. Der nginx-Worker (`www-data`) — der Prozess mit Internetkontakt — darf nur Loopback (die AppSec-Komponente) und den Miniserver erreichen, sonst nichts; alles andere wird verworfen und höchstens begrenzt geloggt. Ein kompromittierter Worker kann nicht ins LAN pivotieren oder nach Hause telefonieren.
 
 ### Layer 2: Reverse Proxy (nginx)
 
@@ -121,7 +122,10 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 - Connection Limit: 20 gleichzeitig pro IP
 - Slowloris-Schutz: aggressive Timeouts (10–15 s)
 - Security Headers: X-Frame-Options, X-Content-Type-Options, Referrer-Policy, **Content-Security-Policy**, **Permissions-Policy**
-- `server_tokens off`; `proxy_hide_header Server` und `proxy_hide_header X-Powered-By`, damit keine Backend-Versionen leaken
+- **Host/SNI-Gate (TLS-Modus).** `:1080` bedient nur `TLS_DOMAIN` plus `EXTRA_SERVER_NAMES`. Eine Anfrage für alles andere — eine nackte IP, kein SNI, ein fremder `Host` (so verbinden sich Crawler wie Shodan/Censys) — landet in einem Trap-Default-Server: ein selbstsigniertes `CN=invalid`-Zertifikat, damit der Handshake durchläuft, dann `444` (Verbindung geschlossen, kein einziges Byte Fingerprint) und ein Eintrag in `/var/log/nginx/loxprox-trap.log`. `:80` verhält sich genauso; nur der echte Name behält seinen ACME-HTTP-01-Challenge-Pfad. Klartext-`http://` auf `:1080` für den echten Namen bekommt weiter den 301-Gnadenredirect auf `https://`. **Folge: Jede App und jedes Gerät muss den Hostnamen mit `https://` benutzen, nie die IP** — ein Zugriff über die IP ist ein Trap-Treffer und wird gebannt (HARD-Leiter).
+- **Pfadklassen.** Jede Anfrage fällt in genau eine Klasse: *Trap*-Pfade (`/.env`, `/.git`, `*.php`, `/wp-*`, `/cgi-bin/`, `/vendor/phpunit`, `/HNAP1`, `/boaform`, `/actuator`) und die Methoden `CONNECT`/`TRACE`/`TRACK`/`PROPFIND` bekommen `444`, Trap-Log und einen HARD-Ban; *Admin*-Webservices: Die einfachen Pfade der Dateisystem- und Systemsteuerungs-Befehle (etwa `fsget`, `fsdel`, `sys/reboot`, `sps/restart`) werden aus dem Internet mit `403` beantwortet, solange `REMOTE_ADMIN_PATHS="deny"` gilt (Default; LAN und `CROWDSEC_WHITELIST_IPS` sind ausgenommen). Kein LoxProx-Scenario bannt wegen eines 403, aber wiederholte 403/404 zählen weiter für das Standard-Scenario `crowdsecurity/http-probing`, das zu einem SOFT-Ban führen kann. Das filtert nur einfache HTTP-Pfade: Dieselben Befehle können den Miniserver weiter in der verschlüsselten Befehlsform (`jdev/sys/enc` / `fenc`) oder über den authentifizierten WebSocket erreichen — die eigenen Zugangsdaten des Miniservers bleiben die eigentliche Kontrolle; *App*-Pfade werden durchgereicht; *unbekannte* Pfade werden durchgereicht und in `/var/log/nginx/loxprox-unknown.log` geschrieben (`UNKNOWN_PATH_MODE="log"`, die Lernphase) oder mit einem lokalen `404` beantwortet (`"deny"`). Die Trap-Prüfung läuft vor den Rate-Limits und dem AppSec-Subrequest — ein Scanner-Pfad kostet also nie einen WAF-Roundtrip.
+- Authentifizierungs-Endpoints (`getkey`, `getjwt`, `gettoken`, `authwithtoken`, `refreshjwt`) sind auf 3 Req/s pro nicht vertrauenswürdiger Adresse begrenzt (Burst 30), und pro nicht vertrauenswürdiger Adresse sind höchstens 6 gleichzeitige `/ws/`-Verbindungen erlaubt. LAN und `CROWDSEC_WHITELIST_IPS` werden nie mitgezählt.
+- `server_tokens off` (seit dem Härtungs-Release 2026-10 im http-Block gesetzt — **frühere Fassungen dieses Dokuments behaupteten es, obwohl nichts es setzte, das Gateway antwortete also mit `Server: nginx/<Version>`**; die Zeile entfällt nur, wenn du `server_tokens` selbst in der `nginx.conf` gesetzt hast); `proxy_hide_header Server` und `proxy_hide_header X-Powered-By`, damit keine Backend-Versionen leaken
 - Die eigenen Kopien des Miniservers von den Headern, die das Gateway selbst setzt (`X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, CSP, `Permissions-Policy`, HSTS), und sein veraltetes `X-XSS-Protection` werden per `proxy_hide_header` verworfen — jeder Security-Header kommt genau einmal beim Client an. Das `X-Frame-Options: deny` des Miniservers neben dem `SAMEORIGIN` des Gateways war ein widersprüchliches Paar
 - Buffer-Limits gegen Memory Exhaustion
 - AppSec-Subrequest: jeder Request wird von der CrowdSec WAF geprüft, bevor er weitergeproxyt wird
@@ -131,6 +135,10 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 - CAPI-Community-Feed: ~26k bekannte Bad IPs werden automatisch geblockt
 - Lokale Scenarios: nginx Bad Requests, SSH-Brute-Force, HTTP-CVEs
 - AppSec WAF: Virtual Patching für bekannte CVEs, SQLi, XSS, Path Traversal
+- **Zwei Ban-Leitern** (`/etc/crowdsec/profiles.yaml`, von `deploy.sh` verwaltet; das Original bleibt als `profiles.yaml.loxprox-orig` erhalten): Scenarios, die auf `BAN_HARD_SCENARIOS` passen — die eindeutigen Scanner-Scenarios (CVE-/Virtual-Patching-Probes, Probing auf sensible Dateien, Backdoors, Path Traversal und Admin-Interfaces, Open-Proxy-Probing sowie der Trap) —, bannen mit `BAN_HARD_LADDER` = 7 Tage, dann 90 Tage, dann 365 Tage. Alles andere nutzt `BAN_SOFT_LADDER` = 24 Stunden, 7 Tage, 30 Tage, 90 Tage. `progressive-ban.py` (Cron alle 15 Minuten, unter `flock`) verlängert Wiederholungstäter entlang der Leiter und verkürzt nie einen Ban. Seine Verlängerungen tragen den Grund `repeat-offender-hard-<n>` (HARD) bzw. `repeat-offender-<n>` (SOFT).
+- **Ein Jahr Offence-Gedächtnis**: Vergehen zählen innerhalb von `PROGRESSIVE_BAN_WINDOW_DAYS` (365). Der Paket-Default von CrowdSec vergaß jeden Alert nach 7 Tagen (und nach 5000 Alerts), ein wiederkehrender Scanner begann also immer ganz unten; `config.yaml.local` hält die Alert-Historie jetzt mindestens 400 Tage vor.
+- **Drei LoxProx-Scenarios** (`crowdsec/scenarios/`, installiert nach `/etc/crowdsec/scenarios/`): `loxprox/scanner-trap` (ein Treffer im Trap-Log löst einen HARD-Ban aus; mit `TRAP_BAN_MODE="observe"` läuft es für den ersten Rollout in der Simulation und alarmiert nur), `loxprox/unknown-path` (sechs verschiedene unbekannte Pfade von einer Adresse; SOFT-Leiter) und `loxprox/auth-bf` (Burst von Loxone-Authentifizierungs-Anfragen; SOFT-Leiter). Die letzten beiden laufen in diesem Release im CrowdSec-**Simulationsmodus** — sie alarmieren, bannen aber nicht —, bis ihre Schwellen an echtem Roaming-Handy-Verkehr geprüft sind (`unknown-path` wird nur simuliert, solange `UNKNOWN_PATH_MODE="log"` gilt).
+- Wöchentlicher Hub-Refresh (sonntags 04:30, `hub-refresh.sh`): aktualisiert nur `crowdsecurity/appsec-virtual-patching` (so kommen neue CVEs in den WAF), lädt CrowdSec nur neu, wenn sich etwas geändert hat, und meldet andere veraltete Hub-Einträge per Discord, ohne sie zu aktualisieren (eine Parser- oder Scenario-Änderung kann ändern, was gebannt wird). Vor dem Upgrade sichert es den Hub als Snapshot (die letzten 4 liegen in `/var/lib/loxprox/hub-snapshots/`; scheitert der Snapshot, wird das Upgrade mit der WARNING *CrowdSec Hub Snapshot Failed* übersprungen) und rollt zurück, wenn CrowdSec nicht wieder hochkommt, mit einer CRITICAL *CrowdSec Rule Update Rolled Back*, *CrowdSec Down — Gateway Serving Errors* oder *CrowdSec Rule Rollback Failed*.
 - Whitelist: LAN, Site-to-Site, Uptime-Monitor, Heroku-Prowl-IPs
 - SSH-Acquisition via `/var/log/auth.log`
 
@@ -153,14 +161,16 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 - systemd: PrivateTmp, NoNewPrivileges, ProtectKernelTunables etc.
 - Kernel: syncookies, rp_filter, dmesg_restrict, kptr_restrict, ASLR
 - auditd: überwacht Config-Änderungen an nginx/crowdsec/nftables, Auth-Dateien, sudo und den eigenen Zustand von LoxProx — `/etc/loxprox` (Config, TLS), `/etc/apparmor.d` (Policy) und die als root laufenden Scripts unter `/opt/loxprox`
-- unattended-upgrades: Auto-Reboot um 03:00 für Kernel-Patches
+- unattended-upgrades: Auto-Reboot um 03:00 für Kernel-Patches. Die Quellen werden über Codename und Label (`Origins-Pattern`) erkannt, nicht über den Archivnamen: Die alte archivbasierte Form passte auf nichts mehr, seit Debian 12 oldstable wurde (das Security-Archiv heißt jetzt `oldstable-security`) — Sicherheitsupdates waren auf vor diesem Release deployten Gateways still ausgefallen. Das CrowdSec-Paket-Repository ist bewusst ausgenommen — CrowdSec-Upgrades werden von Hand eingespielt (der Monitor meldet, wenn eines verfügbar ist)
+- SSH-HARD-Modus (`--finalize-ssh`): `PermitRootLogin no` nur, wenn ein Nicht-Root-Konto einen Authorized Key, sudo-Rechte (`sudo`/`wheel`/`admin`) und eine Login-Shell hat; sonst bleibt es mit Warnung bei `prohibit-password`, damit der Schritt dich nie aussperren kann. `--finalize-ssh` liest `deploy.conf`, daher gilt auch das optionale `SSH_ALLOW_USERS` dort: Es schreibt eine `AllowUsers`-Zeile, die (mit Warnung) verweigert wird, wenn kein gelistetes Konto eine Login-Shell hat (im HARD-Modus zusätzlich einen Key)
 
 ### Layer 6: Monitoring & Alerting
 
 - **Discord-Webhook**: Echtzeit-Alerts für Blocks, Anomalien, Service-Failures
 - **Security Monitor** (60-Sek-Zyklus): CrowdSec-Decisions, nginx-Fehler, Auth-Versuche, AppSec-Detections, System-Ressourcen
-- **Network Watchdog** (60-Sek-Zyklus): erkennt Netzwerk-Layer-Ausfälle (dhclient-Death-Spiral, Kernel-Routing-Korruption, Interface-Desync), die Prozess-Level-Checks nicht sehen. Selbstheilung per Service-Restart; Reboot als letzte Maßnahme mit Pre-/Post-Reboot-Discord-Reporting und Anti-Loop-Schutz. Ein `502`/`504` vom lokalen nginx beweist, dass **der Listener lebt** (nur der Miniserver dahinter antwortet nicht) — das zählt daher als gesund und löst nie Heal oder Reboot aus. Ein Miniserver-Ausfall löst stattdessen einen eigenen, nur alarmierenden "Miniserver nicht erreichbar"-Hinweis aus, mit Recovery-Meldung, sobald er wieder antwortet.
-- **Log-Rotation**: 14 Tage Aufbewahrung für nginx-Logs; die LoxProx-eigenen `/var/log/loxprox-*.log` wöchentlich bzw. ab 10 MB, 8 komprimierte Generationen; das systemd-Journal ist auf 300 MB begrenzt
+- **Alerts der Breach-Härtung** (gleicher 60-Sek-Zyklus, alle per Discord): *Remote Session From a New ASN* (ein Remote-Client auf dem Loxone-Port aus einem bisher unbekannten Providernetz; in den ersten `ASN_LEARNING_DAYS` Tagen wird nur gelernt; abschaltbar mit `SESSION_ALERT_ENABLED="false"`; Client-Adressen sind im Alert maskiert), *Firewall Integrity Failure* (Input-Policy, GeoIP-Sets oder `loxprox-egress`-Regeln fehlen — ein älteres Deploy, dem nur die neuen Elemente fehlen, löst stattdessen eine WARNING aus), *Security Updates Not Installing* (ein Debian-Security-Update steht länger als `SEC_UPDATE_MAX_AGE_DAYS` aus), *CrowdSec Update Available* (nur Info), *High Loxone Auth Request Rate* (mehr als `AUTH_RATE_ALERT_PER_CYCLE` Anfragen für `getkey`/`getkey2`/`getjwt`/`gettoken`/`authwithtoken`/`refreshjwt`, in der `jdev/`- und der `dev/`-Schreibweise, alle Clients zusammen, in einem Zyklus) und *GeoIP IPv6 Blocklist Stale*. Die Inhaltsprüfung der Firewall-Sets läuft stündlich; Input-Policy und Egress-Regeln werden in jedem Zyklus geprüft. *New CrowdSec Ban* betrifft nur SOFT-Bans (höchstens 15 Einträge pro Nachricht); HARD-Bans fasst ein täglicher *Daily HARD Ban Digest* zusammen (INFO, 08:00, auch bei Anzahl 0; im Observe-Modus mit der Zahl beobachteter Trap-Treffer und einer Prüfzeile)
+- **Network Watchdog** (60-Sek-Zyklus): erkennt Netzwerk-Layer-Ausfälle (dhclient-Death-Spiral, Kernel-Routing-Korruption, Interface-Desync), die Prozess-Level-Checks nicht sehen. Selbstheilung per Service-Restart; Reboot als letzte Maßnahme mit Pre-/Post-Reboot-Discord-Reporting und Anti-Loop-Schutz. Ein `502`/`504` vom lokalen nginx beweist, dass **der Listener lebt** (nur der Miniserver dahinter antwortet nicht) — das zählt daher als gesund und löst nie Heal oder Reboot aus. Ein Miniserver-Ausfall löst stattdessen einen eigenen, nur alarmierenden "Miniserver nicht erreichbar"-Hinweis aus, mit Recovery-Meldung, sobald er wieder antwortet. Im TLS-Modus prüft der Watchdog `:1080` unter dem echten Hostnamen (auf Loopback aufgelöst), weil das Host/SNI-Gate eine Anfrage für `127.0.0.1` mit `444` beantwortet. Während eines Deploys im TLS-Modus ist der Watchdog-Timer abgeschaltet und wird am Ende wieder scharf gestellt; ein vorzeitig beendeter Lauf meldet `network-watchdog → NOT ARMED` — `sudo bash deploy.sh` erneut ausführen, den Timer nicht von Hand starten.
+- **Log-Rotation**: 90 Tage Aufbewahrung für die nginx-Access-, Trap- und Unknown-Path-Logs (das forensische Fenster für eine jahrelange Offence-Historie), 14 Tage für die nginx-Error- und AppSec-Logs; die LoxProx-eigenen `/var/log/loxprox-*.log` wöchentlich bzw. ab 10 MB, 8 komprimierte Generationen; das systemd-Journal ist auf 300 MB begrenzt
 - **Wächter für geplante Jobs**: Der Health Check von `deploy.sh` und `test-gateway.sh` schlagen fehl, wenn cron `/etc/cron.d/loxprox` seit dem letzten Schreiben abgelehnt hat — cron ignoriert eine abgelehnte Datei komplett, Progressive Ban, das tägliche Backup und das GeoIP-Refresh würden sonst still stehenbleiben
 - **Config-Backup**: tägliches automatisches Backup nach `/root/loxprox-backups/`
 - **Test-Suite**: `sudo ./test-gateway.sh` validiert alle Komponenten nach dem Deploy
@@ -190,9 +200,8 @@ Der Miniserver selbst kann nach wie vor kein TLS (Gen-1-CPU-Constraint — unver
 - Status: erfordert Änderungen an Router/Proxmox
 
 ### Honeypot-Endpoints
-- Fake `/admin`, `/wp-login.php` etc. auf dem Gateway
-- CrowdSec erkennt Scanner, die Honeypots treffen → sofortiger Ban
-- Status: leicht via nginx-Location-Blöcke ergänzbar
+- Mit dem Härtungs-Release 2026-10 als Scanner-Trap ausgeliefert (siehe Layer 2 und Layer 3): Scanner-Pfade, fremde Host/SNI-Werte und Scanner-Methoden enden in `loxprox-trap.log` und einem HARD-Ban
+- Keine Fake-Login-Seite: Kein Loxone-Endpoint passt auf einen Trap-Pfad, und der Trap antwortet mit `444` statt mit einem Köder
 
 ---
 
@@ -250,13 +259,16 @@ sudo bash deploy.sh
 
 > **Kein Ban — die `https://`-Migrationsfalle.** Wenn eine Loxone-App "keine Verbindung" bekommt, `cscli decisions list` aber **keine** Decision für ihre IP zeigt, liegt es fast immer am TLS-Schema und nicht an einem Block. Siehe "Die Loxone-App verbindet sich nach dem Aktivieren von TLS nicht mehr" in `CONFIGURATION-GUIDE.md` (im deutschen Dokument: CONFIGURATION-GUIDE.de.md).
 
+> **Ein Ban nach dem Härtungs-Release heißt meist: IP statt Hostname.** Im TLS-Modus trifft eine App oder ein Gerät, das mit der IP-Adresse des Gateways (oder einem Hostnamen außerhalb von `TLS_DOMAIN` / `EXTRA_SERVER_NAMES`) konfiguriert ist, den Trap und wird schon bei der ersten Anfrage mit der HARD-Leiter gebannt — 7 Tage, dann 90, dann 365. Ban aufheben (Schritt 2), dann die Verbindung mit `https://<deine-domain>:1080` neu anlegen. Auch die einfachen Admin-Webservice-Pfade werden aus dem Internet jetzt mit `403` beantwortet (`REMOTE_ADMIN_PATHS="deny"`; wiederholte 403 können weiter `crowdsecurity/http-probing` füttern, ein SOFT-Ban) — konfiguriere aus dem LAN oder setze `REMOTE_ADMIN_PATHS="allow"`, wenn du es brauchst.
+
 ### Loxone von außen nicht erreichbar
 
 1. Router-Forwarding prüfen: extern 1080 → `<GATEWAY_IP>:1080`
 2. Gateway-Status prüfen: `systemctl status nginx`
 3. Gateway → Loxone-Erreichbarkeit prüfen: `curl http://<LOXONE_IP>:80/jdev/cfg/api`
-4. nginx-Error-Log auf Backend-Timeouts prüfen
-5. Test-Suite laufen lassen: `sudo bash test-gateway.sh`
+4. Den Gateway-Listener auf dem Gateway selbst prüfen. Im TLS-Modus mit dem echten Namen — eine Anfrage für `127.0.0.1` trifft den Trap: `curl --resolve <domain>:1080:127.0.0.1 https://<domain>:1080/jdev/cfg/api`
+5. nginx-Error-Log auf Backend-Timeouts prüfen
+6. Test-Suite laufen lassen: `sudo bash test-gateway.sh`
 
 ### Discord-Webhook-Rotation
 
@@ -284,4 +296,4 @@ Wenn im nginx-Log AppSec-401-Fehler auftauchen, hat sich vermutlich der Bouncer-
 - **Keine GDPR/Privacy-Compliance** auf dem Miniserver selbst — Logs enthalten IP-Adressen
 - Gateway-Logs enthalten Quell-IPs (für die Security-Analyse erforderlich)
 - Discord-Alerts enthalten IP-Adressen und Request-Details
-- Aufbewahrung: 14 Tage für nginx, System-Logs werden von journald verwaltet
+- Aufbewahrung: 90 Tage für die nginx-Access-, Trap- und Unknown-Path-Logs, 14 Tage für die nginx-Error- und AppSec-Logs, System-Logs werden von journald verwaltet; CrowdSec hält seine Alert-Historie (Quelladressen und Scenarios) mindestens 400 Tage vor, um Wiederholungstäter zu erkennen

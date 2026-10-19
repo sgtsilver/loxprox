@@ -570,3 +570,167 @@ def test_appsec_log_writer_uses_the_subrequest_status():
         "the detection log must use the F3-scrubbed path, never the raw request line"
     m = re.search(r"^_LOXPROX_SITE_TEMPLATE_VERSION=(\d+)$", text, re.MULTILINE)
     assert int(m.group(1)) >= 5, "template changed: bump _LOXPROX_SITE_TEMPLATE_VERSION"
+
+
+# ── 11. Breach hardening (2026-10): ban classes, scenarios, probes ────────────
+
+# Contract fixtures: scenario names seen live over 7 days, and the ladder each
+# must use. The HARD regex is used by CrowdSec (Go RE2, `matches`) and by
+# progressive-ban.py (Python re) — both must agree, so it may only use the
+# common subset.
+HARD_FIXTURES = [
+    "crowdsecurity/vpatch-CVE-2025-29927", "crowdsecurity/vpatch-env-access",
+    "crowdsecurity/appsec-vpatch", "crowdsecurity/http-cve-2021-41773",
+    "crowdsecurity/CVE-2022-26134", "crowdsecurity/grafana-cve-2021-43798",
+    "crowdsecurity/http-sensitive-files", "crowdsecurity/http-backdoors-attempts",
+    "crowdsecurity/http-path-traversal-probing", "crowdsecurity/http-admin-interface-probing",
+    "crowdsecurity/http-open-proxy", "loxprox/scanner-trap",
+]
+SOFT_FIXTURES = [
+    "crowdsecurity/http-probing", "crowdsecurity/http-bad-user-agent",
+    "crowdsecurity/http-crawl-non_statics", "crowdsecurity/nginx-req-limit-exceeded",
+    "crowdsecurity/http-technology-probing", "LePresidente/http-generic-401-bf",
+    "loxprox/unknown-path", "loxprox/auth-bf", "repeat-offender-2",
+]
+CONTRACT_HARD_RE = (
+    r"^(loxprox/scanner-trap|crowdsecurity/(appsec-vpatch|vpatch-.+|http-cve-.+|CVE-.+|"
+    r"[A-Za-z0-9_]+-cve-.+|http-sensitive-files|http-backdoors-attempts|http-path-traversal-probing|"
+    r"http-admin-interface-probing|http-open-proxy))$"
+)
+
+
+def hard_regex_default():
+    m = re.search(r"^_LOXPROX_HARD_SCENARIOS_DEFAULT='([^']+)'$", read(DEPLOY), re.MULTILINE)
+    assert m, "_LOXPROX_HARD_SCENARIOS_DEFAULT not found in deploy.sh"
+    return m.group(1)
+
+
+def test_hard_regex_is_the_contract_one_and_classifies_the_fixtures():
+    rx_text = hard_regex_default()
+    assert rx_text == CONTRACT_HARD_RE
+    rx = re.compile(rx_text)
+    assert [s for s in HARD_FIXTURES if not rx.search(s)] == [], "HARD scenario not matched"
+    assert [s for s in SOFT_FIXTURES if rx.search(s)] == [], "SOFT scenario matched as HARD"
+
+
+def test_hard_regex_stays_in_the_re2_python_common_subset():
+    rx_text = hard_regex_default()
+    # Lookarounds, backreferences, possessive/atomic groups: Python-only or RE2-only.
+    for bad in (r"(?=", r"(?!", r"(?<=", r"(?<!", r"(?>", "\\1", "++", "*+", "?+"):
+        assert bad not in rx_text, f"{bad!r} is not portable between Go RE2 and Python re"
+    # deploy.sh's own guard refuses quotes / backslashes / expansions; keep the default inside it.
+    assert re.fullmatch(r"[\]\[A-Za-z0-9_./|()^$+*?:{},-]+", rx_text)
+
+
+def test_example_config_documents_the_same_hard_default():
+    m = re.search(r"^# BAN_HARD_SCENARIOS='([^']+)'$", read("deploy.conf.example"), re.MULTILINE)
+    assert m and m.group(1) == hard_regex_default()
+
+
+def test_profiles_heredoc_puts_the_hard_profile_first():
+    body = next(b for t, b, _ in heredocs(DEPLOY) if t == "/etc/crowdsec/profiles.yaml")
+    text = "\n".join(body)
+    names = re.findall(r"^name: (\S+)$", text, re.MULTILINE)
+    assert names == ["loxprox_hard_ip", "default_ip_remediation", "default_range_remediation"], names
+    # YAML lines only: the header comment names "(on_success: break)" too.
+    assert len(re.findall(r"^on_success: break$", text, re.MULTILINE)) == 3
+    assert 'Alert.GetScenario() matches "${BAN_HARD_SCENARIOS}"' in text
+    assert re.search(r"duration: \$\{hard\}.*?duration: \$\{soft\}.*?duration: \$\{soft\}", text, re.DOTALL)
+
+
+def test_config_yaml_local_heredoc_keeps_a_year_of_alerts():
+    body = "\n".join(next(b for t, b, _ in heredocs(DEPLOY) if t == "/etc/crowdsec/config.yaml.local"))
+    assert re.search(r"^db_config:\n  flush:\n    max_age: \$\{max_age_days\}d\n    max_items: 100000$", body, re.MULTILINE)
+    assert re.search(r"local src=\"\$\{SCRIPT_DIR:-\.\}/crowdsec\" f dst hard soft max_age_days=400", read(DEPLOY))
+
+
+def scenario(rel):
+    """Top-level `key: value` pairs of a CrowdSec scenario (no PyYAML in CI)."""
+    out = {}
+    for line in read(rel).splitlines():
+        m = re.match(r"^([a-z_]+):\s*(.*)$", line)
+        if m:
+            out[m.group(1)] = m.group(2).strip().strip('"')
+    out["_text"] = read(rel)
+    return out
+
+
+def test_loxprox_scenarios_match_the_contract():
+    trap = scenario("crowdsec/scenarios/loxprox-scanner-trap.yaml")
+    unknown = scenario("crowdsec/scenarios/loxprox-unknown-path.yaml")
+    auth = scenario("crowdsec/scenarios/loxprox-auth-bf.yaml")
+    assert (trap["name"], trap["type"]) == ("loxprox/scanner-trap", "trigger")
+    assert (unknown["name"], unknown["type"], unknown["capacity"], unknown["leakspeed"]) == \
+        ("loxprox/unknown-path", "leaky", "5", "2m")
+    assert (auth["name"], auth["type"]) == ("loxprox/auth-bf", "leaky")
+    # Each tells its log apart by the acquisition's source file name (suffix:
+    # the base name only when CrowdSec's metrics level is "aggregated").
+    assert "evt.Line.Src endsWith 'loxprox-trap.log'" in trap["filter"]
+    assert "evt.Line.Src endsWith 'loxprox-unknown.log'" in unknown["filter"]
+    assert "evt.Line.Src endsWith 'loxone-access.log'" in auth["filter"]
+    for s in (trap, unknown, auth):
+        assert s["groupby"] == "evt.Meta.source_ip"
+        assert re.search(r"^  remediation: true$", s["_text"], re.MULTILINE), s["name"]
+    assert re.compile(hard_regex_default()).search(trap["name"])
+    assert not re.compile(hard_regex_default()).search(unknown["name"])
+    assert not re.compile(hard_regex_default()).search(auth["name"])
+
+
+def test_auth_bf_matches_the_scrubbed_paths_the_access_log_writes():
+    flt = scenario("crowdsec/scenarios/loxprox-auth-bf.yaml")["filter"]
+    rx = re.compile(re.search(r"matches '([^']+)'", flt).group(1))
+    for path in ("/jdev/sys/getkey2/<redacted>", "/jdev/sys/getkey", "/jdev/sys/getjwt/<redacted>",
+                 "/jdev/sys/gettoken/<redacted>", "/jdev/sys/authwithtoken/<redacted>",
+                 "/jdev/sys/refreshjwt/<redacted>", "/dev/sys/getkey2/<redacted>"):
+        assert rx.search(path), path
+    for path in ("/jdev/cfg/api", "/jdev/sys/getcertificate", "/jdev/sys/getkeyX", "/jdev/sps/io/x/on"):
+        assert not rx.search(path), path
+
+
+def test_acquisition_covers_the_class_logs_once():
+    acq = read("crowdsec/acquis.d/loxprox.yaml")
+    files = re.findall(r"^  - (\S+)$", acq, re.MULTILINE)
+    assert files == ["/var/log/nginx/loxprox-trap.log", "/var/log/nginx/loxprox-unknown.log"]
+    # The Host/SNI log repeats the trap's requests for people; acquiring it would count each twice.
+    assert not re.search(r"^\s*-\s*\S*trap-hosts", acq, re.MULTILINE), "trap-hosts log must not be acquired"
+    assert re.search(r"^labels:\n  type: nginx$", acq, re.MULTILINE)
+    nginx_acq = "\n".join(next(b for t, b, _ in heredocs(DEPLOY) if t == "/etc/crowdsec/acquis.d/nginx.yaml"))
+    assert "loxprox-trap" not in nginx_acq and "loxprox-unknown" not in nginx_acq, "read twice"
+
+
+def test_no_local_probe_hits_the_trap():
+    """With TLS on, :1080 is gated on Host/SNI — a local probe that asks for
+    127.0.0.1 over TLS is answered by the trap (444). The watchdogs read that
+    as "nginx dead" and heal/reboot (the 2026-05-18 reboot loop class)."""
+    bad = []
+    for f in tracked_files() + ["security-monitoring/hub-refresh.sh"]:
+        if f.startswith(("tests/", "docs/", "audits/")) or not f.endswith((".sh", ".py")):
+            continue
+        if not (REPO / f).exists():
+            continue
+        for n, line in enumerate(read(f).splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if "https://127.0.0.1:1080" in line or "https://localhost:1080" in line:
+                if "trap-probe" in line:
+                    continue   # a deliberate probe OF the trap (test-gateway.sh)
+                bad.append(f"{f}:{n}: {line.strip()[:120]}")
+    assert not bad, "TLS probe of :1080 by IP (the trap answers it):\n  " + "\n  ".join(bad)
+    for wd in ("security-monitoring/network-watchdog.sh", "security-monitoring/tunnel-watchdog.sh"):
+        text = read(wd)
+        assert "127.0.0.1:1080/}" not in text and "127.0.0.1:1080/\"" not in text, \
+            f"{wd} probes '/', an unknown-class path (404 under UNKNOWN_PATH_MODE=deny)"
+        assert '--resolve "${TLS_DOMAIN}:1080:127.0.0.1"' in text, f"{wd} has no real-name TLS probe"
+
+
+def test_old_watchdog_paused_before_the_gate_and_rearmed_after_config_env():
+    """The watchdog a previous deploy installed probes plain 127.0.0.1 — in TLS
+    mode the trap's (444). It must be stopped before configure_nginx can
+    activate the gate, and its successor started only after config.env
+    carries TLS_DOMAIN (feedback: the 2026-05-18 reboot loop)."""
+    main = read(DEPLOY).split("\nmain() {", 1)[1]
+    i_pause = main.index("\n    _loxprox_pause_network_watchdog\n")
+    i_nginx = main.index("\n    configure_nginx\n")
+    i_rt = main.index("\n    write_runtime_config\n")
+    i_wd = main.index('run_optional_step "network watchdog"        setup_network_watchdog')
+    assert i_pause < i_nginx < i_rt < i_wd

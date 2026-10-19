@@ -144,6 +144,9 @@ jobs:
 
             if [[ ! -f "$NFTABLES_CONF" ]]; then echo "FAIL: nftables.conf missing"; exit 1; fi
             if ! grep -q "policy drop" "$NFTABLES_CONF"; then echo "FAIL: nftables policy not drop"; exit 1; fi
+            if ! grep -q "ip6 saddr @geoip_blocklist6 drop" "$NFTABLES_CONF"; then echo "FAIL: IPv6 GeoIP drop rule missing"; exit 1; fi
+            if ! grep -q "loxprox-egress" "$NFTABLES_CONF"; then echo "FAIL: nginx egress rules missing"; exit 1; fi
+            if ! grep -qx "server_tokens off;" "$NGINX_SITE"; then echo "FAIL: server_tokens off missing"; exit 1; fi
 
             if [[ ! -f "$SYSCTL_CONF" ]]; then echo "FAIL: sysctl.conf missing"; exit 1; fi
             if ! grep -q "tcp_syncookies = 1" "$SYSCTL_CONF"; then echo "FAIL: syncookies missing"; exit 1; fi
@@ -222,6 +225,77 @@ jobs:
 
       - name: nginx-extras (Debian 12) — profile complain/enforce, headers, AppSec detection log
         run: sudo CI=true bash tests/host-integration.sh nginx-apparmor nginx-appsec
+
+  # 2026-10 breach hardening: the edge, the firewall, the host config and the
+  # CrowdSec ban configuration against the real programs.
+  edge-nginx:
+    name: Host integration — Host/SNI gate, path classes, limits (nginx-extras, Debian 12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Gateway site + TLS block + trap servers against a real nginx-extras
+        run: sudo CI=true bash tests/host-integration.sh nginx-edge
+
+  debian12-host-config:
+    name: Host integration — nft -c, unattended-upgrades origins, sshd -t (Debian 12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: nftables ruleset, u-u matcher, sshd drop-in in Debian 12 containers
+        run: sudo CI=true bash tests/host-integration.sh nft-check debian12-host
+
+  crowdsec-scenarios:
+    name: Host integration — CrowdSec scenarios, profiles, retention, simulation
+    # Pinned: the packagecloud CrowdSec repository must carry this release.
+    runs-on: ubuntu-24.04
+    env:
+      # The CrowdSec release production runs. Bump it together with the gateway;
+      # the job fails (listing what the repository has) instead of testing another one.
+      CROWDSEC_CI_VERSION: "1.8.1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install CrowdSec ${{ env.CROWDSEC_CI_VERSION }} from its packagecloud repository (production's source)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/crowdsec-gpgkey.asc https://packagecloud.io/crowdsec/crowdsec/gpgkey
+          sudo install -d -m 0755 /etc/apt/keyrings
+          sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/crowdsec-archive-keyring.gpg /tmp/crowdsec-gpgkey.asc
+          . /etc/os-release
+          echo "deb [signed-by=/etc/apt/keyrings/crowdsec-archive-keyring.gpg] https://packagecloud.io/crowdsec/crowdsec/ubuntu ${VERSION_CODENAME} main" \
+            | sudo tee /etc/apt/sources.list.d/crowdsec.list >/dev/null
+          sudo apt-get update -qq
+          # Exact upstream version only (1.8.1 or a 1.8.1-<build> package revision,
+          # never 1.8.10) — no silent fallback to whatever is newest.
+          # madison lines: "  crowdsec | 1.8.1 | https://packagecloud.io/... noble/main amd64 Packages"
+          avail=$(apt-cache madison crowdsec 2>&1) || true
+          ver=$(awk -v want="$CROWDSEC_CI_VERSION" '
+            $1 == "crowdsec" && $2 == "|" {
+              v = $3
+              if (v == want || index(v, want "-") == 1 || index(v, want "~") == 1 || index(v, want "+") == 1) {
+                print v; exit
+              }
+            }' <<<"$avail")
+          if [[ -z "$ver" ]]; then
+            echo "::error::crowdsec $CROWDSEC_CI_VERSION is not in the packagecloud repository for ${VERSION_CODENAME}. Available:"
+            printf '%s\n' "${avail:-<none>}"
+            exit 1
+          fi
+          echo "Installing crowdsec=$ver"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "crowdsec=$ver" jq >/dev/null
+          sudo cscli version
+          # The package starts the agent, which need not be active the moment
+          # apt returns. Up to 60 s, then a real verdict.
+          for _ in $(seq 1 60); do
+            systemctl is-active --quiet crowdsec && break
+            sleep 1
+          done
+          systemctl is-active crowdsec
+
+      - name: configure_crowdsec, cscli explain and a replay against the real daemon
+        run: sudo CI=true bash tests/host-integration.sh crowdsec
 
   markdown-lint:
     runs-on: ubuntu-latest

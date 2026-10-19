@@ -171,6 +171,14 @@ ALERT_EMAIL=""
 #      is just the challenge directory — same threat profile as any normal
 #      Let's Encrypt setup.
 #
+# Host/SNI gate (2026-10): with TLS on, :1080 and :80 answer ONLY for
+# TLS_DOMAIN and EXTRA_SERVER_NAMES. A request for any other name — and for
+# the bare IP, which is how Shodan/Censys-style scanners connect — is logged to
+# /var/log/nginx/loxprox-trap.log and answered with nothing (444); CrowdSec
+# bans the address (loxprox/scanner-trap, HARD ladder). Every app and device
+# must therefore use the host name, never the WAN IP. A device still on
+# http://<name>:1080 keeps getting the 301 to https.
+#
 # Manual operations:
 #   sudo bash deploy.sh --renew-tls    # force renewal now (acme.sh --renew)
 #   sudo bash deploy.sh --remove-tls   # full removal — cert + state + cron
@@ -207,6 +215,13 @@ TLS_ACME_FALLBACK_SERVER="zerossl"
 #     "--debug"                  # noisy logs during issuance
 #     "--days 60"                # custom renewal threshold
 TLS_ACME_EXTRA=""
+
+# Extra host names :1080 accepts in TLS mode besides TLS_DOMAIN (space-
+# separated), e.g. a second DNS name for the same WAN IP. Not covered by the
+# certificate unless you issue it for them (TLS_ACME_EXTRA="-d other.name").
+# Ignored with TLS off (plain HTTP accepts every Host).
+#   Example: "home.example.net"
+EXTRA_SERVER_NAMES=""
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # OPTIONAL — Tunnel (v2.0): zero-open-ports remote access via a relay VPS
@@ -283,6 +298,100 @@ GUI_PORT="1081"
 # Empty = no password; if set, panel mutations — unban/restart/config/apply —
 # require it; recommended when untrusted devices share the LAN.
 GUI_PASSWORD=""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# OPTIONAL — Edge filtering, ban ladders, alerts (2026-10 breach hardening)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Every request on :1080 falls into one path class:
+#   trap    scanner-only paths (/.env, /.git, *.php, /wp-*, /cgi-bin/, …) and
+#           the methods CONNECT/TRACE/TRACK/PROPFIND → 444 + trap log; the
+#           address is banned on the first hit (HARD ladder).
+#   admin   Loxone file-system / system-control webservices (fsget, fslist,
+#           fsdel, sys/reboot, sps/restart, cfg setters, …) → REMOTE_ADMIN_PATHS.
+#   app     the endpoints the Loxone app uses → proxied as always.
+#   unknown everything else → UNKNOWN_PATH_MODE.
+# LAN_SUBNET and CROWDSEC_WHITELIST_IPS are never denied (admin/unknown) and
+# never counted by the per-endpoint limits (Loxone auth paths: 3/s, burst 30;
+# /ws/: 6 concurrent sockets per address). The trap applies to everyone.
+
+# "log" (default) = unknown paths are proxied AND written to
+#   /var/log/nginx/loxprox-unknown.log — the learning phase: watch that log
+#   for paths the app really uses. The loxprox/unknown-path scenario only
+#   alerts (CrowdSec simulation) in this mode.
+# "deny" = unknown paths from the internet get a local 404 (still logged),
+#   and loxprox/unknown-path bans (SOFT ladder).
+UNKNOWN_PATH_MODE="log"
+
+# "deny" (default) = Loxone admin / file-system webservices answer 403 to
+#   internet clients (logged; never banned by a LoxProx scenario, but repeated
+#   403s still count toward crowdsecurity/http-probing). "allow" = proxied like
+#   any app path.
+REMOTE_ADMIN_PATHS="deny"
+
+# What a trap hit costs the client. The trap itself (444 + trap log) works
+# from the first request in both modes; this only decides the CrowdSec ban.
+# "ban" (default) = loxprox/scanner-trap bans on the first hit (HARD ladder).
+# "observe" = it only alerts (CrowdSec simulation) — use it for the first
+#   ~48 h after enabling the Host/SNI gate, to see whether one of your own
+#   devices lands in the trap (e.g. an app configured with the WAN IP).
+# Rollout:
+#   1. TRAP_BAN_MODE="observe", sudo bash deploy.sh
+#   2. after ~48 h: sudo cscli alerts list -s loxprox/scanner-trap --limit 0
+#      and /var/log/nginx/loxprox-trap-hosts.log — any of your own devices in
+#      there? That log (TLS only, not read by CrowdSec) shows per trap hit the
+#      Host and SNI the client asked for: host= an old or other real name, or
+#      your WAN IP / a CloudDNS address, with the Loxone app's user agent at
+#      the end of the line, is one of yours; a bare IP with a scanner's user
+#      agent is not. Fix your devices (the real host name instead of an IP) first.
+#   3. TRAP_BAN_MODE="ban" here, then EITHER re-run sudo bash deploy.sh
+#      OR sudo cscli simulation disable loxprox/scanner-trap && sudo systemctl reload crowdsec
+#      — change this file either way: with "observe" left here, the next
+#      deploy (or a panel apply) puts the trap back into observe mode.
+TRAP_BAN_MODE="ban"
+
+# Ban durations per offence, as CrowdSec durations (m/h/d). HARD applies to
+# unambiguous scanner scenarios (BAN_HARD_SCENARIOS), SOFT to everything else.
+# The first value is the ban CrowdSec issues (deploy.sh writes it into
+# /etc/crowdsec/profiles.yaml); progressive-ban.py extends repeat offenders to
+# the next value, the last one repeating.
+BAN_HARD_LADDER="168h 2160h 8760h"        # 7 days → 90 days → 1 year
+BAN_SOFT_LADDER="24h 168h 720h 2160h"     # 1 day → 7 → 30 → 90 days
+
+# Scenario names that use the HARD ladder — one regular expression, valid in
+# both Go RE2 (CrowdSec) and Python (progressive-ban.py): no lookarounds, no
+# quotes, no backslashes. Leave it commented to keep the shipped default:
+# BAN_HARD_SCENARIOS='^(loxprox/scanner-trap|crowdsecurity/(appsec-vpatch|vpatch-.+|http-cve-.+|CVE-.+|[A-Za-z0-9_]+-cve-.+|http-sensitive-files|http-backdoors-attempts|http-path-traversal-probing|http-admin-interface-probing|http-open-proxy))$'
+
+# How long an offence is remembered for the ladder, in days. CrowdSec keeps
+# its alert history at least this long + 35 days (config.yaml.local, ≥ 400d).
+PROGRESSIVE_BAN_WINDOW_DAYS="365"
+
+# Discord alert when a remote session comes from an ASN (provider network) the
+# gateway has not seen before. The first ASN_LEARNING_DAYS days only learn.
+SESSION_ALERT_ENABLED="true"
+ASN_LEARNING_DAYS="7"
+
+# Alert when more Loxone auth requests than this reach the gateway in one
+# monitor cycle (60 s), all clients together — a credential-stuffing signal.
+# The normal level is a handful per DAY (0–5), so 20 in one minute is loud.
+AUTH_RATE_ALERT_PER_CYCLE="20"
+
+# Alert when a pending Debian security update has not been installed after
+# this many days (unattended-upgrades stuck or misconfigured).
+SEC_UPDATE_MAX_AGE_DAYS="2"
+
+# GeoIP country denylist for IPv6 as well (same countries as IPv4).
+# GEOIP_URL_BASE6: empty = the ipdeny.com IPv6 lists.
+GEOIP_IPV6_ENABLED="true"
+GEOIP_URL_BASE6=""
+
+# SSH: space-separated AllowUsers patterns (user or user@host). Empty = no
+# AllowUsers line (every account with a key may log in). deploy.sh refuses
+# to write a list that would lock everyone out (no listed account exists,
+# or — key-only mode — none has an authorized key).
+#   Example: "admin"
+SSH_ALLOW_USERS=""
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # OPTIONAL — Maintenance
