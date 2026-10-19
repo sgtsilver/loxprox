@@ -1784,6 +1784,58 @@ test_pkg_installed_helper() {
     [[ -z "$left" ]] && pass "no 'dpkg -l | grep' left in deploy.sh" || fail "left: $left"
 }
 
+# 2026-10 (production): apt-daily.timer held /var/lib/dpkg/lock-frontend and
+# the deploy's `apt-get install -y mmdb-bin` failed. A fake apt-get records
+# every call's arguments.
+test_apt_lock_wait() {
+    echo ""
+    echo "━━━ _loxprox_apt — waits for the apt / dpkg locks (2026-10) ━━━"
+    local calls="$MOCK_ROOT/apt-get.calls" rc out lock_msg
+    lock_msg='E: Could not get lock /var/lib/apt/lists/lock. It is held by process 4242 (apt-get)'
+    : > "$calls"
+    apt-get() { printf '%s\n' "$*" >> "$calls"; return 0; }
+    sleep() { :; }
+
+    _loxprox_apt install -y mmdb-bin >/dev/null 2>&1
+    grep -qx -- '-o DPkg::Lock::Timeout=300 install -y mmdb-bin' "$calls" \
+        && pass "install waits for the dpkg lock (DPkg::Lock::Timeout=300)" || fail "install args: $(cat "$calls")"
+
+    # A real deploy step: nginx not installed → update + install, both waiting.
+    : > "$calls"
+    install_nginx >/dev/null 2>&1
+    [[ "$(cat "$calls")" == $'-o DPkg::Lock::Timeout=300 update -q\n-o DPkg::Lock::Timeout=300 install -y nginx nginx-extras' ]] \
+        && pass "install_nginx: update and install both carry the lock timeout" || fail "install_nginx apt calls: $(tr '\n' ';' < "$calls")"
+
+    # update: the lists lock is not covered by DPkg::Lock::Timeout — retried.
+    : > "$calls"
+    apt-get() {
+        printf '%s\n' "$*" >> "$calls"
+        (( $(wc -l < "$calls") < 3 )) && { echo "$lock_msg" >&2; return 100; }
+        return 0
+    }
+    out=$(_loxprox_apt update -q 2>&1); rc=$?
+    (( rc == 0 )) && [[ "$(wc -l < "$calls" | tr -d ' ')" == "3" ]] && grep -q 'retrying apt-get update' <<<"$out" \
+        && pass "update: held lists lock retried until free (3 calls, rc 0)" || fail "update retry: rc=$rc calls=$(wc -l < "$calls") out=$out"
+
+    # A lock that is never released: bounded by LOXPROX_APT_LOCK_TIMEOUT.
+    : > "$calls"
+    apt-get() { printf '%s\n' "$*" >> "$calls"; echo "$lock_msg" >&2; return 100; }
+    out=$(LOXPROX_APT_LOCK_TIMEOUT=20 _loxprox_apt update -q 2>&1); rc=$?
+    (( rc == 100 )) && [[ "$(wc -l < "$calls" | tr -d ' ')" == "3" ]] && grep -qx -- '-o DPkg::Lock::Timeout=20 update -q' "$calls" \
+        && pass "update: gives up after LOXPROX_APT_LOCK_TIMEOUT (20 s → 3 tries, apt's rc 100)" || fail "update timeout: rc=$rc calls=$(wc -l < "$calls")"
+
+    # Any other failure (network, bad sources) is not retried.
+    : > "$calls"
+    apt-get() { printf '%s\n' "$*" >> "$calls"; echo 'E: The repository is not signed.' >&2; return 100; }
+    out=$(_loxprox_apt update -q 2>&1); rc=$?
+    (( rc == 100 )) && [[ "$(wc -l < "$calls" | tr -d ' ')" == "1" ]] && grep -qF 'not signed' <<<"$out" \
+        && pass "update: a non-lock failure returns at once, its message shown" || fail "non-lock failure: rc=$rc calls=$(wc -l < "$calls")"
+
+    unset -f sleep
+    apt-get() { true; }
+    export -f apt-get
+}
+
 # Item 5: test-gateway.sh reads AppSec / acquisition counters exactly.
 test_gateway_metric_readers() {
     echo ""
@@ -1860,7 +1912,8 @@ test_breach_nginx_classes() {
     rm -f "$NGINX_SITE" "$NGINX_MAIN_CONF"
     UNKNOWN_PATH_MODE=log REMOTE_ADMIN_PATHS=deny configure_nginx >/dev/null 2>&1
     grep -qx 'server_tokens off;' "$NGINX_SITE" && pass "server_tokens off at http level" || fail "server_tokens off missing"
-    grep -q "^# LOXPROX-SITE-TEMPLATE-VERSION: 6$" "$NGINX_SITE" && pass "site template v6" || fail "site template not v6"
+    grep -qx 'variables_hash_max_size 2048;' "$NGINX_SITE" && pass "variables_hash_max_size 2048 at http level" || fail "variables_hash_max_size missing"
+    grep -q "^# LOXPROX-SITE-TEMPLATE-VERSION: 7$" "$NGINX_SITE" && pass "site template v7" || fail "site template not v7"
 
     # Trusted sources: loopback, LAN, whitelist — deduplicated.
     local geo
@@ -1983,6 +2036,17 @@ CLASSES
     configure_nginx >/dev/null 2>&1
     grep -q '^server_tokens' "$NGINX_SITE" && fail "duplicate server_tokens next to nginx.conf's own" \
                                          || pass "server_tokens already in nginx.conf → the site only comments it"
+    grep -qx 'variables_hash_max_size 2048;' "$NGINX_SITE" && pass "nginx.conf without variables_hash_max_size → the site sets it" \
+                                                        || fail "variables_hash_max_size missing next to nginx.conf's server_tokens"
+    # The same for variables_hash_max_size (v7), and a changed nginx.conf
+    # changes the render fingerprint, so the site follows it.
+    printf 'http {\n    variables_hash_max_size 4096;\n}\n' > "$NGINX_MAIN_CONF"
+    configure_nginx >/dev/null 2>&1
+    grep -q '^variables_hash_max_size' "$NGINX_SITE" && fail "duplicate variables_hash_max_size next to nginx.conf's own" \
+                                                   || pass "variables_hash_max_size already in nginx.conf → the site only comments it"
+    grep -qxF "# variables_hash_max_size: set in $NGINX_MAIN_CONF (nginx rejects a second http-level copy)" "$NGINX_SITE" \
+        && pass "…and says where it is set" || fail "variables_hash_max_size comment missing"
+    grep -qx 'server_tokens off;' "$NGINX_SITE" && pass "server_tokens off back in the site once nginx.conf drops it" || fail "server_tokens off not restored"
     rm -f "$NGINX_MAIN_CONF"
 
     # A malformed whitelist entry is skipped, not handed to nginx -t.
@@ -2616,6 +2680,7 @@ test_umask_and_home
 test_dir_modes_with_inherited_umask
 test_gui_unit_stop_behaviour
 test_pkg_installed_helper
+test_apt_lock_wait
 test_gateway_metric_readers
 
 echo ""

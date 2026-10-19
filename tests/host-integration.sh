@@ -882,10 +882,18 @@ t_nginx_edge() {
         || { fail "could not install nginx-extras in the container"; docker rm -f "$EDGE_CTR" >/dev/null 2>&1; return; }
     docker exec "$EDGE_CTR" sh -c 'nginx -s quit 2>/dev/null; sleep 1; pkill -x nginx; true'
     if docker exec "$EDGE_CTR" bash /workspace/tests/host-integration.sh nginx-edge-setup tls; then
-        pass "nginx -t accepts the v6 site with the TLS block and both trap servers"
+        pass "nginx -t accepts the v7 site with the TLS block and both trap servers"
     else
         fail "edge setup (tls) failed"; docker rm -f "$EDGE_CTR" >/dev/null 2>&1; return
     fi
+    # Template v7: the maps' variables fit the hash — production's nginx -t
+    # warned "could not build optimal variables_hash" at the 1024 default.
+    local nt
+    nt=$(docker exec "$EDGE_CTR" nginx -t 2>&1)
+    docker exec "$EDGE_CTR" grep -qx 'variables_hash_max_size 2048;' "$NGINX_SITE" \
+        && pass "site sets variables_hash_max_size 2048 at http level" || fail "site lacks variables_hash_max_size 2048"
+    grep -q 'variables_hash' <<<"$nt" && fail "nginx -t still warns: $(grep 'variables_hash' <<<"$nt")" \
+                                       || pass "nginx -t: no variables_hash warning"
     docker exec "$EDGE_CTR" /usr/sbin/nginx || { fail "nginx did not start"; docker rm -f "$EDGE_CTR" >/dev/null 2>&1; return; }
     sleep 1
     ip=$(docker exec "$EDGE_CTR" hostname -i | awk '{print $1}')

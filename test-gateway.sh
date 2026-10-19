@@ -1199,10 +1199,12 @@ test_edge() {
 
     # unattended-upgrades: the matcher accepts the security archive again.
     local uu_conf=/etc/apt/apt.conf.d/50unattended-upgrades uu_out
-    if grep -q 'Origins-Pattern' "$uu_conf" 2>/dev/null && ! grep -q 'Allowed-Origins' "$uu_conf"; then
+    # Directive lines only: the generated header comment names Allowed-Origins.
+    if grep -q '^Unattended-Upgrade::Origins-Pattern' "$uu_conf" 2>/dev/null \
+            && ! grep -q '^Unattended-Upgrade::Allowed-Origins' "$uu_conf" 2>/dev/null; then
         pass "unattended-upgrades uses Origins-Pattern (codename + label)"
     else
-        fail "$uu_conf still uses Allowed-Origins (archive match — misses oldstable-security)"
+        fail "$uu_conf: no Origins-Pattern block, or Allowed-Origins still active (archive match — misses oldstable-security)"
     fi
     if command -v python3 >/dev/null 2>&1 && [[ -x /usr/bin/unattended-upgrade ]]; then
         uu_out=$(_uu_origin_check | tail -n 1)   # the verdict is the last line
