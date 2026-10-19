@@ -734,3 +734,26 @@ def test_old_watchdog_paused_before_the_gate_and_rearmed_after_config_env():
     i_rt = main.index("\n    write_runtime_config\n")
     i_wd = main.index('run_optional_step "network watchdog"        setup_network_watchdog')
     assert i_pause < i_nginx < i_rt < i_wd
+
+
+def test_every_apt_get_call_waits_for_the_apt_locks():
+    """2026-10: on production apt-daily.timer held the dpkg frontend lock and
+    the deploy's bare `apt-get install -y mmdb-bin` failed. Every apt-get call
+    in deploy.sh goes through _loxprox_apt (DPkg::Lock::Timeout, plus a retry
+    for update's lists lock); a bare call would bring the race back."""
+    lines = read(DEPLOY).splitlines()
+    start = lines.index("_loxprox_apt() {")
+    end = next(i for i in range(start, len(lines)) if lines[i] == "}")
+    helper = "\n".join(lines[start:end + 1])
+    assert 'apt-get "${lock_opt[@]}" "$@"' in helper
+    assert '(-o "DPkg::Lock::Timeout=${LOXPROX_APT_LOCK_TIMEOUT}")' in helper
+    bare = []
+    for n, line in enumerate(lines, 1):
+        if start < n <= end + 1 or line.lstrip().startswith("#"):
+            continue
+        code = re.sub(r'"[^"]*"', '""', line)   # messages that name the command
+        code = re.sub(r"'[^']*'", "''", code)
+        if re.search(r"(^|[^\w-])apt-get\b", code):
+            bare.append(f"deploy.sh:{n}: {line.strip()}")
+    assert not bare, "apt-get without _loxprox_apt:\n  " + "\n  ".join(bare)
+    assert len(re.findall(r"\b_loxprox_apt (?:update|install) ", read(DEPLOY))) >= 15

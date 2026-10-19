@@ -264,6 +264,38 @@ _loxprox_pkg_installed() {
     [[ "$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null)" == "install ok installed" ]]
 }
 
+# 2026-10: every apt-get call in this script goes through _loxprox_apt. On
+# production a deploy's `apt-get install -y mmdb-bin` failed because
+# apt-daily.timer held /var/lib/dpkg/lock-frontend at that very second.
+#   * install / remove: DPkg::Lock::Timeout makes apt-get wait for the dpkg
+#     locks instead of failing.
+#   * update: that option does not cover the lists lock
+#     (/var/lib/apt/lists/lock; Debian bug #1069167), so update is retried
+#     while apt reports a held lock — any other failure returns at once.
+# Both waits end after LOXPROX_APT_LOCK_TIMEOUT seconds.
+LOXPROX_APT_LOCK_TIMEOUT="${LOXPROX_APT_LOCK_TIMEOUT:-300}"
+_LOXPROX_APT_RETRY_DELAY=10
+_loxprox_apt() {
+    local -a lock_opt=(-o "DPkg::Lock::Timeout=${LOXPROX_APT_LOCK_TIMEOUT}")
+    if [[ "${1:-}" != "update" ]]; then
+        apt-get "${lock_opt[@]}" "$@"
+        return
+    fi
+    local out rc waited=0
+    while :; do
+        # C locale: the lock message is matched below. `&& rc=0 || rc=$?`:
+        # a failing update must reach the retry, not set -e.
+        out=$(LC_ALL=C apt-get "${lock_opt[@]}" "$@" 2>&1) && rc=0 || rc=$?
+        printf '%s\n' "$out"
+        (( rc == 0 )) && return 0
+        grep -q 'Could not get lock' <<<"$out" || return "$rc"
+        (( waited < LOXPROX_APT_LOCK_TIMEOUT )) || return "$rc"
+        info "apt lists lock held by another apt run (apt-daily?) — retrying apt-get update in ${_LOXPROX_APT_RETRY_DELAY}s"
+        sleep "$_LOXPROX_APT_RETRY_DELAY"
+        waited=$(( waited + _LOXPROX_APT_RETRY_DELAY ))
+    done
+}
+
 # ─── Degraded-mode step wrapper (v2.3) ───────────────────────────────────────
 #
 # Core proxy configuration (preflight, sysctls, firewall, nginx, CrowdSec
@@ -1116,7 +1148,7 @@ preflight() {
     # believes alerting is live. Install it up front, before anything can alert.
     if ! command -v jq &>/dev/null; then
         info "Installing jq (required by the Discord/monitor alerting pipeline)..."
-        apt-get update -q && apt-get install -y jq >/dev/null \
+        _loxprox_apt update -q && _loxprox_apt install -y jq >/dev/null \
             || warn "jq install failed — Discord and monitor alerts will NOT work until 'apt-get install -y jq' succeeds."
     fi
 
@@ -1421,8 +1453,8 @@ install_nginx() {
     if _loxprox_pkg_installed nginx; then
         info "Nginx already installed."
     else
-        apt-get update -q
-        apt-get install -y nginx nginx-extras
+        _loxprox_apt update -q
+        _loxprox_apt install -y nginx nginx-extras
     fi
     ok "Nginx installed."
 }
@@ -1444,7 +1476,9 @@ install_nginx() {
 #                 admin / app / unknown) with their logs, auth + WebSocket
 #                 limits, token commands scrubbed; the TLS block adds the
 #                 Host/SNI gate (real server names + trap default servers).
-_LOXPROX_SITE_TEMPLATE_VERSION=6
+#   v7 (2026-10): variables_hash_max_size 2048 at http level (nginx-extras
+#                 warned that the v6 maps no longer fit the 1024 default).
+_LOXPROX_SITE_TEMPLATE_VERSION=7
 _LOXPROX_SITE_VERSION_MARKER="# LOXPROX-SITE-TEMPLATE-VERSION:"
 _LOXPROX_SITE_PARAMS_MARKER="# LOXPROX-SITE-PARAMS:"
 
@@ -1487,7 +1521,7 @@ _loxprox_site_params_fingerprint() {
         "$ENABLE_APPSEC" "$NGINX_APPSEC_INCLUDE" \
         "$LAN_SUBNET" "${CROWDSEC_WHITELIST_IPS[*]}" \
         "$UNKNOWN_PATH_MODE" "$REMOTE_ADMIN_PATHS" \
-        "$(_loxprox_tls_server_names)" "$(_loxprox_server_tokens_line)" \
+        "$(_loxprox_tls_server_names)" "$(_loxprox_server_tokens_line)" "$(_loxprox_variables_hash_line)" \
         | sha256sum 2>/dev/null | cut -c1-16) || digest=""
     printf '%s' "$digest"
 }
@@ -1514,17 +1548,25 @@ _loxprox_tls_server_names() {
     printf '%s' "${names[*]}"
 }
 
-# `server_tokens off` at http level hides the nginx version on every response
-# the gateway generates (the live :1080 sent "Server: nginx/1.22.1"). nginx
-# rejects a second http-level copy, so an operator's own line in nginx.conf
-# wins and the site carries a comment instead.
-_loxprox_server_tokens_line() {
-    if grep -qE '^[[:space:]]*server_tokens[[:space:]]' "$NGINX_MAIN_CONF" 2>/dev/null; then
-        printf '# server_tokens: set in %s (nginx rejects a second http-level copy)' "$NGINX_MAIN_CONF"
+# An http-level directive the site sets: "NAME VALUE;" — or, when nginx.conf
+# already sets NAME, only a comment, because nginx rejects a second
+# http-level copy (the operator's own line wins).
+_loxprox_http_directive_line() {
+    if grep -qE "^[[:space:]]*$1[[:space:]]" "$NGINX_MAIN_CONF" 2>/dev/null; then
+        printf '# %s: set in %s (nginx rejects a second http-level copy)' "$1" "$NGINX_MAIN_CONF"
     else
-        printf 'server_tokens off;'
+        printf '%s %s;' "$1" "$2"
     fi
 }
+
+# `server_tokens off` at http level hides the nginx version on every response
+# the gateway generates (the live :1080 sent "Server: nginx/1.22.1").
+_loxprox_server_tokens_line() { _loxprox_http_directive_line server_tokens off; }
+
+# 2026-10 (template v7): the path-class maps added enough variables that
+# nginx-extras warned "could not build optimal variables_hash, you should
+# increase either variables_hash_max_size: 1024 or variables_hash_bucket_size: 64".
+_loxprox_variables_hash_line() { _loxprox_http_directive_line variables_hash_max_size 2048; }
 
 # geo lines for the sources the per-endpoint limits and the admin / unknown
 # denials never apply to: loopback (local probes; tunnelled requests carry the
@@ -1698,7 +1740,7 @@ log_format appsec_evt '\''$time_iso8601 $remote_addr "$request_method $loxone_lo
         fi
 
         # 2026-10: the denials untrusted sources get (the trap applies to all).
-        local deny_entries="" trusted_geo server_tokens_line
+        local deny_entries="" trusted_geo server_tokens_line variables_hash_line
         if [[ "$REMOTE_ADMIN_PATHS" == "deny" ]]; then
             deny_entries+='    "0:admin"    403;'$'\n'
         fi
@@ -1707,6 +1749,7 @@ log_format appsec_evt '\''$time_iso8601 $remote_addr "$request_method $loxone_lo
         fi
         trusted_geo=$(_loxprox_trusted_geo_entries)
         server_tokens_line=$(_loxprox_server_tokens_line)
+        variables_hash_line=$(_loxprox_variables_hash_line)
 
         cat > "$NGINX_SITE" <<EOF
 # Loxone Miniserver Gen 1 — Security Gateway
@@ -1724,6 +1767,8 @@ limit_conn_zone \$binary_remote_addr zone=loxone_conn:10m;
 
 # 2026-10: no nginx version in Server headers or error pages.
 ${server_tokens_line}
+# 2026-10 (v7): room in the variables hash for the path-class maps below.
+${variables_hash_line}
 
 ${appsec_http_extras}
 # F7: WebSocket transparency. Loxone Gen 1 speaks plain ws:// on :80; with the
@@ -2184,7 +2229,7 @@ _loxprox_install_acme_sh() {
         return 0
     fi
     info "Installing acme.sh ${ACMESH_VER} (SHA256-pinned tarball, no curl|bash)..."
-    apt-get install -y socat curl >/dev/null
+    _loxprox_apt install -y socat curl >/dev/null
 
     local tmp tarball extract_dir
     # H8: /var/tmp, not /tmp — setup_tmp_mount mounts /tmp noexec, and the
@@ -2520,7 +2565,7 @@ _loxprox_ensure_trap_cert() {
     if [[ -s "$crt" && -s "$key" ]] && openssl x509 -checkend 2592000 -noout -in "$crt" >/dev/null 2>&1; then
         return 0
     fi
-    command -v openssl >/dev/null 2>&1 || apt-get install -y openssl >/dev/null \
+    command -v openssl >/dev/null 2>&1 || _loxprox_apt install -y openssl >/dev/null \
         || { error "openssl missing — cannot create the trap certificate."; return 1; }
     install -d -m 0750 -o root -g root "$LOXPROX_TLS_DIR" 2>/dev/null || mkdir -p "$LOXPROX_TLS_DIR"
     local tmp_key="$key.new.$$" tmp_crt="$crt.new.$$"
@@ -3178,7 +3223,7 @@ setup_gui() {
         true|yes|1)
             banner "LoxProx Panel — enable (LAN-only GUI on :${GUI_PORT})"
 
-            _loxprox_pkg_installed qrencode || apt-get install -y qrencode
+            _loxprox_pkg_installed qrencode || _loxprox_apt install -y qrencode
 
             local src="${SCRIPT_DIR:-.}/gui/loxprox-gui.py"
             if [[ ! -f "$src" ]]; then
@@ -3251,7 +3296,7 @@ setup_apparmor() {
     banner "AppArmor"
 
     if ! _loxprox_pkg_installed apparmor; then
-        apt-get install -y apparmor apparmor-utils
+        _loxprox_apt install -y apparmor apparmor-utils
     fi
 
     systemctl enable apparmor
@@ -3294,8 +3339,8 @@ setup_apparmor() {
 install_crowdsec() {
     banner "Installing CrowdSec"
 
-    command -v curl &>/dev/null || apt-get install -y curl
-    command -v gpg &>/dev/null || apt-get install -y gnupg
+    command -v curl &>/dev/null || _loxprox_apt install -y curl
+    command -v gpg &>/dev/null || _loxprox_apt install -y gnupg
 
     if ! command -v cscli &>/dev/null; then
         info "Adding CrowdSec repository (GPG-pinned, no curl|bash)..."
@@ -3326,15 +3371,15 @@ install_crowdsec() {
 
         echo "deb [signed-by=${keyring}] https://packagecloud.io/crowdsec/crowdsec/debian bookworm main" \
             > /etc/apt/sources.list.d/crowdsec.list
-        apt-get update -q
-        apt-get install -y crowdsec
+        _loxprox_apt update -q
+        _loxprox_apt install -y crowdsec
     else
         info "CrowdSec already installed."
     fi
 
     # Substring match over the whole package list, as before: it also has to
     # see the -nftables / -iptables variants of the bouncer package.
-    grep -q "crowdsec-firewall-bouncer" <<<"$(dpkg -l 2>/dev/null)" || apt-get install -y crowdsec-firewall-bouncer
+    grep -q "crowdsec-firewall-bouncer" <<<"$(dpkg -l 2>/dev/null)" || _loxprox_apt install -y crowdsec-firewall-bouncer
     ok "CrowdSec and firewall bouncer installed."
 }
 
@@ -4161,7 +4206,7 @@ setup_ssh_hardening() {
 setup_unattended_upgrades() {
     banner "Unattended Upgrades"
 
-    _loxprox_pkg_installed unattended-upgrades || apt-get install -y unattended-upgrades
+    _loxprox_pkg_installed unattended-upgrades || _loxprox_apt install -y unattended-upgrades
 
     local auto_conf
     auto_conf="$(dirname "$UNATTENDED_UPGRADES_CONF")/20auto-upgrades"
@@ -4206,7 +4251,7 @@ EOF
 setup_auditd() {
     banner "auditd (System Call Auditing)"
 
-    _loxprox_pkg_installed auditd || apt-get install -y auditd audispd-plugins
+    _loxprox_pkg_installed auditd || _loxprox_apt install -y auditd audispd-plugins
 
     mkdir -p "$(dirname "$AUDIT_RULES_FILE")"
     cat > "$AUDIT_RULES_FILE" <<EOF
@@ -4445,7 +4490,7 @@ setup_alerting() {
     fi
 
     banner "Mail Alerting"
-    command -v mail &>/dev/null || apt-get install -y mailutils bsd-mailx
+    command -v mail &>/dev/null || _loxprox_apt install -y mailutils bsd-mailx
 
     # Cron writes /var/lib/loxprox/last-error-count; create the dir up front so
     # alerting works on a pristine host even before setup_security_monitoring runs.
@@ -4482,7 +4527,7 @@ setup_security_monitoring() {
     # are hard dependencies of the new checks.
     local pkg
     for pkg in mmdb-bin jq; do
-        _loxprox_pkg_installed "$pkg" || apt-get install -y "$pkg" >/dev/null \
+        _loxprox_pkg_installed "$pkg" || _loxprox_apt install -y "$pkg" >/dev/null \
             || warn "$pkg install failed — the monitor's checks that need it stay degraded."
     done
 
