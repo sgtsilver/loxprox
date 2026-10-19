@@ -31,6 +31,16 @@ class FakeCompletedProcess:
         self.returncode = returncode
 
 
+@pytest.fixture(autouse=True)
+def _isolated_host_paths(tmp_path, monkeypatch):
+    """No test reads or writes the host's state file or CrowdSec whitelist.
+    Run as root on a gateway, main() would otherwise overwrite the live
+    /var/lib/loxprox/extended-decisions.json. Tests that need their own paths
+    monkeypatch them again."""
+    monkeypatch.setattr(pb, "STATE_FILE", str(tmp_path / "extended-decisions.json"))
+    monkeypatch.setattr(pb, "WHITELIST_FILE", str(tmp_path / "no-whitelist.yaml"))
+
+
 def _alert(scenario="crowdsecurity/http-probing", when=None, origin="crowdsec"):
     """A realistic `cscli alerts list` entry: attack-origin decision + timestamp."""
     if when is None:
@@ -393,28 +403,57 @@ class TestMain:
                         mock_add.assert_not_called()
                         mock_count.assert_not_called()  # skipped before counting
 
-    def test_capi_history_does_not_inflate_local_offense_count(self):
+    @staticmethod
+    def _capi_case(local_decision):
+        """main() over one IP with a CAPI decision (id 10) and a local one (id 20).
+
+        The alert history is real input for analyze_offenses: one local alert
+        now, plus CAPI / community-list alerts days earlier. If those counted,
+        this would be offence #3 (720h); they must not — it is offence #1.
+        """
+        now = datetime.now(timezone.utc)
+        active = [
+            {"value": "1.2.3.4", "id": "10", "origin": "CAPI", "duration": "3h", "scenario": "capi"},
+            dict({"value": "1.2.3.4", "id": "20", "origin": "crowdsec", "scenario": "ssh-bf"}, **local_decision),
+        ]
+        history = [
+            _alert("crowdsecurity/ssh-bf", now - timedelta(minutes=5)),
+            _alert("update : +15000/-0 IPs", now - timedelta(days=5), origin="CAPI"),
+            _alert("firehol_cybercrime", now - timedelta(days=20), origin="lists:firehol_cybercrime"),
+        ]
+
+        def cscli(args):
+            return active if args[:2] == ["decisions", "list"] else history
+
+        with patch.object(pb, "run_cscli", side_effect=cscli), \
+             patch.object(pb, "load_whitelist", return_value=[]), \
+             patch.object(pb, "cscli_decision_delete", return_value=True) as mock_del, \
+             patch.object(pb, "cscli_decision_add", return_value=True) as mock_add:
+            pb.main()
+        return mock_add, mock_del
+
+    def test_capi_history_does_not_inflate_local_offense_count(self, tmp_path, monkeypatch):
         """CAPI/community decisions must never drive escalation.
 
-        H1: offenses are counted from local ALERTS (count_offenses), and CAPI
-        community-blocklist entries produce no local alert. An IP with CAPI
-        decisions plus a single local scenario ban is a first-time local
-        offender (offense=1 → no extension). The CAPI decisions are also skipped
-        by the origin filter regardless.
+        H1: offences are counted from local ALERTS (analyze_offenses); CAPI and
+        list alerts are not local detections. The IP is a first-time local
+        offender: SOFT offence #1 = 24h. Its local ban (3h58m left, no creation
+        time — a legacy 4h-profile ban) is lifted to rung 1, never rung 2+.
+        The CAPI decision is never touched.
         """
-        active = [
-            {"value": "1.2.3.4", "id": "10", "origin": "CAPI",
-             "duration": "3h", "scenario": "capi"},
-            {"value": "1.2.3.4", "id": "20", "origin": "crowdsec",
-             "duration": "3h58m", "scenario": "ssh-bf"},
-        ]
-        with patch.object(pb, "run_cscli", return_value=active):
-            with _offenses(1):  # one local offense; the CAPI row is skipped by origin
-                with patch.object(pb, "cscli_decision_delete") as mock_del:
-                    with patch.object(pb, "cscli_decision_add") as mock_add:
-                        pb.main()
-                        mock_del.assert_not_called()
-                        mock_add.assert_not_called()
+        monkeypatch.setattr(pb, "STATE_FILE", str(tmp_path / "s.json"))
+        mock_add, mock_del = self._capi_case({"duration": "3h58m"})
+        assert [c.args for c in mock_add.call_args_list] == [("1.2.3.4", "24h", "repeat-offender-1")]
+        assert [c.args for c in mock_del.call_args_list] == [("20",)]   # never id 10
+
+    def test_capi_history_with_a_full_tier_one_ban_is_left_alone(self, tmp_path, monkeypatch):
+        """Same IP and history; the local ban carries its creation time and was
+        made at 24h (3 h ago): already at rung 1, nothing to do."""
+        monkeypatch.setattr(pb, "STATE_FILE", str(tmp_path / "s.json"))
+        created = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        mock_add, mock_del = self._capi_case({"duration": "21h", "created_at": created})
+        mock_add.assert_not_called()
+        mock_del.assert_not_called()
 
     def test_whitelisted_ip_skipped(self, tmp_path, monkeypatch):
         """M9/M10: an IP covered by the CrowdSec whitelist is never escalated,
@@ -535,11 +574,17 @@ class TestOriginalDuration:
     def test_missing_creation_time_falls_back_to_time_left_and_logs(self, tmp_path, monkeypatch, caplog):
         monkeypatch.setattr(pb, "STATE_FILE", str(tmp_path / "s.json"))
         caplog.set_level("INFO", logger="progressive-ban")
-        # 21h left of a 24h target is >= 90%: left alone
-        assert not self._run("21h", timedelta(0), 1, False, with_created=False).called
+        # Threshold: EXTEND_SLACK (0.9) × 24h target = 21.6h = 21h36m.
+        # 22h left is above it: left alone.
+        assert not self._run("22h", timedelta(0), 1, False, with_created=False).called
         assert "No creation time" in caplog.text
-        # 3h left: lifted
-        assert self._run("3h", timedelta(0), 1, False, with_created=False).called
+        # Boundary: exactly 21h36m left is >= 90%: left alone; one second less is lifted.
+        assert not self._run("21h36m", timedelta(0), 1, False, with_created=False).called
+        add = self._run("21h35m59s", timedelta(0), 1, False, with_created=False)
+        assert add.called and add.call_args.args[1] == "24h"
+        # 3h left: well below, lifted to 24h
+        add = self._run("3h", timedelta(0), 1, False, with_created=False)
+        assert add.called and add.call_args.args[1] == "24h"
 
     def test_flatten_carries_the_alert_creation_time(self):
         alert = {"created_at": "2026-10-06T17:35:44Z", "source": {},

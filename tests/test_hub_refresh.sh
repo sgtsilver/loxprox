@@ -98,7 +98,7 @@ HUBLIST_OUTDATED='{"parsers":[{"name":"crowdsecurity/nginx-logs","status":"enabl
 # files. postoverflows/ is left out on purpose (a type with nothing installed).
 seed_hub() {
     local c="$1"
-    rm -rf "$c/hub" "$c/etc"
+    rm -rf "${c:?}/hub" "${c:?}/etc"
     mkdir -p "$c/hub/collections/crowdsecurity" "$c/hub/appsec-rules/crowdsecurity" \
              "$c/etc/collections" "$c/etc/appsec-rules" "$c/etc/parsers/s02-enrich" "$c/etc/scenarios" \
              "$c/etc/appsec-configs" "$c/etc/contexts"
@@ -185,8 +185,12 @@ fi
 c="$WORK/retention"; mkdir -p "$c/snapshots"
 for i in 1 2 3 4 5; do echo old > "$c/snapshots/hub-2026010${i}-030000.tar.gz"; done
 run_hub retention
-left=$(cd "$c/snapshots" && ls hub-*.tar.gz | tr '\n' ' ')
-fresh=$(cd "$c/snapshots" && ls hub-*.tar.gz | grep -vc '^hub-2026010')
+kept=("$c"/snapshots/hub-*.tar.gz) left="" fresh=0
+for f in "${kept[@]}"; do
+    [[ -e "$f" ]] || continue
+    left+="$(basename "$f") "
+    [[ "$(basename "$f")" == hub-2026010* ]] || fresh=$((fresh + 1))
+done
 if [[ $(wc -w <<<"$left") -eq 4 && "$fresh" == "1" && "$left" != *20260101* && "$left" != *20260102* \
         && "$left" == *20260103* && "$left" == *20260105* ]]; then
     pass "retention: the newest 4 are kept (this run's + 3 older), the 2 oldest removed"

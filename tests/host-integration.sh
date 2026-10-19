@@ -1152,6 +1152,7 @@ t_crowdsec() {
     # deploy.sh's configure_crowdsec with TRAP_BAN_MODE=$1. The firewall bouncer
     # is not under test (and would program the runner's firewall).
     cs_configure() {
+        # shellcheck disable=SC2034  # consumed by deploy.sh's configure_crowdsec
         ( TRAP_BAN_MODE="$1"
           systemctl() { case " $* " in *" crowdsec-firewall-bouncer"*) return 0 ;; esac; command systemctl "$@"; }
           configure_crowdsec ) >>"$LOG_FILE" 2>&1

@@ -632,7 +632,8 @@ def test_profiles_heredoc_puts_the_hard_profile_first():
     text = "\n".join(body)
     names = re.findall(r"^name: (\S+)$", text, re.MULTILINE)
     assert names == ["loxprox_hard_ip", "default_ip_remediation", "default_range_remediation"], names
-    assert text.count("on_success: break") == 3
+    # YAML lines only: the header comment names "(on_success: break)" too.
+    assert len(re.findall(r"^on_success: break$", text, re.MULTILINE)) == 3
     assert 'Alert.GetScenario() matches "${BAN_HARD_SCENARIOS}"' in text
     assert re.search(r"duration: \$\{hard\}.*?duration: \$\{soft\}.*?duration: \$\{soft\}", text, re.DOTALL)
 

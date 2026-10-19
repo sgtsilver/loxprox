@@ -2332,9 +2332,11 @@ test_breach_runtime_config() {
     [[ -z "$missing" ]] && pass "config.env carries all 17 hardening keys" || fail "config.env lacks:$missing"
     grep -qx 'TRAP_BAN_MODE="ban"' "$GATEWAY_CONFIG_FILE" && pass "TRAP_BAN_MODE defaults to ban" || fail "TRAP_BAN_MODE default wrong"
     TRAP_BAN_MODE=observe write_runtime_config >/dev/null 2>&1
+    # shellcheck source=/dev/null
     back=$(set +u; source "$GATEWAY_CONFIG_FILE"; printf '%s' "$TRAP_BAN_MODE")
     [[ "$back" == "observe" ]] && pass "TRAP_BAN_MODE=observe round-trips through config.env" || fail "TRAP_BAN_MODE in config.env: '$back'"
     write_runtime_config >/dev/null 2>&1
+    # shellcheck source=/dev/null
     back=$(set +u; source "$GATEWAY_CONFIG_FILE"; printf '%s' "$BAN_HARD_SCENARIOS")
     [[ "$back" == "$_LOXPROX_HARD_SCENARIOS_DEFAULT" ]] && pass "BAN_HARD_SCENARIOS survives sourcing config.env unchanged" \
                                                       || fail "BAN_HARD_SCENARIOS changed by sourcing: $back"

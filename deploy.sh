@@ -2491,9 +2491,9 @@ _loxprox_site_enable_tls() {
             # The bare `error_page 497 https://...` form does not work; the
             # named-location indirection is required.
             printf "%s    error_page 497 = @loxprox_https_redirect;\n", indent
-            # 2026-10: the 301 stays for the gateway's own names — a family
+            # 2026-10: the 301 stays for the gateway names — a family
             # device still on http://<name>:1080 relies on it. Cleartext with
-            # any other Host is the trap server's 497 → 444.
+            # any other Host is the 497 → 444 of the trap server.
             printf "%s    location @loxprox_https_redirect { return 301 https://$host:1080$request_uri; }\n", indent
             printf "%s%s\n", indent, tls_end
             next
