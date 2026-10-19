@@ -3514,11 +3514,13 @@ EOF
         info "All expected CrowdSec collections present."
     fi
 
-    # Intentionally NOT running 'cscli hub upgrade' — uncontrolled upgrades can
-    # break parsers or scenarios. Upgrade manually after testing in staging.
-    # (2026-10: the package's crowdsec-hubupdate.timer ran exactly that every
-    # night; setup_security_monitoring masks it.)
-    info "Hub components installed. Run 'cscli hub upgrade' manually when validated."
+    # No 'cscli hub upgrade' here: an upgrade that breaks crowdsec takes the
+    # gateway down (AppSec fails closed). Hub upgrades belong to hub-refresh.sh
+    # (cron, daily 04:30), which snapshots the hub first and rolls back if
+    # crowdsec does not come back. (2026-10: the package's
+    # crowdsec-hubupdate.timer upgraded every night without either;
+    # setup_security_monitoring masks it.)
+    info "Hub components installed. hub-refresh.sh upgrades them daily (snapshot + rollback)."
 
     # Whitelist trusted IPs
     info "Writing CrowdSec whitelist..."
@@ -4516,8 +4518,9 @@ EOF
 #   /opt/loxprox/gateway-backup.sh        (cron, daily 02:00)
 #   /opt/loxprox/geoip-block.sh           (cron, daily 03:00)
 #   /opt/loxprox/progressive-ban.py       (cron, every 15 min, under flock)
-#   /opt/loxprox/hub-refresh.sh           (cron, daily 04:30; masks the
-#                                          package's crowdsec-hubupdate.timer)
+#   /opt/loxprox/hub-refresh.sh           (cron, daily 04:30; replaces the
+#                                          package's crowdsec-hubupdate.timer,
+#                                          which is masked)
 #   /opt/loxprox/discord-alert.sh         (alert dispatcher)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -4634,9 +4637,9 @@ MAILTO=""
 # Daily GeoIP blocklist refresh (IPv4 + IPv6; the script reads config.env)
 0 3 * * * root /opt/loxprox/geoip-block.sh >> /var/log/loxprox-cron.log 2>&1
 
-# Daily CrowdSec hub refresh (04:30): virtual-patching rules only, behind a
-# snapshot and an automatic rollback; the rest is reported, never upgraded
-# unattended. The package's own nightly crowdsec-hubupdate.timer is masked.
+# Daily CrowdSec hub refresh (04:30): every installed hub item upgraded
+# (never --force), behind a verified snapshot and an automatic rollback. The
+# package's own nightly crowdsec-hubupdate.timer is masked.
 30 4 * * * root /opt/loxprox/hub-refresh.sh >> /var/log/loxprox-cron.log 2>&1
 EOF
     chmod 644 "$LOXPROX_CRON_FILE"
@@ -4645,14 +4648,15 @@ EOF
 # 2026-10: the CrowdSec package ships and enables crowdsec-hubupdate.timer
 # (daily, around midnight). It runs `cscli hub update`, then `cscli hub
 # upgrade` and a reload: EVERY installed hub item upgraded unattended, with no
-# snapshot and no rollback. A parser or scenario change can alter what is
-# banned, and AppSec fails closed: a crowdsec that does not come back means a
-# 500 for every request. hub-refresh.sh is meant to be the only unattended
-# hub update (virtual-patching rules only, daily, snapshot + rollback), so the
-# package timer is masked. It is masked only after hub-refresh.sh is
-# installed and cron accepts its schedule, so the rules always keep one
-# refresh path. A unit that does not exist (another package version, a
-# container without systemd) is not an error. The package's postinst runs
+# snapshot and no rollback. AppSec fails closed: a crowdsec that does not come
+# back after an upgrade means a 500 for every request. hub-refresh.sh is the
+# only unattended hub update: the same daily upgrade of every installed item
+# (maintainer decision 2026-10-19: "all rules, with rollback"), behind a
+# verified snapshot and an automatic rollback, so the package timer is
+# masked. It is masked only after hub-refresh.sh is installed and cron
+# accepts its schedule, so the rules always keep one refresh path. A unit
+# that does not exist (another package version, a container without
+# systemd) is not an error. The package's postinst runs
 # `systemctl enable --now` on the timer with `|| true`, which a mask refuses;
 # every deploy re-applies the mask and test-gateway.sh checks it.
 _loxprox_mask_package_hubupdate() {

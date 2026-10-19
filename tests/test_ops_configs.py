@@ -169,8 +169,8 @@ def test_cron_mailto_is_quoted_empty():
 
 def test_hub_refresh_runs_daily_at_0430():
     """2026-10: the package's nightly crowdsec-hubupdate.timer is masked, so
-    hub-refresh.sh is the only refresh of the virtual-patching rules — it has
-    to run daily, not weekly, to keep them as fresh."""
+    hub-refresh.sh is the only refresh of the hub items — it has to run
+    daily, not weekly, to keep them as fresh."""
     for _, target, body, _ in cron_heredocs():
         if target == "/etc/cron.d/loxprox":
             jobs = [line for line in body if "hub-refresh.sh" in line and not line.lstrip().startswith("#")]
