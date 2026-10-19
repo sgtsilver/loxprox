@@ -784,7 +784,8 @@ test_tls_acme_listener_written() {
     [[ -f "$NGINX_ACME_CONF" ]] && pass "ACME conf.d file written" || fail "ACME conf.d not written"
     grep -q '^    listen      80;$' "$NGINX_ACME_CONF" && pass ":80 listener present" || fail ":80 listen missing"
     # 2026-10: the trap in the site is the :80 default; this file must not be.
-    grep -q 'default_server' "$NGINX_ACME_CONF" && fail "ACME listener still claims default_server" \
+    # listen directives only: the file's header comment names the trap's default_server.
+    grep -qE '^[[:space:]]*listen[^;]*default_server' "$NGINX_ACME_CONF" && fail "ACME listener still claims default_server" \
                                                 || pass "ACME listener is not the :80 default server"
     grep -qF "server_name ${TLS_DOMAIN} alt.example.com;" "$NGINX_ACME_CONF" && pass "ACME listener answers the gateway names only" \
                                                                            || fail "ACME listener server_name wrong: $(grep server_name "$NGINX_ACME_CONF")"
@@ -1895,8 +1896,13 @@ test_breach_nginx_classes() {
     appsec_line=$(grep -n 'include .*crowdsec-appsec.conf;' "$NGINX_SITE" | cut -d: -f1)
     [[ -n "$trap_line" && -n "$appsec_line" ]] && (( trap_line < appsec_line )) \
         && pass "class checks precede the AppSec include" || fail "class checks not before AppSec ($trap_line vs $appsec_line)"
-    grep -qE '"0:admin" +403;' "$NGINX_SITE" && pass "REMOTE_ADMIN_PATHS=deny → admin denial entry" || fail "admin denial entry missing"
-    grep -q '"0:unknown"' "$NGINX_SITE" && fail "UNKNOWN_PATH_MODE=log must not deny unknown paths" || pass "UNKNOWN_PATH_MODE=log proxies unknown paths"
+    # The $loxprox_deny map's own entries: "0:unknown" also keys the
+    # $loxprox_unknown log map (→ 1) in every mode.
+    local deny_map
+    deny_map=$(awk '/^map .* \$loxprox_deny \{$/ {on = 1; next} on && /^\}/ {exit} on' "$NGINX_SITE")
+    [[ -n "$deny_map" ]] && pass "\$loxprox_deny map found" || fail "\$loxprox_deny map not found in the site"
+    grep -qE '^[[:space:]]+"0:admin"[[:space:]]+403;$' <<<"$deny_map" && pass "REMOTE_ADMIN_PATHS=deny → admin denial entry" || fail "admin denial entry missing: $deny_map"
+    grep -q '"0:unknown"' <<<"$deny_map" && fail "UNKNOWN_PATH_MODE=log must not deny unknown paths: $deny_map" || pass "UNKNOWN_PATH_MODE=log proxies unknown paths"
 
     # The classes themselves, read back from the generated map.
     local sample want got bad=0
@@ -1967,8 +1973,9 @@ CLASSES
 
     # deny / allow variants regenerate the site (fingerprint).
     UNKNOWN_PATH_MODE=deny REMOTE_ADMIN_PATHS=allow configure_nginx >/dev/null 2>&1
-    grep -qE '"0:unknown" +404;' "$NGINX_SITE" && pass "UNKNOWN_PATH_MODE=deny → local 404 for untrusted sources" || fail "deny mode: no 404 entry"
-    grep -q '"0:admin"' "$NGINX_SITE" && fail "REMOTE_ADMIN_PATHS=allow still denies admin paths" || pass "REMOTE_ADMIN_PATHS=allow → admin paths proxied"
+    deny_map=$(awk '/^map .* \$loxprox_deny \{$/ {on = 1; next} on && /^\}/ {exit} on' "$NGINX_SITE")
+    grep -qE '^[[:space:]]+"0:unknown"[[:space:]]+404;$' <<<"$deny_map" && pass "UNKNOWN_PATH_MODE=deny → local 404 for untrusted sources" || fail "deny mode: no 404 entry: $deny_map"
+    grep -q '"0:admin"' <<<"$deny_map" && fail "REMOTE_ADMIN_PATHS=allow still denies admin paths: $deny_map" || pass "REMOTE_ADMIN_PATHS=allow → admin paths proxied"
 
     # An operator's own server_tokens in nginx.conf wins (nginx rejects two).
     mkdir -p "$(dirname "$NGINX_MAIN_CONF")"
@@ -2027,7 +2034,8 @@ test_breach_tls_gate() {
         after=$(stat -c %Y "$LOXPROX_TLS_DIR/trap-fullchain.pem" 2>/dev/null)
         [[ -n "$before" && "$before" == "$after" ]] && pass "trap certificate kept while valid (idempotent)" || fail "trap certificate regenerated needlessly"
     fi
-    grep -q 'default_server' "$NGINX_ACME_CONF" && fail "ACME listener claims default_server next to the trap" || pass "ACME listener rewritten without default_server"
+    grep -qE '^[[:space:]]*listen[^;]*default_server' "$NGINX_ACME_CONF" \
+        && fail "ACME listener claims default_server next to the trap" || pass "ACME listener rewritten without default_server"
     grep -qF 'server_name loxprox.example.com alt.example.com;' "$NGINX_ACME_CONF" && pass "ACME listener: gateway names only" || fail "ACME listener names wrong"
     h1=$(sha256sum "$NGINX_SITE" | awk '{print $1}')
 
@@ -2196,6 +2204,11 @@ test_breach_crowdsec() {
     grep -q 'Simulation for loxprox/auth-bf NOT confirmed' <<<"$out" && [[ ! -e "$CROWDSEC_SCENARIO_DIR/loxprox-auth-bf.yaml" ]] \
         && [[ -e "$CROWDSEC_SCENARIO_DIR/loxprox-unknown-path.yaml" ]] \
         && pass "deny mode, auth-bf not confirmed simulated: only auth-bf removed (unknown-path may ban here)" || fail "missing simulation not handled"
+    # What this run (window 400 days, HARD ladder 7d) wrote — read before the
+    # next run rewrites both files with the defaults.
+    grep -qx '   duration: 168h' "$CROWDSEC_PROFILES" && pass "7d ladder → Go duration 168h in the profile" || fail "d-ladder not converted"
+    grep -qx '    max_age: 435d' "$CROWDSEC_CONFIG_LOCAL" && pass "window 400 days → alert history 435 days" \
+        || fail "max_age not raised with the window: $(grep 'max_age:' "$CROWDSEC_CONFIG_LOCAL")"
     _CS_SIM_LIST="loxprox/unknown-path"
     out=$(UNKNOWN_PATH_MODE=log _loxprox_configure_crowdsec_bans 2>&1); rc=$?
     if (( rc == 1 )) && grep -q 'error\|ERROR' <<<"$out" && grep -q 'Simulation for loxprox/auth-bf NOT confirmed' <<<"$out" \
@@ -2206,8 +2219,6 @@ test_breach_crowdsec() {
         fail "R4 fail safe (rc=$rc): $(ls "$CROWDSEC_SCENARIO_DIR"); $out"
     fi
     _CS_SIM_LIST="loxprox/auth-bf loxprox/unknown-path"
-    grep -qx '   duration: 168h' "$CROWDSEC_PROFILES" && pass "7d ladder → Go duration 168h in the profile" || fail "d-ladder not converted"
-    grep -qx '    max_age: 435d' "$CROWDSEC_CONFIG_LOCAL" && pass "window 400 days → alert history 435 days" || fail "max_age not raised with the window"
     BAN_HARD_LADDER="x 90d" _loxprox_configure_crowdsec_bans >/dev/null 2>&1 && fail "bad ladder accepted" || pass "bad first ladder value refused"
 
     # A stock acquis.yaml with the nginx glob is reported (double reading).
@@ -2323,13 +2334,14 @@ test_breach_runtime_config() {
     echo "━━━ write_runtime_config() — new keys reach config.env (2026-10) ━━━"
 
     write_runtime_config >/dev/null 2>&1
-    local key missing="" back
+    local key back
+    local -a missing=()
     for key in ENABLE_TLS TLS_DOMAIN EXTRA_SERVER_NAMES UNKNOWN_PATH_MODE TRAP_BAN_MODE REMOTE_ADMIN_PATHS BAN_HARD_LADDER \
                BAN_SOFT_LADDER BAN_HARD_SCENARIOS PROGRESSIVE_BAN_WINDOW_DAYS SESSION_ALERT_ENABLED AUTH_RATE_ALERT_PER_CYCLE \
                SSH_ALLOW_USERS GEOIP_IPV6_ENABLED GEOIP_URL_BASE6 ASN_LEARNING_DAYS SEC_UPDATE_MAX_AGE_DAYS; do
-        grep -q "^${key}=\"" "$GATEWAY_CONFIG_FILE" || missing+=" $key"
+        grep -q "^${key}=\"" "$GATEWAY_CONFIG_FILE" || missing+=("$key")
     done
-    [[ -z "$missing" ]] && pass "config.env carries all 17 hardening keys" || fail "config.env lacks:$missing"
+    (( ${#missing[@]} == 0 )) && pass "config.env carries all 17 hardening keys" || fail "config.env lacks: ${missing[*]}"
     grep -qx 'TRAP_BAN_MODE="ban"' "$GATEWAY_CONFIG_FILE" && pass "TRAP_BAN_MODE defaults to ban" || fail "TRAP_BAN_MODE default wrong"
     TRAP_BAN_MODE=observe write_runtime_config >/dev/null 2>&1
     # shellcheck source=/dev/null
@@ -2352,10 +2364,17 @@ test_breach_validation() {
     echo "━━━ _loxprox_validate_hardening_config() (2026-10) ━━━"
 
     _loxprox_validate_hardening_config >/dev/null 2>&1 && pass "defaults validate" || fail "defaults rejected"
-    local case_ ok
-    while IFS='|' read -r case_ ok; do
-        [[ -n "$case_" ]] || continue
-        if ( eval "$case_"; _loxprox_validate_hardening_config >/dev/null 2>&1 ); then
+    local line case_ ok rc
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        # The verdict follows the LAST "|": a value may contain "|" itself
+        # (regex alternation). A case that does not parse as shell is a
+        # harness error, never a silent run on the defaults.
+        ok=${line##*"|"} case_=${line%"|"*}
+        ( eval "$case_" || exit 99; _loxprox_validate_hardening_config >/dev/null 2>&1 ); rc=$?
+        if (( rc == 99 )); then
+            fail "harness: case is not valid shell: $case_"
+        elif (( rc == 0 )); then
             [[ "$ok" == "ok" ]] && pass "accepted: $case_" || fail "accepted although invalid: $case_"
         else
             [[ "$ok" == "bad" ]] && pass "rejected: $case_" || fail "rejected although valid: $case_"
@@ -2392,6 +2411,7 @@ BAN_HARD_SCENARIOS='^(a`id`)$'|bad
 BAN_HARD_SCENARIOS='^(a$(id))$'|bad
 BAN_HARD_SCENARIOS='^(a$HOME)$'|bad
 BAN_HARD_SCENARIOS='^(?:loxprox/scanner-trap|crowdsecurity/vpatch-.+)$'|ok
+BAN_HARD_SCENARIOS='^(?!crowdsecurity/http-probing)(loxprox/.+|crowdsecurity/.+)$'|bad
 PROGRESSIVE_BAN_WINDOW_DAYS=0|bad
 AUTH_RATE_ALERT_PER_CYCLE=lots|bad
 SESSION_ALERT_ENABLED=maybe|bad

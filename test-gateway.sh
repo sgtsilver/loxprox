@@ -722,7 +722,8 @@ test_tls() {
 
     if [[ -f /etc/nginx/conf.d/loxprox-acme.conf ]]; then
         pass "ACME challenge conf present"
-        grep -q 'default_server' /etc/nginx/conf.d/loxprox-acme.conf \
+        # listen directives only: the file's header comment names the trap's default_server.
+        grep -qE '^[[:space:]]*listen[^;]*default_server' /etc/nginx/conf.d/loxprox-acme.conf \
             && fail "ACME listener still claims default_server — foreign Hosts on :80 get the 301, not the trap" \
             || pass "ACME listener answers the gateway's names only (the :80 default is the trap)"
     else
