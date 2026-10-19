@@ -149,14 +149,23 @@ first.
   `repeat-offender-hard-<n>` (HARD) or `repeat-offender-<n>` (SOFT). The session alert learns provider networks
   silently for `ASN_LEARNING_DAYS` days first. `mmdb-bin` and `jq` are
   installed for these checks.
-- **Weekly CrowdSec hub refresh** (`security-monitoring/hub-refresh.sh`,
-  Sunday 04:30). It upgrades only `crowdsecurity/appsec-virtual-patching`,
-  reloads CrowdSec only if that collection changed, and reports every other
-  outdated hub item on Discord without upgrading it. It snapshots the hub
-  first (4 kept in `/var/lib/loxprox/hub-snapshots/`) and rolls back if
-  CrowdSec does not come back (CRITICAL *CrowdSec Rule Update Rolled Back*,
-  *CrowdSec Down — Gateway Serving Errors* or *CrowdSec Rule Rollback
-  Failed*; WARNING *CrowdSec Hub Snapshot Failed* skips the upgrade).
+- **Daily CrowdSec hub refresh** (`security-monitoring/hub-refresh.sh`,
+  04:30), the only unattended hub update. It upgrades only
+  `crowdsecurity/appsec-virtual-patching`, reloads CrowdSec only if that
+  collection changed, and reports every other outdated hub item on Discord
+  without upgrading it (*CrowdSec Hub Items Outdated*, sent again only when
+  that list changes). It snapshots the hub first (7 kept in
+  `/var/lib/loxprox/hub-snapshots/`) and rolls back if CrowdSec does not
+  come back (CRITICAL *CrowdSec Rule Update Rolled Back*, *CrowdSec Down —
+  Gateway Serving Errors* or *CrowdSec Rule Rollback Failed*; WARNING
+  *CrowdSec Hub Snapshot Failed* skips the upgrade).
+  **The CrowdSec package's own nightly hub upgrade is now disabled.** The
+  package ships and enables `crowdsec-hubupdate.timer`, which ran `cscli hub
+  update && cscli hub upgrade` every night: every installed hub item
+  upgraded and CrowdSec reloaded, with no snapshot and no rollback, so the
+  protection above was bypassed. `deploy.sh` masks the timer
+  (`systemctl mask --now`) once `hub-refresh.sh` and its cron line are in
+  place; `test-gateway.sh` checks that it stays masked.
 - **`test-gateway.sh`** gets an *Edge filtering, bans & host config*
   section; the new checks and scripts have CI tests.
 - **New configuration keys** (all optional, documented in
