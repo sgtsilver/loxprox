@@ -1236,8 +1236,9 @@ test_mask_package_hubupdate() {
 
     echo enabled > "$state"; : > "$calls"
     out=$(_loxprox_mask_package_hubupdate 2>&1); rc=$?
-    [[ $rc -eq 0 ]] && grep -qx 'mask --now crowdsec-hubupdate.timer' "$calls" \
-        && pass "enabled package timer → systemctl mask --now crowdsec-hubupdate.timer" || fail "rc=$rc calls: $(cat "$calls")"
+    [[ $rc -eq 0 ]] && [[ "$(grep -E '^(stop|mask|reset-failed) ' "$calls")" == $'stop crowdsec-hubupdate.timer\nmask crowdsec-hubupdate.timer\nreset-failed crowdsec-hubupdate.timer' ]] \
+        && ! grep -q -- '--now' "$calls" \
+        && pass "enabled package timer → systemctl stop, then mask, then reset-failed (no mask --now)" || fail "rc=$rc calls: $(cat "$calls")"
     [[ "$(cat "$state")" == masked ]] && grep -q 'masked (was: enabled)' <<<"$out" \
         && pass "…verified masked afterwards and logged" || fail "state=$(cat "$state") out: $out"
 
@@ -1250,7 +1251,7 @@ test_mask_package_hubupdate() {
     for absent in "" not-found; do
         printf '%s' "$absent" > "$state"; : > "$calls"
         out=$(_loxprox_mask_package_hubupdate 2>&1); rc=$?
-        if [[ $rc -eq 0 ]] && ! grep -q '^mask' "$calls" && grep -q 'not present' <<<"$out" && ! grep -q 'WARN' <<<"$out"; then
+        if [[ $rc -eq 0 ]] && ! grep -qE '^(stop|mask|reset-failed)' "$calls" && grep -q 'not present' <<<"$out" && ! grep -q 'WARN' <<<"$out"; then
             pass "unit absent (is-enabled prints '${absent:-nothing}') → returns 0, nothing masked, no warning"
         else
             fail "absent unit ('$absent'): rc=$rc calls=$(cat "$calls") out: $out"
@@ -1260,7 +1261,7 @@ test_mask_package_hubupdate() {
     echo enabled > "$state"; : > "$calls"
     out=$(MOCK_MASK_RC=1 _loxprox_mask_package_hubupdate 2>&1); rc=$?
     if [[ $rc -eq 0 ]] && grep -q 'Could not mask crowdsec-hubupdate.timer' <<<"$out" \
-            && grep -q 'sudo systemctl mask --now crowdsec-hubupdate.timer' <<<"$out"; then
+            && grep -q 'sudo systemctl stop crowdsec-hubupdate.timer && sudo systemctl mask crowdsec-hubupdate.timer' <<<"$out"; then
         pass "mask fails → warning with the manual command, the deploy step does not fail"
     else
         fail "mask failure: rc=$rc out: $out"
@@ -1269,7 +1270,7 @@ test_mask_package_hubupdate() {
     rm -f "$LOXPROX_INSTALL_DIR/hub-refresh.sh"
     echo enabled > "$state"; : > "$calls"
     out=$(_loxprox_mask_package_hubupdate 2>&1); rc=$?
-    [[ $rc -eq 0 && "$(cat "$state")" == enabled ]] && ! grep -q '^mask' "$calls" && grep -q 'not installed' <<<"$out" \
+    [[ $rc -eq 0 && "$(cat "$state")" == enabled ]] && ! grep -qE '^(stop|mask|reset-failed)' "$calls" && grep -q 'not installed' <<<"$out" \
         && pass "hub-refresh.sh not installed → the package timer is left running (the rules keep a refresh path)" \
         || fail "without hub-refresh.sh: rc=$rc state=$(cat "$state") calls=$(cat "$calls")"
 

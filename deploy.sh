@@ -4659,6 +4659,9 @@ EOF
 # systemd) is not an error. The package's postinst runs
 # `systemctl enable --now` on the timer with `|| true`, which a mask refuses;
 # every deploy re-applies the mask and test-gateway.sh checks it.
+# The timer is stopped BEFORE it is masked: `mask --now` masks and reloads
+# first, so a running timer loses its unit ("Unit to trigger vanished") and
+# ends in the failed state (systemd 252), which a 0-failed-units check flags.
 _loxprox_mask_package_hubupdate() {
     local unit="$CROWDSEC_HUBUPDATE_TIMER" state
     if [[ ! -x "$LOXPROX_INSTALL_DIR/hub-refresh.sh" ]]; then
@@ -4673,14 +4676,16 @@ _loxprox_mask_package_hubupdate() {
             info "$unit not present — nothing to mask."
             return 0 ;;
     esac
-    # Idempotent: masking a masked unit changes nothing; --now also stops a
-    # timer that is still scheduled.
-    if systemctl mask --now "$unit" >>"$LOG_FILE" 2>&1 \
+    # Idempotent: stopping a stopped and masking a masked unit change nothing.
+    # reset-failed clears any failed state a stop or an earlier mask left.
+    systemctl stop "$unit" >>"$LOG_FILE" 2>&1 || true
+    if systemctl mask "$unit" >>"$LOG_FILE" 2>&1 \
             && [[ "$(systemctl is-enabled "$unit" 2>/dev/null)" == "masked" ]]; then
+        systemctl reset-failed "$unit" 2>/dev/null || true
         info "$unit masked (was: $state) — hub-refresh.sh is the only unattended hub update."
     else
         warn "Could not mask $unit — CrowdSec's package keeps upgrading EVERY hub item nightly, without snapshot or rollback."
-        warn "  Mask it by hand: sudo systemctl mask --now $unit"
+        warn "  Mask it by hand: sudo systemctl stop $unit && sudo systemctl mask $unit"
     fi
     return 0
 }

@@ -190,7 +190,9 @@ def test_package_hubupdate_timer_masked_only_once_hub_refresh_is_scheduled():
     i_mask = body.index("\n    _loxprox_mask_package_hubupdate\n")
     assert i_install < i_cron < i_lint < i_mask
     fn = text.split("\n_loxprox_mask_package_hubupdate() {", 1)[1].split("\n}\n", 1)[0]
-    assert 'systemctl mask --now "$unit"' in fn
+    assert fn.index('systemctl stop "$unit"') < fn.index('systemctl mask "$unit"') < fn.index('systemctl reset-failed "$unit"'), \
+        "stop must come before mask (mask --now leaves a running timer failed)"
+    assert 'systemctl mask --now "$unit"' not in fn
     assert 'hub-refresh.sh" ]]' in fn, "must check that hub-refresh.sh is installed first"
     assert "return 1" not in fn, "an absent or unmaskable unit must not fail the deploy step"
     assert 'CROWDSEC_HUBUPDATE_TIMER="${CROWDSEC_HUBUPDATE_TIMER:-crowdsec-hubupdate.timer}"' in text

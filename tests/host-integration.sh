@@ -1274,6 +1274,13 @@ t_crowdsec_hubupdate() {
     out=$(systemctl is-enabled "$unit" 2>/dev/null)
     [[ "$out" == enabled ]] && pass "the package enabled $unit (the blanket nightly upgrade)" || note "$unit was '$out' before the mask step"
 
+    # The first mask must hit an ACTIVE timer: that is where `mask --now`
+    # left the unit failed ("Unit to trigger vanished").
+    systemctl start "$unit" >>"$LOG_FILE" 2>&1 || true
+    systemctl is-active --quiet "$unit" \
+        && pass "$unit is active before the first mask (the case that used to fail)" \
+        || fail "$unit is not active before the first mask — the failed-state check below would be vacuous"
+
     inst=$(mktemp -d /var/tmp/loxprox-hubupdate.XXXXXX)
     install -m 0755 "$REPO/security-monitoring/hub-refresh.sh" "$inst/hub-refresh.sh"
     if (LOXPROX_INSTALL_DIR="$inst"; _loxprox_mask_package_hubupdate) >>"$LOG_FILE" 2>&1; then
@@ -1286,9 +1293,15 @@ t_crowdsec_hubupdate() {
     [[ "$(readlink "/etc/systemd/system/$unit")" == /dev/null ]] \
         && pass "persistent mask: /etc/systemd/system/$unit → /dev/null" || fail "no persistent mask link: $(ls -l "/etc/systemd/system/$unit" 2>&1)"
     systemctl is-active --quiet "$unit" && fail "$unit is still active (scheduled)" || pass "$unit stopped — no longer scheduled"
+    if systemctl is-failed --quiet "$unit" || systemctl --failed --no-legend --plain 2>/dev/null | grep -q "^$unit"; then
+        fail "$unit is in failed state after the first mask of an active timer: $(systemctl is-failed "$unit" 2>&1)"
+    else
+        pass "$unit not failed after first mask of an active timer"
+    fi
     if (LOXPROX_INSTALL_DIR="$inst"; _loxprox_mask_package_hubupdate) >>"$LOG_FILE" 2>&1 \
             && [[ "$(systemctl is-enabled "$unit" 2>/dev/null)" == masked ]]; then
         pass "a second deploy run: still masked, returns 0"
+        systemctl is-failed --quiet "$unit" && fail "$unit failed after the second run" || pass "$unit not failed after the second run"
     else
         fail "second run: $(systemctl is-enabled "$unit" 2>&1)"
     fi
