@@ -182,8 +182,21 @@ first.
   protection above was bypassed. `deploy.sh` masks the timer
   (`systemctl stop`, then `mask`) once `hub-refresh.sh` and its cron line are in
   place; `test-gateway.sh` checks that it stays masked.
+- **CrowdSec log-reading watchdog** in `gateway-monitor.sh` (60s cycle).
+  It restarts crowdsec when CrowdSec logs that a log reader died, or when a
+  watched log (access, trap, unknown-path) grows three times while CrowdSec
+  reads none of it. It restarts at most once an hour and only on that
+  evidence, because AppSec answers 500 for the seconds of a restart. Discord:
+  *CrowdSec Log Reading Stopped — Restarted* (WARNING, names the log and
+  the time), *CrowdSec Log Reading Still Stopped* (HIGH, again within the
+  hour, no restart) and *CrowdSec Down After a Log-Reading Restart*
+  (CRITICAL). While `hub-refresh.sh` holds its lock, the restart waits for
+  the next cycle.
 - **`test-gateway.sh`** gets an *Edge filtering, bans & host config*
   section; the new checks and scripts have CI tests.
+- **`test-gateway.sh` CrowdSec acquisition checks:** every log is acquired
+  once, `loxprox-trap-hosts.log` is not acquired, sshd is acquired once, and
+  CrowdSec has logged no "file reader died" since it started.
 - **New configuration keys** (all optional, documented in
   `deploy.conf.example` and `CONFIGURATION-GUIDE.md`): `EXTRA_SERVER_NAMES`,
   `UNKNOWN_PATH_MODE`, `REMOTE_ADMIN_PATHS`, `BAN_HARD_LADDER`,
@@ -211,6 +224,32 @@ first.
   failed state: the deploy stops the timer before masking it (`mask --now`
   made a running timer fail on systemd 252), and `test-gateway.sh` flags a
   failed timer.
+- **CrowdSec stopped reading the nginx logs at the nightly logrotate.**
+  Log-based detection (trap, unknown-path, auth, the http and CVE
+  scenarios) then stayed blind until CrowdSec restarted, which on the
+  production gateway happened only every few days. This went back to at
+  least 2026-06-15. AppSec and the community blocklist were not affected.
+  The cause: the CrowdSec package's `cscli setup` had written
+  `/etc/crowdsec/acquis.d/setup.nginx.yaml` (`/var/log/nginx/*.log`) next to
+  the deploy's own files, so every LoxProx log was read twice. CrowdSec
+  1.8.1's tail library keys its inotify watch by file name, and when
+  logrotate renamed a file, its two readers closed that watch for each
+  other: one stopped silently, and the other sometimes logged `file reader
+  died : … inotify watcher has been closed`. Every log is now acquired
+  once. The deploy disables `setup.nginx.yaml` (it keeps it as
+  `setup.nginx.yaml.loxprox-disabled` plus a copy in the deploy backup), and
+  `nginx.yaml` now also lists nginx's own `access.log` and `error.log`,
+  which the ACME server on `:80` writes. `loxprox-trap-hosts.log` is no
+  longer read; the glob read it although the documentation said otherwise.
+  A new CI step reproduces the defect with the real CrowdSec and logrotate:
+  in production's layout, readers were lost after most rotations. With the
+  deploy's layout, every log kept being read through every rotation.
+- **SSH acquisition reads sshd's journal.** `ssh.yaml` read
+  `/var/log/auth.log`, which Debian 12 does not have without rsyslog, so
+  SSH events reached CrowdSec only through `cscli setup`'s
+  `setup.sshd.yaml`. `ssh.yaml` now reads the journal unit `ssh.service`,
+  and the deploy disables `setup.sshd.yaml` the same way. sshd is read
+  once, with or without rsyslog.
 
 ### Upgrade notes — from v2.3.0
 
@@ -245,8 +284,18 @@ Upgrade in place with `sudo bash deploy.sh` over SSH.
 - **Bans already issued** keep their length until `progressive-ban.py`
   (every 15 minutes) finds a longer target for that address; it only ever
   lengthens a ban.
-- If your own `/etc/crowdsec/acquis.yaml` reads all of `/var/log/nginx/*`,
-  the deploy warns that the new logs are read twice; narrow that entry.
+- **CrowdSec acquisition.** The deploy disables the CrowdSec package's
+  `setup.nginx.yaml` and `setup.sshd.yaml` in `/etc/crowdsec/acquis.d/`
+  (renamed to `*.loxprox-disabled`, with a copy in the deploy backup). It
+  warns about any other file there, or in `acquis.yaml`, that still reads
+  `/var/log/nginx/`; remove or narrow such an entry, because a log read
+  twice stops being read at the next logrotate. Afterwards
+  `sudo bash test-gateway.sh` must report "CrowdSec reads every log once"
+  and "sshd acquired once".
+- **The monitor may now restart crowdsec on its own**, at most once an
+  hour, when CrowdSec has stopped reading a log. You get a Discord WARNING
+  each time it does. AppSec answers 500 for the few seconds of that
+  restart.
 
 ## [2.3.0] — 2026-10-06
 
