@@ -650,6 +650,170 @@ test_hard_digest() {
     grep -qE '^[[:space:]]+check_hard_ban_digest$' "$MONITOR" && pass "main() runs check_hard_ban_digest" || fail "not in main()"
 }
 
+# ── CrowdSec log reading (2026-10-21) ────────────────────────────────────────
+# check_crowdsec_acquisition against a fake crowdsec (systemctl: state, PID,
+# start time, restart), a fake crowdsec.log, a fake Prometheus endpoint (curl)
+# and a fake flock for the hub-refresh lock.
+
+test_crowdsec_acquisition() {
+    echo ""; echo "━━━ check_crowdsec_acquisition ━━━"
+    local cs="$WORK/cs" logs="$WORK/nginx" line t0=1792600000
+    mkdir -p "$cs" "$logs"
+    cat > "$FAKEBIN/systemctl" <<'EOF'
+#!/bin/bash
+echo "$*" >> "$FAKE_SYSTEMCTL_LOG"
+case "$*" in
+    "is-active --quiet crowdsec")                      [[ "$(cat "$FAKE_CS_STATE")" == active ]] ;;
+    "show crowdsec -p MainPID --value")                cat "$FAKE_CS_PID" ;;
+    "show crowdsec -p ExecMainStartTimestamp --value") cat "$FAKE_CS_START" ;;
+    "restart crowdsec")
+        if [[ "${FAKE_CS_RESTART:-ok}" != ok ]]; then echo inactive > "$FAKE_CS_STATE"; exit 1; fi
+        echo $(( $(cat "$FAKE_CS_PID") + 1 )) > "$FAKE_CS_PID"
+        echo active > "$FAKE_CS_STATE" ;;
+    *) exit 0 ;;
+esac
+EOF
+    cat > "$FAKEBIN/curl" <<'EOF'
+#!/bin/bash
+[[ -f "$FAKE_METRICS" ]] || exit 7
+cat "$FAKE_METRICS"
+EOF
+    cat > "$FAKEBIN/flock" <<'EOF'
+#!/bin/bash
+[[ -z "${FAKE_FLOCK_BUSY:-}" ]]
+EOF
+    chmod +x "$FAKEBIN/systemctl" "$FAKEBIN/curl" "$FAKEBIN/flock"
+    acq_run() {
+        run_fn check_crowdsec_acquisition LOXPROX_CROWDSEC_LOG="$cs/crowdsec.log" FAKE_METRICS="$cs/metrics" \
+            LOXPROX_ACQ_WATCH_LOGS="$logs/loxone-access.log $logs/loxprox-trap.log" ACQ_RESTART_WAIT=1 \
+            LOXPROX_HUB_LOCK="$cs/hub.lock" FAKE_SYSTEMCTL_LOG="$cs/systemctl.log" FAKE_CS_STATE="$cs/state" \
+            FAKE_CS_PID="$cs/pid" FAKE_CS_START="$cs/start" "$@"
+    }
+    restarts() { grep -c '^restart crowdsec$' "$cs/systemctl.log" 2>/dev/null || true; }
+    death() {   # death TIME FILE — a reader death as CrowdSec 1.8.1 logs it
+        printf 'time="%s" level=warning msg="file reader died : Failed to detect creation of %s: inotify watcher has been closed" module=acquisition.file tail=%s type=file\n' "$1" "$2" "$2" >> "$cs/crowdsec.log"
+    }
+    metrics() { # metrics ACCESS TRAP — what CrowdSec has read of the two watched logs
+        printf '%s\n' '# TYPE cs_filesource_hits_total counter' \
+            "cs_filesource_hits_total{acquis_type=\"nginx\",datasource_type=\"file\",source=\"$logs/loxone-access.log\"} $1" \
+            "cs_filesource_hits_total{acquis_type=\"nginx\",datasource_type=\"file\",source=\"$logs/loxprox-trap.log\"} $2" \
+            'cs_parser_hits_total{source="x",type="nginx"} 7' > "$cs/metrics"
+    }
+    grow() { printf '198.51.100.7 - - [21/Oct/2026:00:01:00 +0000] "GET / HTTP/1.1" 200 0 "-" "x"\n' >> "$logs/$1"; }
+    # Between phases: a fresh stall baseline, call log and Discord log. The
+    # crowdsec.log position and the last restart stay, as in production.
+    acq_reset() { rm -f "$STATE"/acq_reads "$STATE"/logged_acq_*; : > "$cs/systemctl.log"; fresh_alerts; }
+
+    echo active > "$cs/state"; echo 100 > "$cs/pid"; echo 'Tue 2026-10-20 10:00:00 UTC' > "$cs/start"
+    : > "$cs/crowdsec.log"; grow loxone-access.log; grow loxprox-trap.log; metrics 10 4
+    rm -f "$STATE"/acq_* "$STATE"/crowdsec_log_pos; acq_reset
+
+    # Reader deaths.
+    death 2026-10-20T09:00:00+00:00 "$logs/loxone-error.log"
+    acq_run FAKE_NOW="$t0"
+    [[ "$(restarts)" == 0 && "$(count_alerts '')" == 0 ]] && pass "a reader death from before crowdsec's start: nothing done" \
+                                                       || fail "acted on an old death: restarts=$(restarts) $(cat "$WORK/discord.log")"
+    death 2026-10-21T00:00:03+00:00 "$logs/loxprox-unknown.log"
+    acq_run FAKE_NOW="$t0"
+    line=$(grep 'Log Reading Stopped — Restarted' "$WORK/discord.log" || true)
+    if [[ "$(restarts)" == 1 && "$line" == WARNING\|* ]] \
+            && grep -qF 'loxprox-unknown.log: reader died at 2026-10-21T00:00:03+00:00 (file reader died : Failed to detect creation of' <<<"$line" \
+            && grep -qF 'it is active again' <<<"$line"; then
+        pass "a reader death after the start → one restart + WARNING naming the log, the time and the reason"
+    else
+        fail "death: restarts=$(restarts) alert: $line"
+    fi
+    grep -qF 'loxone-error.log' <<<"$line" && fail "the old death is in the alert" || pass "…only the death since the start"
+    [[ "$(cat "$STATE/acq_restart_last" 2>/dev/null)" == "$t0" ]] && pass "restart time recorded" || fail "acq_restart_last: $(cat "$STATE/acq_restart_last" 2>&1)"
+    acq_run FAKE_NOW="$((t0 + 60))"
+    [[ "$(restarts)" == 1 ]] && pass "the same death is acted on once" || fail "restarted again for the same death"
+
+    # A stalled reader: the log grows, CrowdSec reads none of it.
+    acq_reset; echo 'Wed 2026-10-21 12:00:00 UTC' > "$cs/start"; metrics 20 5
+    acq_run FAKE_NOW="$((t0 + 120))"                           # baseline
+    grow loxone-access.log; acq_run FAKE_NOW="$((t0 + 180))"   # 1
+    grow loxone-access.log; acq_run FAKE_NOW="$((t0 + 240))"   # 2
+    [[ "$(restarts)" == 0 ]] && pass "two growths with nothing read: not yet" || fail "restarted after two growths"
+    grow loxone-access.log; acq_run FAKE_NOW="$((t0 + 300))"   # 3, inside the hour since the last restart
+    line=$(grep 'Log Reading Still Stopped' "$WORK/discord.log" || true)
+    if [[ "$(restarts)" == 0 && "$line" == HIGH\|* ]] && grep -qF 'loxone-access.log: grew by' <<<"$line" && grep -qF 'in 3 checks' <<<"$line"; then
+        pass "third growth within the hour of the last restart → no restart, one HIGH alert instead"
+    else
+        fail "rate limit: restarts=$(restarts) alert: $(cat "$WORK/discord.log")"
+    fi
+    grow loxone-access.log; acq_run FAKE_NOW="$((t0 + 360))"
+    [[ "$(count_alerts 'Still Stopped')" == 1 ]] && pass "…not repeated every cycle" || fail "HIGH repeated: $(count_alerts 'Still Stopped')"
+    grow loxone-access.log; acq_run FAKE_NOW="$((t0 + 3700))"
+    line=$(grep 'Log Reading Stopped — Restarted' "$WORK/discord.log" || true)
+    if [[ "$(restarts)" == 1 ]] && grep -qF 'loxone-access.log: grew by' <<<"$line" && grep -qF 'in 5 checks, CrowdSec read none of it' <<<"$line"; then
+        pass "after the hour → restart + WARNING naming the stalled log"
+    else
+        fail "stall restart: restarts=$(restarts) alert: $(cat "$WORK/discord.log")"
+    fi
+    grep -qF 'loxprox-trap.log' <<<"$line" && fail "the trap log (no growth) is named" || pass "…only the log that grew"
+
+    # No verdict: reads advancing, a rotation, a restart, no counter, no metrics.
+    acq_reset; metrics 30 6
+    acq_run FAKE_NOW="$((t0 + 7400))"
+    grow loxone-access.log; metrics 31 6; acq_run FAKE_NOW="$((t0 + 7460))"
+    grow loxone-access.log; acq_run FAKE_NOW="$((t0 + 7520))"
+    grow loxone-access.log; acq_run FAKE_NOW="$((t0 + 7580))"
+    mv "$logs/loxone-access.log" "$logs/loxone-access.log.1"; grow loxone-access.log; acq_run FAKE_NOW="$((t0 + 7640))"
+    grow loxone-access.log; acq_run FAKE_NOW="$((t0 + 7700))"
+    echo 555 > "$cs/pid"; grow loxone-access.log; acq_run FAKE_NOW="$((t0 + 7760))"
+    grow loxone-access.log; acq_run FAKE_NOW="$((t0 + 7820))"
+    [[ "$(restarts)" == 0 && "$(count_alerts '')" == 0 ]] \
+        && pass "reads advancing, a rotation (new inode) and a crowdsec restart (new PID) each reset the count" \
+        || fail "false stall: restarts=$(restarts) $(cat "$WORK/discord.log")"
+    acq_reset; metrics 30 6
+    sed -i "/loxone-access.log/d" "$cs/metrics"
+    for t in 1 2 3 4 5; do grow loxone-access.log; acq_run FAKE_NOW="$((t0 + 7900 + t * 60))"; done
+    [[ "$(restarts)" == 0 ]] && pass "a log without a counter (nothing read since the start) gives no verdict" || fail "restarted without a counter"
+    rm -f "$cs/metrics"
+    for t in 1 2 3 4; do grow loxone-access.log; acq_run FAKE_NOW="$((t0 + 8300 + t * 60))"; done
+    [[ "$(restarts)" == 0 ]] && grep -q 'metrics unreadable' "$WORK/monitor.log" \
+        && pass "metrics endpoint down → no verdict, logged" || fail "metrics down: restarts=$(restarts)"
+    [[ "$(grep -c 'metrics unreadable' "$WORK/monitor.log")" == 1 ]] && pass "…logged once, not every cycle" || fail "logged $(grep -c 'metrics unreadable' "$WORK/monitor.log") times"
+    metrics 30 6
+
+    # The hub refresh holds its lock: deferred, the evidence kept.
+    acq_reset; acq_run FAKE_NOW="$((t0 + 9000))"
+    death 2026-10-22T00:00:01+00:00 "$logs/loxprox-trap.log"
+    touch "$cs/hub.lock"
+    acq_run FAKE_NOW="$((t0 + 9060))" FAKE_FLOCK_BUSY=1
+    [[ "$(restarts)" == 0 && "$(count_alerts '')" == 0 ]] && pass "hub refresh running → restart deferred" || fail "restarted under the hub-refresh lock"
+    acq_run FAKE_NOW="$((t0 + 9120))"
+    if [[ "$(restarts)" == 1 ]] && grep -qF 'loxprox-trap.log: reader died at 2026-10-22T00:00:01+00:00' "$WORK/discord.log"; then
+        pass "…and done on the next cycle, with the death kept from the deferred one"
+    else
+        fail "deferred death lost: restarts=$(restarts) $(cat "$WORK/discord.log")"
+    fi
+    rm -f "$cs/hub.lock"
+
+    # Restart fails → CRITICAL.
+    acq_reset; acq_run FAKE_NOW="$((t0 + 20000))"
+    death 2026-10-23T00:00:01+00:00 "$logs/loxone-access.log"
+    acq_run FAKE_NOW="$((t0 + 20060))" FAKE_CS_RESTART=fail
+    line=$(grep 'CrowdSec Down After a Log-Reading Restart' "$WORK/discord.log" || true)
+    [[ "$line" == CRITICAL\|* ]] && grep -qF 'AppSec fails closed' <<<"$line" \
+        && pass "crowdsec not active after the restart → CRITICAL (AppSec fails closed)" || fail "failed restart: $(cat "$WORK/discord.log")"
+
+    # crowdsec not running (check_gateway_health alerts on that): untouched.
+    acq_reset; death 2026-10-24T00:00:01+00:00 "$logs/loxone-access.log"
+    acq_run FAKE_NOW="$((t0 + 30000))"
+    [[ "$(restarts)" == 0 && "$(count_alerts '')" == 0 ]] && pass "crowdsec inactive → nothing done here" || fail "acted while crowdsec was inactive"
+    echo active > "$cs/state"
+
+    # Start time unreadable: deaths cannot be placed → never acted on.
+    acq_reset; : > "$cs/start"; acq_run FAKE_NOW="$((t0 + 40000))"
+    death 2026-10-25T00:00:01+00:00 "$logs/loxone-access.log"
+    acq_run FAKE_NOW="$((t0 + 40060))"
+    [[ "$(restarts)" == 0 ]] && pass "crowdsec's start time unreadable → a death is not acted on (cannot tell if it is old)" || fail "acted without a start time"
+
+    grep -qE '^[[:space:]]+check_crowdsec_acquisition$' "$MONITOR" && pass "main() runs check_crowdsec_acquisition" || fail "not in main()"
+    rm -f "$FAKEBIN/systemctl" "$FAKEBIN/curl" "$FAKEBIN/flock"
+}
+
 echo "═══════════════════════════════════════════════════════════════════════════════"
 echo "  LoxProx — gateway-monitor breach-hardening checks"
 echo "═══════════════════════════════════════════════════════════════════════════════"
@@ -659,6 +823,7 @@ test_asn_session
 test_firewall_integrity
 test_security_updates
 test_auth_rate
+test_crowdsec_acquisition
 
 echo ""
 echo "═══════════════════════════════════════════════════════════════════════════════"

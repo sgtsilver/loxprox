@@ -119,6 +119,87 @@ _nginx_lines_read() {
     return 0
 }
 
+# 2026-10-21: what CrowdSec's acquisition reads, from the files it loads
+# (acquis.yaml, acquis.d/*.yaml and *.yml): one "<source><TAB><acquisition
+# file>" line per file a filename pattern matches now (CrowdSec globs once, at
+# start; a pattern matching nothing reads nothing) and per journal filter
+# ("journalctl:<filter>"). exclude_regexps is not applied.
+#   _cs_acquired_paths [CROWDSEC_DIR]
+_cs_acquired_paths() {
+    local dir="${1:-/etc/crowdsec}" f p m
+    local -a files=()
+    [[ -f "$dir/acquis.yaml" ]] && files+=("$dir/acquis.yaml")
+    for f in "$dir"/acquis.d/*.yaml "$dir"/acquis.d/*.yml; do
+        [[ -f "$f" ]] && files+=("$f")
+    done
+    for f in "${files[@]}"; do
+        while IFS= read -r p; do
+            case "$p" in
+                journalctl:*) printf '%s\t%s\n' "$p" "$f" ;;
+                *) while IFS= read -r m; do
+                       [[ -n "$m" ]] && printf '%s\t%s\n' "$m" "$f"
+                   done < <(compgen -G "$p" 2>/dev/null) ;;
+            esac
+        done < <(awk -v q="'" '
+            function clean(v) {
+                sub(/[ \t]+#.*$/, "", v); gsub(/^[ \t]+|[ \t]+$/, "", v)
+                gsub("^[\"" q "]|[\"" q "]$", "", v); return v
+            }
+            /^[ \t]*#/ { next }
+            /^---/ { inlist = 0; next }
+            inlist && /^[ \t]*-/ { v = $0; sub(/^[ \t]*-[ \t]*/, "", v); v = clean(v); if (v != "") print pre v; next }
+            inlist && /^[ \t]*$/ { next }
+            { inlist = 0 }
+            /^[ \t]*filename:/ { v = $0; sub(/^[ \t]*filename:[ \t]*/, "", v); v = clean(v); if (v != "") print v; next }
+            /^[ \t]*(filenames|journalctl_filter):/ {
+                pre = ($0 ~ /^[ \t]*journalctl_filter:/) ? "journalctl:" : ""
+                v = $0; sub(/^[ \t]*[a-z_]+:[ \t]*/, "", v); v = clean(v)
+                if (v ~ /^\[/) {
+                    gsub(/^\[|\]$/, "", v); n = split(v, a, ",")
+                    for (i = 1; i <= n; i++) { w = clean(a[i]); if (w != "") print pre w }
+                } else if (v == "") inlist = 1
+                next
+            }' "$f")
+    done
+}
+
+# What is wrong with that, one line each (nothing = fine):
+#   dup <file> <n> <acquisition files…>   a log read n times — CrowdSec stops
+#                                         reading it at the next logrotate
+#   traphosts <acquisition files…>        loxprox-trap-hosts.log is read
+#   ssh <n> <acquisition files…>          sshd read n times (0 = not at all)
+#   _cs_acquisition_problems [CROWDSEC_DIR] [NGINX_LOG_DIR] [AUTH_LOG]
+_cs_acquisition_problems() {
+    local dir="${1:-/etc/crowdsec}" nginx="${2:-/var/log/nginx}" auth="${3:-/var/log/auth.log}"
+    _cs_acquired_paths "$dir" | awk -F'\t' -v traphosts="$nginx/loxprox-trap-hosts.log" -v auth="$auth" '
+        index($1, "/") == 1 { n[$1]++; src[$1] = src[$1] " " $2 }
+        $1 == "journalctl:_SYSTEMD_UNIT=ssh.service" || $1 == auth { ssh++; sshsrc = sshsrc " " $2 }
+        END {
+            for (f in n) if (n[f] > 1) printf "dup %s %d%s\n", f, n[f], src[f]
+            if (traphosts in n) printf "traphosts%s\n", src[traphosts]
+            if (ssh != 1) printf "ssh %d%s\n", ssh, sshsrc
+        }' | LC_ALL=C sort
+}
+
+# CrowdSec's "file reader died" lines since crowdsec's current start, one
+# "<time> <file>" each; status 2 when that cannot be told (no crowdsec.log, no
+# start time).
+#   _cs_reader_deaths_since_start [CROWDSEC_LOG]
+_cs_reader_deaths_since_start() {
+    local log="${1:-/var/log/crowdsec.log}" ts start line t e
+    [[ -r "$log" ]] || return 2
+    ts=$(systemctl show crowdsec -p ExecMainStartTimestamp --value 2>/dev/null) || return 2
+    start=$(date -d "$ts" +%s 2>/dev/null) || return 2
+    while IFS= read -r line; do
+        t=$(sed -nE 's/^time="([^"]+)".*/\1/p' <<<"$line")
+        e=$(date -d "$t" +%s 2>/dev/null) || continue
+        if (( e >= start )); then
+            printf '%s %s\n' "$t" "$(sed -nE 's/.* tail=([^ ]+).*/\1/p' <<<"$line")"
+        fi
+    done < <(grep -F 'file reader died' "$log" 2>/dev/null)
+    return 0
+}
+
 # ── Service Tests ────────────────────────────────────────────────────────────
 
 test_services() {
@@ -348,6 +429,43 @@ test_crowdsec() {
         pass "Nginx logs parsed ($nginx_lines lines)"
     else
         warn "No nginx log lines parsed yet (may need traffic)"
+    fi
+
+    # 2026-10-21: one acquisition per log. A log CrowdSec reads twice is
+    # counted twice, and at the next logrotate its two tailers close each
+    # other's inotify watch: CrowdSec stops reading it until it restarts.
+    local problems nlogs line f n deaths rc
+    problems=$(_cs_acquisition_problems)
+    nlogs=$(_cs_acquired_paths | awk -F'\t' 'index($1, "/var/log/nginx/") == 1 {print $1}' | sort -u | grep -c .)
+    if grep -q '^dup ' <<<"$problems"; then
+        while read -r _ f n line; do
+            fail "CrowdSec reads $f $n times (from: $line) — it stops reading it at the next logrotate. Re-run deploy.sh, or remove the extra entry"
+        done < <(grep '^dup ' <<<"$problems")
+    else
+        pass "CrowdSec reads every log once ($nlogs nginx logs)"
+    fi
+    line=$(grep '^traphosts' <<<"$problems")
+    if [[ -n "$line" ]]; then
+        fail "CrowdSec reads loxprox-trap-hosts.log (from:${line#traphosts}) — it must not: the trap's own requests in another format"
+    else
+        pass "loxprox-trap-hosts.log not acquired by CrowdSec"
+    fi
+    line=$(grep '^ssh ' <<<"$problems")
+    if [[ -z "$line" ]]; then
+        pass "sshd acquired once"
+    elif [[ "$line" == "ssh 0" ]]; then
+        fail "sshd not acquired — SSH brute force goes undetected (re-run deploy.sh)"
+    else
+        read -r _ n line <<<"$line"
+        fail "sshd acquired $n times (from: $line) — every sshd line counts $n times"
+    fi
+    deaths=$(_cs_reader_deaths_since_start); rc=$?
+    if (( rc == 2 )); then
+        warn "crowdsec.log or crowdsec's start time unreadable — reader deaths not checked"
+    elif [[ -n "$deaths" ]]; then
+        fail "CrowdSec stopped reading a log since it started: $(grep -c . <<<"$deaths") × 'file reader died', last: $(tail -n 1 <<<"$deaths"). It reads that log again only after a restart (sudo systemctl restart crowdsec)"
+    else
+        pass "no 'file reader died' since crowdsec started"
     fi
 
     # Test decision → bouncer → nftables pipeline

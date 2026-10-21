@@ -71,6 +71,16 @@ HARD_BANS_PENDING="$STATE_DIR/hard-bans-pending"   # "epoch|hard|scenario" lines
 HARD_DIGEST_STAMP="$STATE_DIR/hard_digest_day"
 TRAP_HOSTS_LOG="${LOXPROX_TRAP_HOSTS_LOG:-/var/log/nginx/loxprox-trap-hosts.log}"
 
+# 2026-10-21: CrowdSec log-reading watchdog (check_crowdsec_acquisition).
+CROWDSEC_LOG="${LOXPROX_CROWDSEC_LOG:-/var/log/crowdsec.log}"
+CROWDSEC_METRICS_URL="${LOXPROX_CROWDSEC_METRICS_URL:-http://127.0.0.1:6060/metrics}"
+# The logs with steady traffic; a stalled reader shows on them first.
+ACQ_WATCH_LOGS="${LOXPROX_ACQ_WATCH_LOGS:-/var/log/nginx/loxone-access.log /var/log/nginx/loxprox-trap.log /var/log/nginx/loxprox-unknown.log}"
+ACQ_STALL_CYCLES="${ACQ_STALL_CYCLES:-3}"           # growths seen with nothing read before it counts
+ACQ_RESTART_INTERVAL="${ACQ_RESTART_INTERVAL:-3600}" # at most one restart per hour
+ACQ_RESTART_WAIT="${ACQ_RESTART_WAIT:-30}"           # seconds to wait for crowdsec to be active again
+HUB_REFRESH_LOCK="${LOXPROX_HUB_LOCK:-/run/loxprox-hub-refresh.lock}"
+
 mkdir -p "$STATE_DIR"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"; }
@@ -755,12 +765,176 @@ check_auth_rate() {
     return 0
 }
 
+# ── CrowdSec log reading (2026-10-21) ────────────────────────────────────────
+# CrowdSec's file acquisition can stop for good at a logrotate: with a log
+# acquired twice, the two tailers of the file close each other's inotify watch
+# — one stops without a word, the other logs "file reader died" — and a file
+# listed by name is not picked up again until CrowdSec restarts. Log-based
+# detection (trap, unknown-path, auth-bf, the http and CVE scenarios) is then
+# blind while AppSec and the community blocklist keep working, so nothing else
+# notices. deploy.sh acquires every log once since 2026-10-21; this is the
+# safety net. It acts on positive evidence only — AppSec fails closed, so every
+# request gets a 500 for the seconds of a restart:
+#   1. a "file reader died" line CrowdSec wrote after its current start;
+#   2. a watched log that grew ACQ_STALL_CYCLES times while CrowdSec read none
+#      of it (cs_filesource_hits_total). A log without a counter yet, a cycle
+#      with a rotation (new inode) or a CrowdSec restart gives no verdict.
+# Then crowdsec is restarted, at most once per ACQ_RESTART_INTERVAL, with a
+# Discord WARNING naming what stopped and when (CRITICAL if it does not come
+# back). Evidence that cannot be acted on yet (the hour is not over, or the
+# hub refresh holds its lock) is kept for the next cycle.
+
+# Epoch of crowdsec's current start, or nothing.
+_crowdsec_start_epoch() {
+    local ts
+    ts=$(systemctl show crowdsec -p ExecMainStartTimestamp --value 2>/dev/null) || ts=""
+    if [ -z "$ts" ] || [ "$ts" = "n/a" ]; then return 0; fi
+    date -d "$ts" +%s 2>/dev/null || true
+}
+
+# ACQ_DEATHS ← "epoch|time|file|message" per reader death CrowdSec logged after
+# its start ($1): the lines crowdsec.log gained since the last cycle (the whole
+# file on the first cycle, or after it was replaced), plus deaths kept from
+# earlier cycles that were not acted on.
+_acq_reader_deaths() {
+    local start="$1" pos_file="$STATE_DIR/crowdsec_log_pos" pending="$STATE_DIR/acq_deaths_pending"
+    local inode="" size=0 last_inode="" last_pos=0 from=0 line all="" e t f m
+    ACQ_DEATHS=""
+    if [ -z "$start" ]; then
+        log_once acq_start "crowdsec's start time is unreadable (systemctl show) — reader-death check skipped"
+        return 0
+    fi
+    rm -f "$STATE_DIR/logged_acq_start"
+    if [ -f "$pending" ]; then all=$(cat "$pending" 2>/dev/null || true); fi
+    if [ -f "$CROWDSEC_LOG" ] && read -r inode size < <(stat -c '%i %s' "$CROWDSEC_LOG" 2>/dev/null); then
+        if [ -f "$pos_file" ]; then read -r last_inode last_pos < "$pos_file" || true; fi
+        [[ "$last_pos" =~ ^[0-9]+$ ]] || last_pos=0
+        if [ "$inode" = "$last_inode" ] && [ "$size" -ge "$last_pos" ]; then from=$last_pos; fi
+        printf '%s %s\n' "$inode" "$size" > "$pos_file"
+        if [ "$size" -gt "$from" ]; then
+            while IFS= read -r line; do
+                t=$(sed -nE 's/^time="([^"]+)".*/\1/p' <<<"$line")
+                e=$(date -d "$t" +%s 2>/dev/null) || continue
+                f=$(sed -nE 's/.* tail=([^ ]+).*/\1/p' <<<"$line")
+                m=$(sed -nE 's/.*msg="([^"]*)".*/\1/p' <<<"$line")
+                all+=$'\n'"$e|$t|${f:-?}|${m//|//}"
+            done < <(tail -c +$((from + 1)) "$CROWDSEC_LOG" 2>/dev/null | head -c $((size - from)) \
+                     | grep -F 'file reader died' | tail -n 20)
+        fi
+    fi
+    while IFS='|' read -r e t f m; do
+        if [[ "$e" =~ ^[0-9]+$ ]] && [ "$e" -ge "$start" ]; then ACQ_DEATHS+="$e|$t|$f|$m"$'\n'; fi
+    done <<<"$all"
+    ACQ_DEATHS=$(printf '%s' "$ACQ_DEATHS" | sort -u | tail -n 20)
+    if [ -n "$ACQ_DEATHS" ]; then printf '%s\n' "$ACQ_DEATHS" > "$pending"; else rm -f "$pending"; fi
+}
+
+# ACQ_STALLS ← "file|times|bytes" per watched log that grew ACQ_STALL_CYCLES
+# times while CrowdSec read none of it. State: crowdsec's PID, then one
+# "file inode size reads times bytes" line per log.
+_acq_stalled_logs() {
+    local pid="$1" state="$STATE_DIR/acq_reads" metrics f inode size reads streak grown new="" p_pid=""
+    local pf pi ps pr pk pg
+    local -A cur=() prev_i=() prev_s=() prev_r=() prev_k=() prev_g=()
+    ACQ_STALLS=""
+    metrics=$(curl -s --max-time 5 "$CROWDSEC_METRICS_URL" 2>/dev/null) || metrics=""
+    if ! grep -q '^cs_' <<<"$metrics"; then
+        log_once acq_metrics "CrowdSec metrics unreadable at $CROWDSEC_METRICS_URL — log-reading stall check skipped"
+        return 0
+    fi
+    rm -f "$STATE_DIR/logged_acq_metrics"
+    while read -r f reads; do
+        if [ -n "$f" ]; then cur[$f]=$reads; fi
+    done < <(awk '/^cs_filesource_hits_total\{/ && match($0, /source="[^"]*"/) { n[substr($0, RSTART + 8, RLENGTH - 9)] += $NF }
+                  END { for (s in n) printf "%s %.0f\n", s, n[s] }' <<<"$metrics")
+    if [ -f "$state" ]; then
+        { read -r p_pid || true
+          while read -r pf pi ps pr pk pg; do
+              [ -n "$pf" ] || continue
+              prev_i[$pf]=$pi prev_s[$pf]=$ps prev_r[$pf]=$pr prev_k[$pf]=$pk prev_g[$pf]=$pg
+          done; } < "$state"
+    fi
+    for f in $ACQ_WATCH_LOGS; do
+        [ -f "$f" ] || continue
+        read -r inode size < <(stat -c '%i %s' "$f" 2>/dev/null) || continue
+        reads="${cur[$f]:--}"
+        streak=0 grown=0
+        if [ -n "$pid" ] && [ "$pid" = "$p_pid" ] && [ "$inode" = "${prev_i[$f]:-}" ] \
+                && [ "$reads" != "-" ] && [ "${prev_r[$f]:--}" != "-" ] \
+                && [[ "${prev_s[$f]:-}" =~ ^[0-9]+$ && "${prev_k[$f]:-}" =~ ^[0-9]+$ && "${prev_g[$f]:-}" =~ ^[0-9]+$ ]]; then
+            streak=${prev_k[$f]} grown=${prev_g[$f]}
+            if [ "$reads" != "${prev_r[$f]}" ]; then
+                streak=0 grown=0
+            elif [ "$size" -gt "${prev_s[$f]}" ]; then
+                streak=$((streak + 1)) grown=$((grown + size - ${prev_s[$f]}))
+            fi
+        fi
+        new+="$f $inode $size $reads $streak $grown"$'\n'
+        if [ "$streak" -ge "$ACQ_STALL_CYCLES" ]; then ACQ_STALLS+="$f|$streak|$grown"$'\n'; fi
+    done
+    printf '%s\n%s' "$pid" "$new" > "$state.tmp" && mv -f "$state.tmp" "$state"
+}
+
+check_crowdsec_acquisition() {
+    systemctl is-active --quiet crowdsec || return 0   # check_gateway_health alerts on that
+    local pid start now last=0 what="" e t f m n g rc=0 i active=0 at
+    pid=$(systemctl show crowdsec -p MainPID --value 2>/dev/null) || pid=""
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || pid=""
+    start=$(_crowdsec_start_epoch)
+    now=$(date +%s)
+    _acq_reader_deaths "$start"
+    _acq_stalled_logs "$pid"
+    [ -n "$ACQ_DEATHS$ACQ_STALLS" ] || return 0
+
+    while IFS='|' read -r e t f m; do
+        [ -n "$e" ] || continue
+        what+="- ${f##*/}: reader died at ${t} (${m})\n"
+    done <<<"$ACQ_DEATHS"
+    while IFS='|' read -r f n g; do
+        [ -n "$f" ] || continue
+        what+="- ${f##*/}: grew by ${g} bytes in ${n} checks, CrowdSec read none of it\n"
+    done <<<"$ACQ_STALLS"
+
+    if [ -f "$STATE_DIR/acq_restart_last" ]; then last=$(cat "$STATE_DIR/acq_restart_last" 2>/dev/null || echo 0); fi
+    [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    if [ $((now - last)) -lt "$ACQ_RESTART_INTERVAL" ]; then
+        send_alert "HIGH" "CrowdSec Log Reading Still Stopped" \
+            "CrowdSec stopped reading these logs again, $(( (now - last) / 60 )) min after the monitor restarted it for that:\n${what}At most one restart per hour, so not now: log-based detection stays blind until the next one.\nCheck: sudo cscli metrics show acquisition; sudo grep 'file reader died' ${CROWDSEC_LOG}" \
+            "acq_restart_skipped" "$ACQ_RESTART_INTERVAL"
+        return 0
+    fi
+    if command -v flock >/dev/null 2>&1 && [ -e "$HUB_REFRESH_LOCK" ] && ! flock -n "$HUB_REFRESH_LOCK" true 2>/dev/null; then
+        log "CrowdSec log reading stopped, but the hub refresh holds its lock — restart deferred to the next cycle"
+        return 0
+    fi
+
+    echo "$now" > "$STATE_DIR/acq_restart_last"
+    log "CrowdSec log reading stopped — restarting crowdsec: ${what}"
+    systemctl restart crowdsec >/dev/null 2>&1 || rc=$?
+    for (( i = 0; i < ACQ_RESTART_WAIT; i++ )); do
+        if systemctl is-active --quiet crowdsec; then active=1; break; fi
+        sleep 1
+    done
+    rm -f "$STATE_DIR/acq_deaths_pending" "$STATE_DIR/acq_reads"
+    at=$(date '+%Y-%m-%d %H:%M:%S')
+    if (( active )); then
+        send_alert "WARNING" "CrowdSec Log Reading Stopped — Restarted" \
+            "CrowdSec had stopped reading these logs, so log-based detection (trap, unknown-path, auth, http and CVE scenarios) was blind; AppSec and the community blocklist kept working:\n${what}Restarted crowdsec at ${at}; it is active again. AppSec answers 500 for the seconds of a restart. At most one such restart per hour.\nUsual cause: a log acquired twice (test-gateway.sh checks it). Lines read per log: sudo cscli metrics show acquisition" \
+            "acq_restarted" 60
+    else
+        send_alert "CRITICAL" "CrowdSec Down After a Log-Reading Restart" \
+            "CrowdSec had stopped reading these logs:\n${what}The monitor restarted it at ${at} (systemctl exit ${rc}) and it is not active after ${ACQ_RESTART_WAIT}s. AppSec fails closed: nginx answers 500 to every request and the Loxone apps cannot connect.\nRecover:\n  sudo journalctl -u crowdsec -n 80 --no-pager\n  sudo systemctl restart crowdsec" \
+            "acq_restart_failed" 60
+    fi
+}
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 main() {
     log "Security monitor cycle started"
     
     check_gateway_health
+    check_crowdsec_acquisition
     check_crowdsec_blocks
     check_hard_ban_digest
     check_nginx_errors

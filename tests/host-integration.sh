@@ -1164,7 +1164,6 @@ t_crowdsec() {
     mkdir -p /var/log/nginx
     local f out dir dec
     for f in loxone-access loxone-error loxprox-trap loxprox-unknown; do touch "/var/log/nginx/$f.log"; done
-    touch /var/log/auth.log   # deploy.sh's SSH acquisition; journald-only runners have none
     if cs_configure ban; then
         pass "configure_crowdsec returns 0 against the real CrowdSec ($(cscli version 2>&1 | awk '/version:/ {print $2; exit}'))"
     else
@@ -1618,6 +1617,14 @@ rt_show_deaths() {
     sed -E 's/^time="([^"]+)".*msg="([^"]+)".* tail=([^ ]+).*/\1 \2 [\3]/' <<<"$RT_DEATHS" | head -n "${1:-8}" | sed 's/^/      /'
 }
 
+# test-gateway.sh's reading of the acquisition files (what it checks on a
+# gateway) next to CrowdSec's own tailers: same " file:n" form as RT_TAILS.
+rt_static_tails() {
+    (source "$REPO/test-gateway.sh"; _cs_acquired_paths "$CROWDSEC_DIR") 2>/dev/null \
+        | awk -F'\t' -v d="$RT_NGINX/" 'index($1, d) == 1 {n[$1]++} END {for (f in n) print f, n[f]}' | LC_ALL=C sort \
+        | while read -r f n; do printf ' %s:%s' "${f##*/}" "$n"; done
+}
+
 # The gates for an arm whose acquisition must be deploy.sh's (B, B2).
 rt_gates() {
     local name="$1" cycles="$2" want=" access.log:1 error.log:1 loxone-access.log:1 loxone-error.log:1 loxprox-trap.log:1 loxprox-unknown.log:1"
@@ -1662,6 +1669,7 @@ t_crowdsec_rotation() {
     # deploy.sh's logrotate config, and Debian 12's stock nginx stanza as
     # deploy.sh narrows it (its postrotate is `invoke-rc.d nginx rotate`, the
     # same USR1 as below).
+    # shellcheck disable=SC2034  # consumed by deploy.sh's setup_logrotate
     ( LOGROTATE_CONF="$RT_W/loxone-nginx" LOXPROX_LOGROTATE_CONF="$RT_W/loxprox-logs" NGINX_STOCK_LOGROTATE="$RT_W/absent"
       setup_logrotate ) >>"$LOG_FILE" 2>&1
     if ! grep -qF "$RT_NGINX/loxprox-trap.log" "$RT_W/loxone-nginx" 2>/dev/null; then
@@ -1764,6 +1772,9 @@ EOF
             note "A: NOT reproduced in $cycles rotations — every tailer kept reading on this runner"
         fi
     fi
+    out=$(rt_static_tails)
+    [[ "$out" == "$RT_TAILS" ]] && pass "test-gateway.sh reads production's acquisition as CrowdSec tails it:$out" \
+                                || fail "test-gateway.sh reads:$out — CrowdSec tailed:$RT_TAILS"
 
     # ── B: deploy.sh's configure_crowdsec on that host ──
     if cs_configure ban; then
@@ -1788,6 +1799,12 @@ EOF
 
     cycles="${RT_CYCLES_B:-10}"
     rt_arm B "$cycles" 1 6 && rt_gates B "$cycles"
+    out=$(rt_static_tails)
+    [[ "$out" == "$RT_TAILS" ]] && pass "test-gateway.sh reads deploy.sh's acquisition as CrowdSec tails it:$out" \
+                                || fail "test-gateway.sh reads:$out — CrowdSec tailed:$RT_TAILS"
+    out=$( (source "$REPO/test-gateway.sh"; _cs_acquisition_problems "$CROWDSEC_DIR" "$RT_NGINX") 2>&1)
+    [[ -z "$out" ]] && pass "test-gateway.sh: no log read twice, trap-hosts not read, sshd read once" \
+                    || fail "test-gateway.sh acquisition problems: $(tr '\n' ';' <<<"$out")"
     cycles="${RT_CYCLES_B2:-20}"
     rt_arm B2 "$cycles" 0 6 && rt_gates B2 "$cycles"
 
