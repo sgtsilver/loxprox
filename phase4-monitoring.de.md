@@ -278,7 +278,7 @@ Punkte, die das Skills-Audit (`audits/2026-05-23-skills-audit.md`) aufgeworfen h
 
 ### Port-Scan-Sichtbarkeit
 
-nftables droppt Scans auf `:22` von außerhalb der `SSH_ALLOWED_SUBNETS` lautlos — keine Log-Zeile, kein CrowdSec-Event, kein Offender-Counter. CrowdSec sieht nur, was nginx und `auth.log` hergeben; ein langsamer TCP-Fan-Scan auf die Gateway-Ports landet damit nie im Access-Log, weil nginx ihn am Listen-Socket gar nicht erst annimmt.
+nftables droppt Scans auf `:22` von außerhalb der `SSH_ALLOWED_SUBNETS` lautlos — keine Log-Zeile, kein CrowdSec-Event, kein Offender-Counter. CrowdSec sieht nur, was nginx und das Journal von sshd hergeben; ein langsamer TCP-Fan-Scan auf die Gateway-Ports landet damit nie im Access-Log, weil nginx ihn am Listen-Socket gar nicht erst annimmt.
 
 Sauber zu fixen ist invasiv: entweder eine nftables-Regel `limit rate over … log prefix "portscan: "`, die in einen Custom-CrowdSec-Parser auf `kern.log` streamt, oder `crowdsecurity/iptables` installieren und füttern. Beides bringt Lärm und einen zusätzlichen Parser. Das Bedrohungsmodell des Gateways behandelt Internet-Scans als bereits mitigiert (`:1080` ist nach außen der einzige Listener, und CrowdSecs HTTP-Scenarios fangen die wirklich interessanten Probes ab). Zurückgestellt, bis es einen konkreten Grund für Scanner-Telemetrie auf der Ebene gibt.
 

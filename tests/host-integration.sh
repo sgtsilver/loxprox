@@ -13,6 +13,7 @@
 #   CI=true bash tests/host-integration.sh logrotate                   # Debian 12 container
 #   sudo CI=true bash tests/host-integration.sh nginx-apparmor         # host with docker
 #   sudo CI=true bash tests/host-integration.sh nginx-appsec           # host with docker
+#   sudo CI=true bash tests/host-integration.sh crowdsec crowdsec-rotation  # host with CrowdSec
 # ═══════════════════════════════════════════════════════════════════════════════
 
 set -uo pipefail
@@ -1142,6 +1143,17 @@ t_debian12_host() {
         bash /workspace/tests/host-integration.sh debian12-host-inner' 2>&1)
 }
 
+# deploy.sh's configure_crowdsec as CI runs it: no AppSec, UNKNOWN_PATH_MODE=log,
+# the LAN 192.168.1.0/24 whitelisted, TRAP_BAN_MODE=$1. The firewall bouncer is
+# not under test (and would program the runner's firewall).
+cs_configure() {
+    # shellcheck disable=SC2034  # consumed by deploy.sh's configure_crowdsec
+    ( ENABLE_APPSEC=false UNKNOWN_PATH_MODE=log TRAP_BAN_MODE="$1"
+      CROWDSEC_WHITELIST_IPS=("192.168.1.0/24")
+      systemctl() { case " $* " in *" crowdsec-firewall-bouncer"*) return 0 ;; esac; command systemctl "$@"; }
+      configure_crowdsec ) >>"$LOG_FILE" 2>&1
+}
+
 # The real CrowdSec (packagecloud, installed by the CI step) driven by
 # deploy.sh's configure_crowdsec: the daemon must start with the managed
 # files, and the scenarios must route by log file. Synthetic events use
@@ -1152,19 +1164,6 @@ t_crowdsec() {
     mkdir -p /var/log/nginx
     local f out dir dec
     for f in loxone-access loxone-error loxprox-trap loxprox-unknown; do touch "/var/log/nginx/$f.log"; done
-    touch /var/log/auth.log   # deploy.sh's SSH acquisition; journald-only runners have none
-    # shellcheck disable=SC2034  # consumed by deploy.sh's configure_crowdsec
-    ENABLE_APPSEC=false UNKNOWN_PATH_MODE=log
-    # shellcheck disable=SC2034
-    CROWDSEC_WHITELIST_IPS=("192.168.1.0/24")
-    # deploy.sh's configure_crowdsec with TRAP_BAN_MODE=$1. The firewall bouncer
-    # is not under test (and would program the runner's firewall).
-    cs_configure() {
-        # shellcheck disable=SC2034  # consumed by deploy.sh's configure_crowdsec
-        ( TRAP_BAN_MODE="$1"
-          systemctl() { case " $* " in *" crowdsec-firewall-bouncer"*) return 0 ;; esac; command systemctl "$@"; }
-          configure_crowdsec ) >>"$LOG_FILE" 2>&1
-    }
     if cs_configure ban; then
         pass "configure_crowdsec returns 0 against the real CrowdSec ($(cscli version 2>&1 | awk '/version:/ {print $2; exit}'))"
     else
@@ -1458,9 +1457,391 @@ EOF
     rm -rf "$w"
 }
 
+# ── CrowdSec file acquisition across logrotate (2026-10-21) ──────────────────
+# Production lost its log-based detection at the nightly logrotate: crowdsec.log
+# showed "file reader died : Failed to detect creation of /var/log/nginx/<log>:
+# inotify watcher has been closed", and CrowdSec's read counters for the nginx
+# logs stopped until the next restart. acquis.d held cscli setup's
+# setup.nginx.yaml (/var/log/nginx/*.log) beside deploy.sh's nginx.yaml and
+# loxprox.yaml, so every LoxProx log was tailed twice. CrowdSec 1.8.1's tail
+# library (nxadm/tail 1.4.11) runs ONE inotify tracker per process and keys its
+# event channel by file name: two tailers of one file share that channel, and
+# each closes it for the other when logrotate renames the file.
+#
+# The real CrowdSec, the real logrotate and deploy.sh's own logrotate config.
+# Every cycle writes RT_M lines to each log, rotates, writes RT_M more, and
+# compares what CrowdSec read of each file (cs_filesource_hits_total) with
+# what a reader per tailer should have read; CrowdSec's own "Starting tail"
+# lines say how many tailers a file has, its "file reader died" lines are kept.
+#   A   production's acquisition, crowdsec restarted before every rotation
+#       (the first rotation after a start is the one that splits a pair) —
+#       evidence, never a failure: the race need not lose on every runner;
+#   B   the same host after deploy.sh's configure_crowdsec: every check gates;
+#   B2  B's acquisition through consecutive rotations without a restart —
+#       what production does night after night;
+#   C   B with poll_without_inotify: true — information only.
+# The lines come from 192.168.1.77 (CROWDSEC_WHITELIST_IPS): nothing is banned.
+
+RT_NGINX=/var/log/nginx
+RT_CSLOG=/var/log/crowdsec.log
+RT_M=5
+RT_LOGS=(loxone-access loxone-error loxprox-trap loxprox-unknown loxprox-trap-hosts appsec-detections access error)
+RT_W=""
+RT_RESTART_OFF=0
+
+# What CrowdSec has read so far, "path count" per file it tails (the counter
+# sums every datasource that reads the path).
+rt_reads() {
+    curl -s --max-time 5 http://127.0.0.1:6060/metrics 2>/dev/null | awk '
+        /^cs_filesource_hits_total\{/ && match($0, /source="[^"]*"/) { n[substr($0, RSTART + 8, RLENGTH - 9)] += $NF }
+        END { for (s in n) printf "%s %.0f\n", s, n[s] }'
+}
+
+# rt_load NAME — rt_reads into the associative array NAME.
+rt_load() {
+    local -n _rt_a="$1"
+    local p c
+    # shellcheck disable=SC2034  # written through the nameref
+    _rt_a=()
+    while read -r p c; do
+        # shellcheck disable=SC2034
+        _rt_a[$p]=$c
+    done < <(rt_reads)
+}
+
+# RT_M nginx access-log lines, tagged $1, appended to every log.
+rt_write() {
+    local f i ts
+    ts=$(LC_ALL=C date '+%d/%b/%Y:%H:%M:%S %z')
+    for f in "${RT_LOGS[@]}"; do
+        for (( i = 1; i <= RT_M; i++ )); do
+            printf '192.168.1.77 - - [%s] "GET /ci-rotation/%s/%s HTTP/1.1" 200 0 "-" "loxprox-ci"\n' "$ts" "$1" "$i"
+        done >> "$RT_NGINX/$f.log"
+    done
+}
+
+# One nightly rotation, as production's cron.daily logrotate run does it:
+# deploy.sh's loxone-nginx config, then the stock nginx stanza for access.log
+# and error.log. 0 when the access log was really rotated (new inode).
+rt_rotate() {
+    local before
+    before=$(stat -c %i "$RT_NGINX/loxone-access.log" 2>/dev/null)
+    logrotate -f -s "$RT_W/logrotate.state" "$RT_W/loxone-nginx" "$RT_W/nginx-stock" >>"$RT_W/logrotate.out" 2>&1
+    [[ "$(stat -c %i "$RT_NGINX/loxone-access.log" 2>/dev/null)" != "$before" ]]
+}
+
+# Restarts crowdsec and waits until it has started at least $1 tailers under
+# /var/log/nginx; RT_RESTART_OFF is crowdsec.log's size before the restart.
+rt_restart() {
+    local n=0
+    RT_RESTART_OFF=$(stat -c %s "$RT_CSLOG" 2>/dev/null || echo 0)
+    systemctl restart crowdsec >>"$LOG_FILE" 2>&1 || return 1
+    for _ in $(seq 1 120); do
+        n=$(tail -c +$((RT_RESTART_OFF + 1)) "$RT_CSLOG" 2>/dev/null | grep -F 'msg="Starting tail' | grep -cF "file=$RT_NGINX/")
+        (( n >= $1 )) && break
+        sleep 0.25
+    done
+    sleep 2   # each tailer opens its file and seeks to the end in its own goroutine
+    (( n >= $1 ))
+}
+
+# rt_tails NAME — tailers per file since the last rt_restart, from CrowdSec's
+# own "Starting tail … file=<path>" lines, into the associative array NAME.
+rt_tails() {
+    local -n _rt_t="$1"
+    local f
+    # shellcheck disable=SC2034  # written through the nameref
+    _rt_t=()
+    while read -r f; do
+        # shellcheck disable=SC2034
+        _rt_t[$f]=$(( ${_rt_t[$f]:-0} + 1 ))
+    done < <(tail -c +$((RT_RESTART_OFF + 1)) "$RT_CSLOG" 2>/dev/null | grep -F 'msg="Starting tail' \
+             | sed -nE "s#.* file=($RT_NGINX/[^ ]+).*#\1#p")
+}
+
+# rt_arm NAME CYCLES PER_RESTART MIN_TAILERS — CYCLES rotations; crowdsec is
+# restarted before every cycle (PER_RESTART=1) or only before the first.
+# One note line per cycle: "<log> <read before>→<read after the rotation>".
+# Afterwards:
+#   RT_TAILS    " file:n" — tailers per file
+#   RT_PRE      files whose reads BEFORE a rotation were not n × RT_M
+#   RT_LOST     " file:k/CYCLES" — rotations after which a file had fewer readers
+#   RT_STOPPED  " file:k/CYCLES" — rotations after which CrowdSec read nothing of it
+#   RT_DEATHS   CrowdSec's "file reader died" lines during the arm
+#   RT_REOPEN   CrowdSec's "Re-opening moved/deleted file" lines during the arm
+#   RT_ROTATED  rotations that really happened
+rt_arm() {
+    local name="$1" cycles="$2" per_restart="$3" min="$4" k f b d1 d2 want off line
+    local -A pre=() mid=() post=() tails=() lost=() stopped=()
+    RT_PRE="" RT_TAILS="" RT_LOST="" RT_STOPPED="" RT_DEATHS="" RT_REOPEN=0 RT_ROTATED=0
+    off=$(stat -c %s "$RT_CSLOG" 2>/dev/null || echo 0)
+    for (( k = 1; k <= cycles; k++ )); do
+        if (( per_restart || k == 1 )); then
+            if ! rt_restart "$min"; then
+                fail "$name: crowdsec did not come back with at least $min nginx tailers (cycle $k)"
+                journalctl -u crowdsec -n 20 --no-pager -o cat 2>/dev/null | sed 's/^/    /'
+                return 1
+            fi
+            rt_tails tails
+        fi
+        rt_load pre; rt_write "$name-$k-a"; sleep 3; rt_load mid
+        rt_rotate && RT_ROTATED=$((RT_ROTATED + 1))
+        sleep 1; rt_write "$name-$k-b"; sleep 3; rt_load post
+        line=""
+        for f in $(printf '%s\n' "${!tails[@]}" | LC_ALL=C sort); do
+            b=$(basename "$f")
+            want=$(( ${tails[$f]} * RT_M ))
+            d1=$(( ${mid[$f]:-0} - ${pre[$f]:-0} ))
+            d2=$(( ${post[$f]:-0} - ${mid[$f]:-0} ))
+            (( d1 == want )) || RT_PRE+=" $b(#$k: $d1 of $want)"
+            if (( d2 == 0 )); then
+                stopped[$b]=$(( ${stopped[$b]:-0} + 1 ))
+            elif (( d2 < want )); then
+                lost[$b]=$(( ${lost[$b]:-0} + 1 ))
+            fi
+            line+=" ${b%.log} ${d1}→${d2}"
+        done
+        note "$name #$k:$line"
+    done
+    for f in $(printf '%s\n' "${!tails[@]}" | LC_ALL=C sort); do RT_TAILS+=" $(basename "$f"):${tails[$f]}"; done
+    for b in $(printf '%s\n' "${!lost[@]}" | LC_ALL=C sort); do RT_LOST+=" $b:${lost[$b]}/$cycles"; done
+    for b in $(printf '%s\n' "${!stopped[@]}" | LC_ALL=C sort); do RT_STOPPED+=" $b:${stopped[$b]}/$cycles"; done
+    RT_DEATHS=$(tail -c +$((off + 1)) "$RT_CSLOG" 2>/dev/null | grep -F 'file reader died')
+    RT_REOPEN=$(tail -c +$((off + 1)) "$RT_CSLOG" 2>/dev/null | grep -cF 'Re-opening moved/deleted file')
+    return 0
+}
+
+# The death lines, shortened to time + message + file.
+rt_show_deaths() {
+    [[ -n "$RT_DEATHS" ]] || return 0
+    sed -E 's/^time="([^"]+)".*msg="([^"]+)".* tail=([^ ]+).*/\1 \2 [\3]/' <<<"$RT_DEATHS" | head -n "${1:-8}" | sed 's/^/      /'
+}
+
+# test-gateway.sh's reading of the acquisition files (what it checks on a
+# gateway) next to CrowdSec's own tailers: same " file:n" form as RT_TAILS.
+rt_static_tails() {
+    (source "$REPO/test-gateway.sh"; _cs_acquired_paths "$CROWDSEC_DIR") 2>/dev/null \
+        | awk -F'\t' -v d="$RT_NGINX/" 'index($1, d) == 1 {n[$1]++} END {for (f in n) print f, n[f]}' | LC_ALL=C sort \
+        | while read -r f n; do printf ' %s:%s' "${f##*/}" "$n"; done
+}
+
+# The gates for an arm whose acquisition must be deploy.sh's (B, B2).
+rt_gates() {
+    local name="$1" cycles="$2" want=" access.log:1 error.log:1 loxone-access.log:1 loxone-error.log:1 loxprox-trap.log:1 loxprox-unknown.log:1"
+    [[ "$RT_TAILS" == "$want" ]] \
+        && pass "$name: one tailer per acquired log, trap-hosts and AppSec logs not tailed:$RT_TAILS" \
+        || fail "$name: tailers per log:$RT_TAILS (want:$want)"
+    [[ "$RT_ROTATED" == "$cycles" ]] && pass "$name: $cycles rotations by the deployed logrotate config" \
+                                     || fail "$name: only $RT_ROTATED of $cycles rotations happened: $(tail -n 5 "$RT_W/logrotate.out" | tr '\n' ' ')"
+    [[ -z "$RT_PRE" ]] && pass "$name: before every rotation each line read exactly once" || fail "$name: reads before a rotation:$RT_PRE"
+    if [[ -z "$RT_LOST$RT_STOPPED" ]]; then
+        pass "$name: after every rotation CrowdSec read every new line of every log"
+    else
+        fail "$name: after a rotation — fewer readers:${RT_LOST:- none}; nothing read:${RT_STOPPED:- none}"
+    fi
+    if [[ -z "$RT_DEATHS" ]]; then
+        pass "$name: no 'file reader died' in crowdsec.log ($RT_REOPEN reopens)"
+    else
+        fail "$name: $(grep -c . <<<"$RT_DEATHS") 'file reader died' in crowdsec.log:"
+        rt_show_deaths
+    fi
+}
+
+t_crowdsec_rotation() {
+    section "CrowdSec — file acquisition across logrotate: production's layout vs deploy.sh's (2026-10-21)"
+    command -v cscli >/dev/null || { fail "cscli missing — install crowdsec first"; return; }
+    command -v logrotate >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq logrotate >>"$LOG_FILE" 2>&1
+    command -v logrotate >/dev/null || { fail "logrotate missing"; return; }
+    if ! id www-data >/dev/null 2>&1 || ! getent group adm >/dev/null 2>&1; then
+        fail "user www-data / group adm missing (the logrotate configs create files as www-data:adm)"; return
+    fi
+    [[ -f "$RT_CSLOG" ]] || { fail "$RT_CSLOG missing — CrowdSec logs elsewhere ($(cscli config show --key Config.Common.LogDir 2>&1))"; return; }
+    local acq f out fake_pid="" cycles logoff
+    acq=$(dirname "$CROWDSEC_NGINX_ACQUIS")
+    RT_W=$(mktemp -d /var/tmp/loxprox-rotation.XXXXXX)
+    note "CrowdSec $(cscli version 2>&1 | awk '/version:/ {print $2; exit}'), $(logrotate --version 2>&1 | head -n 1), $(nproc) CPUs"
+    note "acquis.d before this section: $(cd "$acq" && ls | tr '\n' ' ')"
+
+    mkdir -p "$RT_NGINX"
+    for f in "${RT_LOGS[@]}"; do
+        [[ -e "$RT_NGINX/$f.log" ]] || install -m 0640 -o www-data -g adm /dev/null "$RT_NGINX/$f.log"
+    done
+    # deploy.sh's logrotate config, and Debian 12's stock nginx stanza as
+    # deploy.sh narrows it (its postrotate is `invoke-rc.d nginx rotate`, the
+    # same USR1 as below).
+    # shellcheck disable=SC2034  # consumed by deploy.sh's setup_logrotate
+    ( LOGROTATE_CONF="$RT_W/loxone-nginx" LOXPROX_LOGROTATE_CONF="$RT_W/loxprox-logs" NGINX_STOCK_LOGROTATE="$RT_W/absent"
+      setup_logrotate ) >>"$LOG_FILE" 2>&1
+    if ! grep -qF "$RT_NGINX/loxprox-trap.log" "$RT_W/loxone-nginx" 2>/dev/null; then
+        fail "setup_logrotate wrote no loxone-nginx config"; return
+    fi
+    cat > "$RT_W/nginx-stock" <<'EOF'
+/var/log/nginx/access.log /var/log/nginx/error.log {
+	daily
+	missingok
+	rotate 14
+	compress
+	delaycompress
+	notifempty
+	create 0640 www-data adm
+	sharedscripts
+	postrotate
+		[ -f /var/run/nginx.pid ] && kill -USR1 $(cat /var/run/nginx.pid)
+	endscript
+}
+EOF
+    chmod 0644 "$RT_W/nginx-stock"
+    # nginx itself is not under test: a stand-in that ignores USR1 lets the
+    # deployed postrotate (kill -USR1 $(cat /var/run/nginx.pid)) succeed.
+    if [[ ! -e /var/run/nginx.pid ]]; then
+        bash -c 'trap "" USR1; exec sleep 7200' &
+        fake_pid=$!
+        echo "$fake_pid" > /var/run/nginx.pid
+    fi
+
+    # ── A: production's acquisition (read from the gateway 2026-10-21) ──
+    # cscli setup's three files byte for byte (their checksums verify), and
+    # deploy.sh's nginx.yaml / ssh.yaml as releases before 2026-10-21 wrote them.
+    cat > "$acq/setup.nginx.yaml" <<'EOF'
+#
+# Configuration generated by "cscli setup".
+# Please check your non-generated configuration files to make sure
+# the log sources are not acquired twice. This includes
+# the file acquis.yaml created by crowdsec <= 1.7.0.
+#
+# cscli-checksum: 9131e66b247aac7984402f0d16ff3a67
+
+filenames:
+  - /var/log/nginx/*.log
+labels:
+  type: nginx
+source: file
+EOF
+    cat > "$acq/setup.sshd.yaml" <<'EOF'
+#
+# Configuration generated by "cscli setup".
+# Please check your non-generated configuration files to make sure
+# the log sources are not acquired twice. This includes
+# the file acquis.yaml created by crowdsec <= 1.7.0.
+#
+# cscli-checksum: 2536c85258d4efc265e4627ced7e2903
+
+journalctl_filter:
+  - _SYSTEMD_UNIT=ssh.service
+labels:
+  type: syslog
+source: journalctl
+EOF
+    cat > "$acq/setup.linux.yaml" <<'EOF'
+#
+# Configuration generated by "cscli setup".
+# Please check your non-generated configuration files to make sure
+# the log sources are not acquired twice. This includes
+# the file acquis.yaml created by crowdsec <= 1.7.0.
+#
+# cscli-checksum: a380e4b3fc5e43e510e8287a3fcbe374
+
+filenames:
+  - /var/log/messages
+  - /var/log/syslog
+  - /var/log/kern.log
+labels:
+  type: syslog
+source: file
+EOF
+    cp -a "$acq/setup.linux.yaml" "$RT_W/setup.linux.yaml"
+    printf '%s\n' '# Nginx log acquisition' 'filenames:' '  - /var/log/nginx/loxone-access.log' \
+        '  - /var/log/nginx/loxone-error.log' 'labels:' '  type: nginx' > "$CROWDSEC_NGINX_ACQUIS"
+    printf '%s\n' '# SSH acquisition (Debian 12 — no sshd-session unit split)' 'filenames:' \
+        '  - /var/log/auth.log' 'labels:' '  type: syslog' > "$CROWDSEC_SSH_ACQUIS"
+    cmp -s "$REPO/crowdsec/acquis.d/loxprox.yaml" "$CROWDSEC_LOXPROX_ACQUIS" \
+        || { fail "acquis.d/loxprox.yaml is not the repository's (run the crowdsec section first)"; return; }
+
+    cycles="${RT_CYCLES_A:-15}"
+    if rt_arm A "$cycles" 1 12; then
+        [[ "$RT_TAILS" == " access.log:1 appsec-detections.log:1 error.log:1 loxone-access.log:2 loxone-error.log:2 loxprox-trap-hosts.log:1 loxprox-trap.log:2 loxprox-unknown.log:2" ]] \
+            && pass "A: production's acquisition tails the four LoxProx logs twice, the other nginx logs (trap-hosts too) once" \
+            || fail "A: not production's layout — tailers per log:$RT_TAILS"
+        [[ -z "$RT_PRE" ]] && pass "A: before a rotation every line is read once per tailer (twice for the four LoxProx logs)" \
+                           || note "A: reads before a rotation:$RT_PRE"
+        note "A: $RT_ROTATED rotations, $RT_REOPEN reopens, $(grep -c . <<<"$RT_DEATHS") 'file reader died'"
+        if [[ -n "$RT_DEATHS$RT_LOST$RT_STOPPED" ]]; then
+            pass "A: REPRODUCED in $cycles rotations — fewer readers after the rotation:${RT_LOST:- none}; nothing read after it:${RT_STOPPED:- none}"
+            rt_show_deaths
+        else
+            note "A: NOT reproduced in $cycles rotations — every tailer kept reading on this runner"
+        fi
+    fi
+    out=$(rt_static_tails)
+    [[ "$out" == "$RT_TAILS" ]] && pass "test-gateway.sh reads production's acquisition as CrowdSec tails it:$out" \
+                                || fail "test-gateway.sh reads:$out — CrowdSec tailed:$RT_TAILS"
+
+    # ── B: deploy.sh's configure_crowdsec on that host ──
+    if cs_configure ban; then
+        pass "configure_crowdsec on production's layout returns 0"
+    else
+        fail "configure_crowdsec failed — deploy log below"
+        tail -25 "$LOG_FILE" | sed 's/^/    /'
+    fi
+    note "acquis.d after deploy.sh: $(cd "$acq" && ls | tr '\n' ' ')"
+    for f in setup.nginx.yaml setup.sshd.yaml; do
+        if [[ ! -e "$acq/$f" && -f "$acq/$f.loxprox-disabled" && -f "$BACKUP_DIR/files$acq/$f" ]]; then
+            pass "$f disabled (kept as $f.loxprox-disabled, backed up in the deploy backup)"
+        else
+            fail "$f: $(ls -l "$acq/$f"* 2>&1 | tr '\n' ' ')"
+        fi
+    done
+    cmp -s "$RT_W/setup.linux.yaml" "$acq/setup.linux.yaml" && pass "setup.linux.yaml (syslog files, no overlap) left as it is" \
+                                                              || fail "setup.linux.yaml changed or removed"
+    out=$(cat "$CROWDSEC_SSH_ACQUIS" 2>/dev/null)
+    grep -qx 'source: journalctl' <<<"$out" && grep -qF -- '- _SYSTEMD_UNIT=ssh.service' <<<"$out" && ! grep -qF auth.log <<<"$out" \
+        && pass "ssh.yaml reads sshd's journal (ssh.service) — the one SSH source" || fail "ssh.yaml: $out"
+
+    cycles="${RT_CYCLES_B:-10}"
+    rt_arm B "$cycles" 1 6 && rt_gates B "$cycles"
+    out=$(rt_static_tails)
+    [[ "$out" == "$RT_TAILS" ]] && pass "test-gateway.sh reads deploy.sh's acquisition as CrowdSec tails it:$out" \
+                                || fail "test-gateway.sh reads:$out — CrowdSec tailed:$RT_TAILS"
+    out=$( (source "$REPO/test-gateway.sh"; _cs_acquisition_problems "$CROWDSEC_DIR" "$RT_NGINX") 2>&1)
+    [[ -z "$out" ]] && pass "test-gateway.sh: no log read twice, trap-hosts not read, sshd read once" \
+                    || fail "test-gateway.sh acquisition problems: $(tr '\n' ';' <<<"$out")"
+    cycles="${RT_CYCLES_B2:-20}"
+    rt_arm B2 "$cycles" 0 6 && rt_gates B2 "$cycles"
+
+    # The package's postinst runs `cscli setup unattended` on every upgrade.
+    out=$(cscli setup unattended 2>&1)
+    if [[ ! -e "$acq/setup.nginx.yaml" && ! -e "$acq/setup.sshd.yaml" ]] && grep -qF 'will not proceed' <<<"$out"; then
+        pass "cscli setup unattended (the package's postinst) leaves them disabled: $(grep -F 'will not proceed' <<<"$out" | head -n 1 | cut -c1-90)…"
+    else
+        fail "cscli setup unattended: $(tr '\n' ' ' <<<"$out" | cut -c1-300); acquis.d: $(cd "$acq" && ls | tr '\n' ' ')"
+    fi
+    logoff=$(stat -c %s "$LOG_FILE" 2>/dev/null || echo 0)
+    cp -a "$acq/setup.nginx.yaml.loxprox-disabled" "$RT_W/disabled.copy" 2>/dev/null
+    if cs_configure ban && [[ ! -e "$acq/setup.nginx.yaml" && ! -e "$acq/setup.sshd.yaml" ]] \
+            && cmp -s "$RT_W/disabled.copy" "$acq/setup.nginx.yaml.loxprox-disabled" \
+            && ! tail -c +$((logoff + 1)) "$LOG_FILE" | grep -qE 'Disabled .*setup\.|left in place'; then
+        pass "a second deploy run changes nothing (idempotent)"
+    else
+        fail "second deploy run: acquis.d: $(cd "$acq" && ls | tr '\n' ' '); log: $(tail -c +$((logoff + 1)) "$LOG_FILE" | grep -E 'setup\.' | tr '\n' ' ' | cut -c1-300)"
+    fi
+
+    # ── C: B with poll_without_inotify: true (information only) ──
+    for f in "$CROWDSEC_NGINX_ACQUIS" "$CROWDSEC_LOXPROX_ACQUIS"; do printf 'poll_without_inotify: true\n' >> "$f"; done
+    cycles="${RT_CYCLES_C:-8}"
+    if rt_arm C "$cycles" 0 6; then
+        note "C (poll_without_inotify): tailers:$RT_TAILS; $RT_ROTATED rotations; fewer readers:${RT_LOST:- none}; nothing read:${RT_STOPPED:- none}; $(grep -c . <<<"$RT_DEATHS") deaths"
+        rt_show_deaths
+    fi
+    cs_configure ban || fail "configure_crowdsec after C failed"
+    systemctl is-active --quiet crowdsec && pass "crowdsec active on deploy.sh's acquisition at the end" || fail "crowdsec not active at the end"
+
+    if [[ -n "$fake_pid" ]]; then kill "$fake_pid" 2>/dev/null; rm -f /var/run/nginx.pid; fi
+    rm -rf "$RT_W"
+}
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
-(( $# > 0 )) || { echo "usage: $0 <cron|journald|auditd|logrotate|nginx-apparmor|nginx-appsec|nginx-edge|nft-check|debian12-host|crowdsec|crowdsec-hubupdate|crowdsec-hub-refresh> ..." >&2; exit 2; }
+(( $# > 0 )) || { echo "usage: $0 <cron|journald|auditd|logrotate|nginx-apparmor|nginx-appsec|nginx-edge|nft-check|debian12-host|crowdsec|crowdsec-hubupdate|crowdsec-hub-refresh|crowdsec-rotation> ..." >&2; exit 2; }
 for s in "$@"; do
     case "$s" in
         cron)                      t_cron ;;
@@ -1487,6 +1868,7 @@ for s in "$@"; do
         crowdsec)                  t_crowdsec ;;
         crowdsec-hubupdate)        t_crowdsec_hubupdate ;;
         crowdsec-hub-refresh)      t_crowdsec_hub_refresh ;;
+        crowdsec-rotation)         t_crowdsec_rotation ;;
         *) echo "unknown section: $s" >&2; exit 2 ;;
     esac
 done
