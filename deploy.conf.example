@@ -107,11 +107,17 @@ ENABLE_APPSEC="true"
 APPSEC_MODE="enforce"
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# OPTIONAL — CrowdSec Whitelist (trusted IPs that can never be banned)
+# OPTIONAL — CrowdSec Whitelist (IPs that can never be banned — NOT trusted)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # IPs and CIDR ranges that CrowdSec will NEVER block, even under attack.
-#   Add your home LAN, VPN endpoints, uptime monitoring services, etc.
+#   Ban exemption only (since 2026-10-21): these sources still get the 403 on
+#   the admin paths, the auth / WebSocket limits and the trap's 444. nginx
+#   trusts only loopback, LAN_SUBNET and TRUSTED_SOURCES (below).
+#   Add your home LAN, VPN networks and your household's WAN IP.
+#   Leave out shared provider ranges (cloud, CDN, anycast): everyone sending
+#   from them would be exempt from bans. A monitoring service that asks for
+#   an app path under the host name is not banned and needs no entry.
 #   Format: "1.2.3.4" for single IPs, "192.168.1.0/24" for ranges.
 #   [strongly recommended for families] your household's public WAN IP.
 #   Every phone, tablet and TV in the house shares it (and with CGNAT, so do
@@ -124,9 +130,28 @@ CROWDSEC_WHITELIST_IPS=(
     "192.168.1.0/24"      # [REQUIRED] your local LAN
     "10.0.0.0/24"         # [optional] site-to-site / VPN network
     # "203.0.113.7"       # [recommended] household WAN IP
-    # "203.0.113.45"      # [optional] uptime monitoring service
-    # "198.51.100.0/24"   # [optional] cloud provider IP range
+    # "203.0.113.45"      # [optional] your own uptime monitor, if it ever got banned
 )
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# OPTIONAL — Trusted sources (nginx trust besides LAN_SUBNET)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Sources nginx trusts like the LAN: they reach the Miniserver's admin
+#   webservices (REMOTE_ADMIN_PATHS) and the unknown paths (UNKNOWN_PATH_MODE),
+#   and the per-endpoint limits (Loxone auth paths, /ws/ sockets) never count
+#   them. Loopback and LAN_SUBNET are always trusted; most gateways need
+#   nothing here. Typical entry: a second internal network or a site-to-site
+#   VPN from which you run Loxone Config through the gateway.
+#   Never list an address someone else can send from: a cloud, CDN or anycast
+#   range, a monitoring or notification service, a CGNAT address.
+#   Trusted is not "never banned": list a source in CROWDSEC_WHITELIST_IPS as
+#   well if it must also never be banned.
+#   deploy.sh refuses an entry wider than /24 (IPv6: /48) unless
+#   TRUSTED_SOURCES_ALLOW_WIDE="true", and warns about every public entry.
+#   Example: TRUSTED_SOURCES=("10.0.0.0/24")
+TRUSTED_SOURCES=()
+TRUSTED_SOURCES_ALLOW_WIDE="false"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # OPTIONAL — Alerting
@@ -311,9 +336,10 @@ GUI_PASSWORD=""
 #           fsdel, sys/reboot, sps/restart, cfg setters, …) → REMOTE_ADMIN_PATHS.
 #   app     the endpoints the Loxone app uses → proxied as always.
 #   unknown everything else → UNKNOWN_PATH_MODE.
-# LAN_SUBNET and CROWDSEC_WHITELIST_IPS are never denied (admin/unknown) and
+# LAN_SUBNET and TRUSTED_SOURCES are never denied (admin/unknown) and
 # never counted by the per-endpoint limits (Loxone auth paths: 3/s, burst 30;
-# /ws/: 6 concurrent sockets per address). The trap applies to everyone.
+# /ws/: 6 concurrent sockets per address); CROWDSEC_WHITELIST_IPS is not
+# exempt (never banned only). The trap applies to everyone.
 
 # "log" (default) = unknown paths are proxied AND written to
 #   /var/log/nginx/loxprox-unknown.log — the learning phase: watch that log
@@ -352,16 +378,16 @@ TRAP_BAN_MODE="ban"
 
 # Sources exempt from the trap and from every ban — for a known service that
 # probes the bare IP, e.g. a vendor cloud probe sending plain HTTP to :1080
-# once a day. Exempt is NOT trusted: unlike CROWDSEC_WHITELIST_IPS these
-# sources keep the rate limits, the admin/unknown denials and the trap's 444.
+# once a day. Exempt is NOT trusted: unlike TRUSTED_SOURCES these sources
+# keep the rate limits, the admin/unknown denials and the trap's 444.
 # What changes for them: they are never written to the trap logs, CrowdSec
 # never alerts on or bans them (whitelist loxprox/trap-exempt in
 # /etc/crowdsec/parsers/s02-enrich/whitelist-loxprox-trap-exempt.yaml), and
 # their cleartext request to :1080 with a foreign Host gets the real server's
 # 301 instead of the 444 (TLS mode), exactly as before the trap: to
 # https://<the Host they sent>:1080, never to TLS_DOMAIN. Addresses or
-# CIDRs (IPv4/IPv6); an entry that is trusted (LAN_SUBNET,
-# CROWDSEC_WHITELIST_IPS, loopback) is refused. Empty (default) = nobody;
+# CIDRs (IPv4/IPv6); an entry that is trusted (loopback, LAN_SUBNET,
+# TRUSTED_SOURCES) or overlaps CROWDSEC_WHITELIST_IPS is refused. Empty (default) = nobody;
 # the deploy then removes the whitelist file — also a hand-made one.
 #   Example: TRAP_EXEMPT_IPS=("203.0.113.10" "2001:db8:10::/48")
 TRAP_EXEMPT_IPS=()

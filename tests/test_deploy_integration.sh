@@ -667,6 +667,12 @@ test_extract_config_from_live_state() {
     # from v1.4.0 misread the site as ENABLE_APPSEC=false. v1.5.1 makes the
     # extractor whitespace-tolerant; this fixture pins the behaviour.
     cat > "$NGINX_SITE" <<'NGINX_FIXTURE'
+geo $loxprox_lan {
+    default                  0;
+    127.0.0.0/8              1;
+    192.168.42.0/24          1;
+    198.51.100.22            1;
+}
 upstream loxone_backend {
     server 192.168.42.20:80;
     keepalive 32;
@@ -718,7 +724,25 @@ WL_FIXTURE
     grep -q '"10.99.0.0/24"' "$out"                  && pass "extracted SSH subnet 2"   || fail "SSH subnet 2 missing"
     grep -q 'ENABLE_APPSEC="true"' "$out"            && pass "detected ENABLE_APPSEC"   || fail "ENABLE_APPSEC not detected"
     grep -q 'APPSEC_MODE="enforce"' "$out"           && pass "extracted APPSEC_MODE"    || fail "APPSEC_MODE not extracted"
+    # 2026-10-21: nginx trust is never read back from the live geo (an older
+    # site lists the whitelist there, 198.51.100.22 in the fixture).
+    grep -qx 'TRUSTED_SOURCES=( )' "$out" && pass "no deploy.conf: TRUSTED_SOURCES=( ) — the live geo is not read back" \
+                                          || fail "TRUSTED_SOURCES without deploy.conf: $(grep '^TRUSTED_SOURCES=' "$out")"
+    grep -qx 'TRUSTED_SOURCES_ALLOW_WIDE="false"' "$out" && pass "TRUSTED_SOURCES_ALLOW_WIDE defaults to false" || fail "TRUSTED_SOURCES_ALLOW_WIDE not emitted"
     rm -f "$out"
+    # …but an existing deploy.conf's TRUSTED_SOURCES is carried over, address-shaped entries only.
+    local conf back
+    conf=$(mktemp -t loxprox-extract-conf.XXXXXX)
+    printf '%s\n' 'TRUSTED_SOURCES=("203.0.113.10" "192.168.2.0/24" "bad;entry")' 'TRUSTED_SOURCES_ALLOW_WIDE="true"' > "$conf"
+    out=$(mktemp -t loxprox-extract.XXXXXX)
+    LOXPROX_DEPLOY_CONF="$conf" _loxprox_extract_config_from_live_state "$out" >/dev/null 2>&1
+    grep -qx 'TRUSTED_SOURCES=( "203.0.113.10" "192.168.2.0/24" )' "$out" && pass "deploy.conf's TRUSTED_SOURCES carried over (malformed entry dropped)" \
+                                                                          || fail "carried TRUSTED_SOURCES: $(grep '^TRUSTED_SOURCES=' "$out")"
+    grep -qx 'TRUSTED_SOURCES_ALLOW_WIDE="true"' "$out" && pass "TRUSTED_SOURCES_ALLOW_WIDE carried over" || fail "TRUSTED_SOURCES_ALLOW_WIDE not carried"
+    # shellcheck disable=SC1090
+    back=$(set +u; source "$out" >/dev/null 2>&1; printf '%s|' "${TRUSTED_SOURCES[@]}")
+    [[ "$back" == "203.0.113.10|192.168.2.0/24|" ]] && pass "the candidate sources back to the same array" || fail "candidate TRUSTED_SOURCES sources as '$back'"
+    rm -f "$out" "$conf"
 
     # Negative — empty fixture
     rm -f "$NGINX_SITE" "$NFTABLES_CONF"
@@ -2135,20 +2159,44 @@ test_breach_nginx_classes() {
     echo "━━━ configure_nginx() — path classes, limits, scrub, server_tokens (2026-10) ━━━"
 
     rm -f "$NGINX_SITE" "$NGINX_MAIN_CONF"
+    # 2026-10-21: TRUSTED_SOURCES is nginx's trust list; the whitelist
+    # (192.168.1.0/24 and 10.0.0.0/24 here) is ban exemption only.
+    local -a saved_trusted=("${TRUSTED_SOURCES[@]}")
+    TRUSTED_SOURCES=("192.168.1.0/24" "203.0.113.10")
     UNKNOWN_PATH_MODE=log REMOTE_ADMIN_PATHS=deny configure_nginx >/dev/null 2>&1
     grep -qx 'server_tokens off;' "$NGINX_SITE" && pass "server_tokens off at http level" || fail "server_tokens off missing"
     grep -qx 'variables_hash_max_size 2048;' "$NGINX_SITE" && pass "variables_hash_max_size 2048 at http level" || fail "variables_hash_max_size missing"
     grep -q "^# LOXPROX-SITE-TEMPLATE-VERSION: 8$" "$NGINX_SITE" && pass "site template v8" || fail "site template not v8"
 
-    # Trusted sources: loopback, LAN, whitelist — deduplicated.
+    # Trusted sources: loopback, LAN_SUBNET, TRUSTED_SOURCES — deduplicated.
     local geo
     geo=$(awk '/^geo \$loxprox_lan \{/ {on = 1; next} on && /^\}/ {exit} on' "$NGINX_SITE")
     local net
-    for net in 127.0.0.0/8 ::1 192.168.1.0/24 10.0.0.0/24; do
+    for net in 127.0.0.0/8 ::1 192.168.1.0/24 203.0.113.10; do
         grep -qE "^[[:space:]]+${net//./\\.}[[:space:]]+1;" <<<"$geo" && pass "trusted source: $net" || fail "trusted source missing: $net"
     done
-    [[ "$(grep -c '192\.168\.1\.0/24' <<<"$geo")" == "1" ]] && pass "LAN_SUBNET listed once although also whitelisted" \
+    [[ "$(grep -c '192\.168\.1\.0/24' <<<"$geo")" == "1" ]] && pass "LAN_SUBNET listed once although also in TRUSTED_SOURCES" \
                                                             || fail "duplicate geo entry (nginx warns, a wrong value would win)"
+    grep -qE '^[[:space:]]+10\.0\.0\.0/24[[:space:]]' <<<"$geo" && fail "whitelist-only 10.0.0.0/24 is trusted by nginx" \
+                                                         || pass "whitelist-only entry (10.0.0.0/24) is not trusted by nginx"
+    # A whitelist change alone neither reaches the geo nor regenerates the site.
+    local params_before
+    local -a saved_wl=("${CROWDSEC_WHITELIST_IPS[@]}")
+    params_before=$(grep "^$_LOXPROX_SITE_PARAMS_MARKER" "$NGINX_SITE")
+    CROWDSEC_WHITELIST_IPS+=("198.51.100.7")
+    UNKNOWN_PATH_MODE=log REMOTE_ADMIN_PATHS=deny configure_nginx >/dev/null 2>&1
+    grep -q '198\.51\.100\.7' "$NGINX_SITE" && fail "a new whitelist entry reached the site" || pass "a new whitelist entry never reaches the trusted geo"
+    [[ "$(grep "^$_LOXPROX_SITE_PARAMS_MARKER" "$NGINX_SITE")" == "$params_before" ]] && pass "…and leaves the site fingerprint unchanged" \
+                                                                                    || fail "a whitelist-only change altered the site fingerprint"
+    CROWDSEC_WHITELIST_IPS=("${saved_wl[@]}")
+    # A TRUSTED_SOURCES change regenerates the site into the geo.
+    TRUSTED_SOURCES+=("2001:db8:10::/48")
+    UNKNOWN_PATH_MODE=log REMOTE_ADMIN_PATHS=deny configure_nginx >/dev/null 2>&1
+    geo=$(awk '/^geo \$loxprox_lan \{/ {on = 1; next} on && /^\}/ {exit} on' "$NGINX_SITE")
+    grep -qE '^[[:space:]]+2001:db8:10::/48[[:space:]]+1;' <<<"$geo" && pass "a new TRUSTED_SOURCES entry regenerates the site into the geo" \
+                                                                    || fail "TRUSTED_SOURCES change did not reach the geo"
+    TRUSTED_SOURCES=("192.168.1.0/24" "203.0.113.10")
+    UNKNOWN_PATH_MODE=log REMOTE_ADMIN_PATHS=deny configure_nginx >/dev/null 2>&1
 
     # Limits: the global ones kept, auth zone and /ws/ connection cap added.
     grep -qE 'limit_req_zone +\$loxprox_auth_key +zone=loxone_auth:10m +rate=3r/s;' "$NGINX_SITE" && pass "auth zone 3r/s" || fail "auth zone missing"
@@ -2274,12 +2322,12 @@ CLASSES
     grep -qx 'server_tokens off;' "$NGINX_SITE" && pass "server_tokens off back in the site once nginx.conf drops it" || fail "server_tokens off not restored"
     rm -f "$NGINX_MAIN_CONF"
 
-    # A malformed whitelist entry is skipped, not handed to nginx -t.
-    local saved_wl=("${CROWDSEC_WHITELIST_IPS[@]}")
-    CROWDSEC_WHITELIST_IPS=("192.168.1.0/24" "not-an-address")
+    # A malformed TRUSTED_SOURCES entry is skipped, not handed to nginx -t
+    # (preflight refuses it before; this is the generator's own guard).
+    TRUSTED_SOURCES=("192.168.1.0/24" "not-an-address")
     configure_nginx >/dev/null 2>&1
-    grep -q 'not-an-address' "$NGINX_SITE" && fail "malformed whitelist entry reached the geo block" || pass "malformed whitelist entry skipped"
-    CROWDSEC_WHITELIST_IPS=("${saved_wl[@]}")
+    grep -q 'not-an-address' "$NGINX_SITE" && fail "malformed TRUSTED_SOURCES entry reached the geo block" || pass "malformed TRUSTED_SOURCES entry skipped"
+    TRUSTED_SOURCES=("${saved_trusted[@]}")
     rm -f "$NGINX_SITE"
 }
 
@@ -2723,6 +2771,16 @@ TRAP_EXEMPT_IPS=("")|bad
 TRAP_EXEMPT_IPS=("192.168.1.0/24")|bad
 TRAP_EXEMPT_IPS=("203.0.113.10" "10.0.0.0/24")|bad
 TRAP_EXEMPT_IPS=("::1")|bad
+TRUSTED_SOURCES=("203.0.113.10"); TRAP_EXEMPT_IPS=("203.0.113.10")|bad
+TRUSTED_SOURCES=("203.0.113.10")|ok
+TRUSTED_SOURCES=("192.168.2.0/24" "fd00:10::/48" "203.0.113.10")|ok
+TRUSTED_SOURCES=("not-an-address")|bad
+TRUSTED_SOURCES=("203.0.113.10;")|bad
+TRUSTED_SOURCES=("198.51.100.0/23")|bad
+TRUSTED_SOURCES=("10.0.0.0/8")|bad
+TRUSTED_SOURCES=("2001:db8::/32")|bad
+TRUSTED_SOURCES=("198.51.100.0/23"); TRUSTED_SOURCES_ALLOW_WIDE=true|ok
+TRUSTED_SOURCES_ALLOW_WIDE=maybe|bad
 CASES
     if command -v python3 >/dev/null 2>&1; then
         ( BAN_HARD_SCENARIOS='^(unclosed$'; _loxprox_validate_hardening_config >/dev/null 2>&1 ) \
@@ -2888,7 +2946,8 @@ test_trap_exempt() {
     grep -q '^203.0.113.11: not in .*whitelist-loxprox-trap-exempt.yaml$' <<<"$problems" && grep -q '^203.0.113.11: not in the nginx geo' <<<"$problems" \
         && ! grep -q '^203.0.113.10' <<<"$problems" && pass "test-gateway.sh: an undeployed entry is missing from the file and the geo" || fail "undeployed entry: $problems"
     problems=$(tg "10.0.0.0/24")
-    grep -q '^10.0.0.0/24: TRUSTED' <<<"$problems" && pass "test-gateway.sh: an entry in the trusted lists is flagged TRUSTED" || fail "trusted entry not flagged: $problems"
+    grep -q '^10.0.0.0/24: also never-banned by CROWDSEC_WHITELIST_IPS' <<<"$problems" \
+        && pass "test-gateway.sh: an entry in the never-ban whitelist is flagged (one never-ban list per source)" || fail "whitelisted entry not flagged: $problems"
     if command -v python3 >/dev/null 2>&1; then
         problems=$(tg "192.168.1.77")
         grep -q '^192.168.1.77: TRUSTED (overlaps 192.168.1.0/24' <<<"$problems" && pass "test-gateway.sh: an entry inside a trusted network is flagged" || fail "contained entry: $problems"
@@ -2901,11 +2960,124 @@ test_trap_exempt() {
     fi
     out=$( (TRAP_EXEMPT_IPS=("2001:db8::/32"); _loxprox_validate_trap_exempt) 2>&1)
     grep -q 'wider than /48' <<<"$out" && pass "a wide entry (IPv6 /32) is warned about" || fail "no width warning: $out"
+    # 2026-10-21 (TRUSTED_SOURCES): trusted is loopback, LAN_SUBNET and
+    # TRUSTED_SOURCES; an overlap with CROWDSEC_WHITELIST_IPS is refused too,
+    # with its own message.
+    local -a saved_trusted_x=("${TRUSTED_SOURCES[@]}")
+    TRUSTED_SOURCES=("198.51.100.0/24")
+    configure_nginx >/dev/null 2>&1
+    cp "$NGINX_SITE" "$tg_site"
+    problems=$(tg "198.51.100.0/24")
+    grep -q '^198.51.100.0/24: TRUSTED' <<<"$problems" && pass "test-gateway.sh: an entry that is a TRUSTED_SOURCES network is flagged TRUSTED" \
+                                                     || fail "TRUSTED_SOURCES entry not flagged: $problems"
+    out=$( (TRAP_EXEMPT_IPS=("198.51.100.0/24"); _loxprox_validate_trap_exempt) 2>&1) && fail "validation accepted an exempt entry that is in TRUSTED_SOURCES" \
+        || { grep -q "'198.51.100.0/24' is trusted (198.51.100.0/24)" <<<"$out" && pass "validation refuses an exempt entry that is in TRUSTED_SOURCES" || fail "TRUSTED_SOURCES refusal: $out"; }
+    out=$( (TRAP_EXEMPT_IPS=("10.0.0.0/24"); _loxprox_validate_trap_exempt) 2>&1) && fail "validation accepted an exempt entry that is in CROWDSEC_WHITELIST_IPS" \
+        || { grep -q "'10.0.0.0/24' is also in CROWDSEC_WHITELIST_IPS" <<<"$out" && pass "validation refuses an exempt entry in CROWDSEC_WHITELIST_IPS (one never-ban list)" || fail "whitelist refusal: $out"; }
+    if command -v python3 >/dev/null 2>&1; then
+        out=$( (TRAP_EXEMPT_IPS=("198.51.100.9"); _loxprox_validate_trap_exempt) 2>&1) && fail "validation accepted an exempt entry inside a TRUSTED_SOURCES network" \
+            || { grep -q "overlaps the trusted network 198.51.100.0/24" <<<"$out" && pass "validation refuses an exempt entry inside a TRUSTED_SOURCES network (python3)" || fail "contained TRUSTED_SOURCES refusal: $out"; }
+        out=$( (TRAP_EXEMPT_IPS=("10.0.0.9"); _loxprox_validate_trap_exempt) 2>&1) && fail "validation accepted an exempt entry inside a whitelisted network" \
+            || { grep -q "overlaps the CROWDSEC_WHITELIST_IPS entry 10.0.0.0/24" <<<"$out" && pass "…and one inside a CROWDSEC_WHITELIST_IPS network (python3)" || fail "contained whitelist refusal: $out"; }
+    fi
+    TRUSTED_SOURCES=("${saved_trusted_x[@]}")
     rm -f "$wl" "$wl".* "$tg_site" "$tg_trusted" "$NGINX_SITE" "$NGINX_ACME_CONF"
     unset -f tg
 
     TRAP_EXEMPT_IPS=("${saved_exempt[@]}")
     BACKUP_DIR="$saved_backup"
+}
+
+# 2026-10-21: ban exemption (CROWDSEC_WHITELIST_IPS) and nginx trust
+# (TRUSTED_SOURCES) are separate keys. These pin the helpers behind the
+# validation, the deploy's upgrade notice, config.env and test-gateway.sh's
+# geo check; tests/host-integration.sh (nginx-edge) asks the real nginx.
+test_breach_trusted_sources() {
+    echo ""
+    echo "━━━ TRUSTED_SOURCES — nginx trust apart from the CrowdSec whitelist (2026-10-21) ━━━"
+
+    local spec want got bad=0 out rc
+    while read -r spec want; do
+        if _loxprox_is_private_net "$spec"; then got=private; else got=public; fi
+        [[ "$got" == "$want" ]] || { fail "_loxprox_is_private_net $spec = $got, expected $want"; bad=1; }
+    done <<'NETS'
+10.1.2.3 private
+10.0.0.0/8 private
+172.16.0.0/12 private
+172.31.255.1 private
+172.32.0.1 public
+192.168.77.0/24 private
+192.168.0.0/15 public
+127.0.0.1 private
+169.254.10.1 private
+010.0.0.1 private
+100.64.0.1 public
+198.18.0.0/15 public
+203.0.113.10 public
+0.0.0.0/0 public
+::1 private
+fd00:10::/48 private
+fc00::/7 private
+fe80::1 private
+fe80::/9 public
+2001:db8::1 public
+:: public
+NETS
+    (( bad == 0 )) && pass "21 addresses classified (RFC 1918, RFC 4193, link-local, loopback private; CGNAT public)"
+
+    # Deploy-time verdicts: public → accepted with a warning; private → silent;
+    # wide → refused, or warned with TRUSTED_SOURCES_ALLOW_WIDE.
+    out=$( (TRUSTED_SOURCES=("203.0.113.10"); _loxprox_validate_trusted_sources) 2>&1 ); rc=$?
+    (( rc == 0 )) && grep -q "'203.0.113.10' is a public address" <<<"$out" \
+        && pass "public TRUSTED_SOURCES entry: accepted with a deploy-time warning" || fail "public entry (rc $rc): $out"
+    out=$( (TRUSTED_SOURCES=("100.64.7.1"); _loxprox_validate_trusted_sources) 2>&1 ); rc=$?
+    (( rc == 0 )) && grep -q "'100.64.7.1' is a public address" <<<"$out" \
+        && pass "CGNAT TRUSTED_SOURCES entry: warned as public (shared by an ISP's customers)" || fail "CGNAT entry (rc $rc): $out"
+    out=$( (TRUSTED_SOURCES=("192.168.2.0/24" "10.8.0.0/24" "172.16.5.0/24" "fd00:10::/48" "fe80::1"); _loxprox_validate_trusted_sources) 2>&1 ); rc=$?
+    (( rc == 0 )) && ! grep -q 'public address' <<<"$out" \
+        && pass "private TRUSTED_SOURCES entries: accepted without a warning" || fail "private entries (rc $rc): $out"
+    out=$( (TRUSTED_SOURCES=("198.51.100.0/16"); _loxprox_validate_trusted_sources) 2>&1 ); rc=$?
+    (( rc != 0 )) && grep -q "'198.51.100.0/16' is wider than /24" <<<"$out" && grep -q 'TRUSTED_SOURCES_ALLOW_WIDE' <<<"$out" \
+        && pass "a /16 is refused and the error names TRUSTED_SOURCES_ALLOW_WIDE" || fail "wide entry (rc $rc): $out"
+    out=$( (TRUSTED_SOURCES=("198.51.100.0/23"); TRUSTED_SOURCES_ALLOW_WIDE=yes; _loxprox_validate_trusted_sources) 2>&1 ); rc=$?
+    (( rc == 0 )) && grep -q "'198.51.100.0/23' is wider than /24 (TRUSTED_SOURCES_ALLOW_WIDE" <<<"$out" \
+        && pass "TRUSTED_SOURCES_ALLOW_WIDE=yes: the wide entry is accepted with a warning" || fail "allowed wide entry (rc $rc): $out"
+
+    # The deploy names the whitelist entries nginx does not trust (upgrade notice).
+    out=$( (LAN_SUBNET=192.168.1.0/24
+            CROWDSEC_WHITELIST_IPS=("192.168.1.0/24" "192.168.1.7" "10.0.0.0/24" "203.0.113.45" "198.51.100.22" "2001:db8::5" "bad entry")
+            TRUSTED_SOURCES=("203.0.113.45")
+            _loxprox_whitelist_untrusted_entries) 2>&1 )
+    [[ "$out" == "10.0.0.0/24 198.51.100.22 2001:db8::5" ]] \
+        && pass "whitelist entries outside LAN_SUBNET / TRUSTED_SOURCES are named: $out" || fail "untrusted whitelist entries: '$out'"
+
+    # config.env carries the list for test-gateway.sh.
+    local -a saved_trusted=("${TRUSTED_SOURCES[@]}")
+    TRUSTED_SOURCES=("203.0.113.10" "192.168.2.0/24")
+    write_runtime_config >/dev/null 2>&1
+    grep -qx 'TRUSTED_SOURCES="203.0.113.10 192.168.2.0/24"' "$GATEWAY_CONFIG_FILE" \
+        && pass "config.env carries TRUSTED_SOURCES, space-separated" || fail "config.env TRUSTED_SOURCES: $(grep '^TRUSTED_SOURCES=' "$GATEWAY_CONFIG_FILE")"
+
+    # test-gateway.sh's geo check against a site configure_nginx generated.
+    TRUSTED_SOURCES=("203.0.113.10")
+    rm -f "$NGINX_SITE"
+    configure_nginx >/dev/null 2>&1
+    out=$( (source "$PROJECT_DIR/test-gateway.sh"; _trusted_geo_extra "$NGINX_SITE" 192.168.1.0/24 203.0.113.10) 2>&1 )
+    [[ -z "$out" ]] && pass "test-gateway.sh: the generated geo holds only loopback, LAN_SUBNET and TRUSTED_SOURCES" \
+                    || fail "test-gateway.sh flags a generated site: $out"
+    out=$( (source "$PROJECT_DIR/test-gateway.sh"; _trusted_geo_extra "$NGINX_SITE" 192.168.1.0/24) 2>&1 )
+    [[ "$out" == "203.0.113.10" ]] && pass "test-gateway.sh flags a geo entry that is not in TRUSTED_SOURCES" || fail "extra entry not flagged: '$out'"
+    local old_site="$MOCK_ROOT/old-site"
+    awk '{print} /^geo \$loxprox_lan \{/ {print "    198.51.100.22            1;"}' "$NGINX_SITE" > "$old_site"
+    out=$( (source "$PROJECT_DIR/test-gateway.sh"; _trusted_geo_extra "$old_site" 192.168.1.0/24 203.0.113.10) 2>&1 )
+    [[ "$out" == "198.51.100.22" ]] && pass "test-gateway.sh flags a whitelist entry left in the geo (pre-2026-10-21 site)" \
+                                    || fail "old-style geo entry not flagged: '$out'"
+    printf 'server {}\n' > "$old_site"
+    out=$( (source "$PROJECT_DIR/test-gateway.sh"; _trusted_geo_extra "$old_site" 192.168.1.0/24) 2>&1 )
+    [[ "$out" == "NO-GEO" ]] && pass "…and reports a site without the geo" || fail "site without geo: '$out'"
+    rm -f "$old_site" "$NGINX_SITE"
+    TRUSTED_SOURCES=("${saved_trusted[@]}")
+    write_runtime_config >/dev/null 2>&1
 }
 
 # The reboot-loop guard (feedback: a probe that misreads a healthy gateway
@@ -3077,6 +3249,7 @@ test_site_template_v3_upgrade
 
 # 2026-10 breach hardening
 test_breach_validation
+test_breach_trusted_sources
 test_breach_nginx_classes
 test_breach_tls_gate
 test_breach_firewall

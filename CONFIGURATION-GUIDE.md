@@ -307,6 +307,8 @@ sudo ./deploy.sh
 
 These IPs/networks are **never** banned by CrowdSec, even if they trigger attack signatures.
 
+> **Never banned is not trusted.** Since 2026-10-21 the whitelist only stops bans. Its entries still get the `403` on the admin paths, the auth and WebSocket limits and the trap's `444`, like any internet client. nginx trusts only loopback, `LAN_SUBNET` and [`TRUSTED_SOURCES`](#trusted-sources-trusted_sources). Before that date every whitelist entry was trusted as well.
+
 **Must include:**
 - Your LAN subnet (`192.168.1.0/24`)
 - **Every other trusted subnet/VLAN** a trusted device might reach the gateway from (e.g. a second Wi-Fi VLAN routed to the gateway via inter-VLAN routing). If it isn't listed, a device on it can be banned even though it's internal.
@@ -317,9 +319,12 @@ These IPs/networks are **never** banned by CrowdSec, even if they trigger attack
 > **Roaming mobile clients cannot be whitelisted here.** Devices on mobile carriers, iCloud Private Relay, or Cloudflare WARP use **rotating** IPs — there is no stable address to list. See `SECURITY.md` → "Legitimate User Blocked" for how those are handled (reactively).
 
 **Should include:**
-- Uptime monitoring services (e.g., UptimeRobot, Pingdom)
-- Cloud services that legitimately poll the Loxone API
-- Your own external IP if you access it remotely
+- Your household's public WAN IP (see "Households behind one IP" below)
+
+**Usually not needed:**
+- An uptime monitor that requests an app path under the host name is not banned. List it only if it ever was.
+- Services the Miniserver *calls* (push notifications, mail, weather): that traffic leaves the house directly and never reaches the gateway, so their addresses do nothing here.
+- Never list a shared provider range (cloud, CDN, anycast): everyone sending from it would be exempt from bans.
 
 **Example:**
 ```bash
@@ -327,9 +332,27 @@ CROWDSEC_WHITELIST_IPS=(
     "192.168.1.0/24"      # home LAN
     "192.168.2.0/24"      # site-to-site VPN to other location
     "203.0.113.45"        # uptime monitoring service
-    "198.51.100.22"       # notification gateway
 )
 ```
+
+### Trusted sources (`TRUSTED_SOURCES`)
+
+| Key | Default | What it does |
+|---|---|---|
+| `TRUSTED_SOURCES` | `()` | Addresses or CIDRs that nginx trusts like the LAN. They reach the admin webservices (`REMOTE_ADMIN_PATHS`) and the unknown paths (`UNKNOWN_PATH_MODE="deny"`), and the auth and `/ws/` limits never count them. Loopback and `LAN_SUBNET` are always trusted. |
+| `TRUSTED_SOURCES_ALLOW_WIDE` | `"false"` | `"true"` accepts an entry wider than `/24` (IPv6: `/48`), with a warning. |
+
+**When to set it:** you run Loxone Config, or another admin tool, through the gateway from a second internal network or a site-to-site VPN. Most gateways leave it empty.
+
+**Never list an address someone else can send from:** a cloud, CDN or anycast range, a monitoring or notification service, or a CGNAT address. A trusted source reaches the Miniserver's file-system and system-control commands, and its login attempts are not throttled.
+
+What `deploy.sh` enforces:
+- Every entry must be an IPv4/IPv6 address or CIDR; anything else aborts the deploy.
+- An entry wider than `/24` (IPv6: `/48`) aborts the deploy unless `TRUSTED_SOURCES_ALLOW_WIDE="true"`. A wider range belongs to a provider, not to one administrator.
+- A public entry is accepted with a warning.
+- Trusted does not mean never banned. Add the source to `CROWDSEC_WHITELIST_IPS` as well if it must never be banned.
+
+`test-gateway.sh` checks that nginx's trusted map holds only loopback, `LAN_SUBNET` and `TRUSTED_SOURCES`.
 
 ### Households behind one IP (NAT/CGNAT)
 
@@ -352,6 +375,9 @@ limits stack on top of the gateway's for the same reason.
 
 A whitelisted address is exempt from CrowdSec **and** from progressive-ban
 escalation below — this is the durable fix, not just the reactive unban.
+It is not trusted: behind CGNAT other households send from the same
+address, so it still gets the admin-path `403` and the auth and WebSocket
+limits. Never put a CGNAT address into `TRUSTED_SOURCES`.
 
 ### Progressive Ban Escalation
 
@@ -384,7 +410,7 @@ On 2026-10-18 the vendor Loxone was breached. Crawlers such as Shodan and Censys
 - **Use the host name with `https://`, never the IP.** With `ENABLE_TLS=true`, `:1080` and `:80` answer only `TLS_DOMAIN` plus `EXTRA_SERVER_NAMES`. A request for the bare IP, without SNI, or for a foreign `Host` is a **trap hit**: the connection is closed (444, nothing is sent), logged to `/var/log/nginx/loxprox-trap.log`, and the address is banned on the HARD ladder. Every app, browser and monitoring probe must use the host name. (`http://<host>:1080` for the real name still gets the 301 redirect to `https://`.)
 - **The plain admin webservice paths are answered with `403` from the internet** (`fsget`, `fsdel`, `sys/reboot`, `sps/restart`, ...). See `REMOTE_ADMIN_PATHS` — this is a path filter, not a lock on the Miniserver.
 - **Scanner paths are traps.** `/.env`, `/.git`, `*.php`, `/wp-*`, `/cgi-bin/`, `/vendor/phpunit`, `/HNAP1`, `/boaform`, `/actuator`, and the methods `CONNECT`, `TRACE`, `TRACK`, `PROPFIND` are answered with 444 and a HARD ban on the first hit. No Loxone endpoint matches any of them.
-- **Auth and WebSocket limits.** Loxone authentication endpoints: 3 requests per second per untrusted address (burst 30). `/ws/`: at most 6 concurrent connections per untrusted address. `LAN_SUBNET` and `CROWDSEC_WHITELIST_IPS` are never limited, denied (admin/unknown) or counted.
+- **Auth and WebSocket limits.** Loxone authentication endpoints: 3 requests per second per untrusted address (burst 30). `/ws/`: at most 6 concurrent connections per untrusted address. `LAN_SUBNET` and `TRUSTED_SOURCES` are never limited, denied (admin/unknown) or counted. `CROWDSEC_WHITELIST_IPS` entries are: they are only never banned.
 
 ### `EXTRA_SERVER_NAMES` — more host names for the gate
 
@@ -403,7 +429,7 @@ On 2026-10-18 the vendor Loxone was breached. Crawlers such as Shodan and Censys
 
 **When to change:**
 - Keep `UNKNOWN_PATH_MODE="log"` for a few weeks and read `loxprox-unknown.log`. Switch to `deny` only when it lists no path your family's apps actually use.
-- Set `REMOTE_ADMIN_PATHS="allow"` only if you configure the Miniserver remotely through the gateway (Loxone Config over the internet). Prefer doing that from the LAN, which is exempt anyway.
+- Set `REMOTE_ADMIN_PATHS="allow"` only if you configure the Miniserver remotely through the gateway (Loxone Config over the internet). Prefer doing that from the LAN, which is exempt anyway, or list the one network you administer from in `TRUSTED_SOURCES` instead of opening the paths to everyone.
 
 ### Monitor alerts, updates and GeoIP IPv6
 
@@ -455,9 +481,9 @@ What an exempt source gets:
 - **The 301 for its cleartext probe** (TLS mode): plain HTTP to `:1080` with a foreign `Host` gets the real server's redirect instead of the 444. That is the same 301 it got before the trap existed: to `https://<the Host it sent>:1080<path>`, so the bare IP it asked for. The redirect never names the gateway, so the probe does not learn `TLS_DOMAIN`. If the probe follows the redirect to the bare IP, that lands in the trap again: a 444, not logged. Everything else on the trap servers is still a 444: TLS with a foreign or missing SNI, `:80` with a foreign `Host`, `TRACE`/`CONNECT`, scanner paths.
 - **Everything else unchanged.** The rate limits and auth/WebSocket limits apply. The admin paths answer `403` and `UNKNOWN_PATH_MODE="deny"` answers `404`, exactly as for any internet client.
 
-This is what separates it from `CROWDSEC_WHITELIST_IPS`, which is *trusted*: no limits, no admin/unknown denials. An entry that is trusted, or lies inside a trusted network (loopback, `LAN_SUBNET`, `CROWDSEC_WHITELIST_IPS`), aborts the deploy, and so does an entry that is not an address or CIDR. An entry wider than `/24` (IPv4) or `/48` (IPv6) is warned about.
+This is what separates it from `TRUSTED_SOURCES`, which is *trusted*: no limits, no admin/unknown denials. An entry that is trusted, or lies inside a trusted network (loopback, `LAN_SUBNET`, `TRUSTED_SOURCES`), aborts the deploy. So does an entry that overlaps `CROWDSEC_WHITELIST_IPS` (it is already never banned here; list a source in one never-ban list only), and an entry that is not an address or CIDR. An entry wider than `/24` (IPv4) or `/48` (IPv6) is warned about.
 
-An empty list (the default) removes the whitelist file on the next deploy. That includes a hand-made file at that path: the deploy warns and names the entries it removes. So put the sources into `TRAP_EXEMPT_IPS` *before* you deploy. `test-gateway.sh` checks that every entry is in the whitelist file and the nginx exempt geo, and that none is trusted.
+An empty list (the default) removes the whitelist file on the next deploy. That includes a hand-made file at that path: the deploy warns and names the entries it removes. So put the sources into `TRAP_EXEMPT_IPS` *before* you deploy. `test-gateway.sh` checks that every entry is in the whitelist file and the nginx exempt geo, that none is trusted, and that none overlaps `CROWDSEC_WHITELIST_IPS`.
 
 ### `SSH_ALLOW_USERS` and HARD-mode root login
 

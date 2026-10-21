@@ -1219,17 +1219,20 @@ _nginx_geo_nets() {    # VAR FILE → the networks of `geo $VAR { … }`
 
 # Exempt must never mean trusted. Echoes one line per problem: an entry the
 # loxprox/trap-exempt whitelist or the nginx geo $loxprox_trap_exempt lacks,
-# or one that is (or lies inside) a trusted network — the nginx geo
-# $loxprox_lan or CrowdSec's trusted whitelist. Nothing when all is well.
-#   _trap_exempt_problems "ENTRIES" EXEMPT_WHITELIST NGINX_SITE TRUSTED_WHITELIST
+# one that is (or lies inside) a trusted network — the nginx geo
+# $loxprox_lan: loopback, LAN_SUBNET, TRUSTED_SOURCES — or one that overlaps
+# the never-ban whitelist CROWDSEC_WHITELIST_IPS (deploy.sh refuses both).
+# Nothing when all is well.
+#   _trap_exempt_problems "ENTRIES" EXEMPT_WHITELIST NGINX_SITE NEVER_BAN_WHITELIST
 _trap_exempt_problems() {
     local wl="$2" site="$3" e t in_wl in_geo
-    local -a entries=() trusted=()
+    local -a entries=() trusted=() never_ban=()
     read -r -a entries <<<"$1"
     (( ${#entries[@]} )) || return 0
     in_wl=$(_yaml_list_items "$wl")
     in_geo=$(_nginx_geo_nets loxprox_trap_exempt "$site")
-    mapfile -t trusted < <(_nginx_geo_nets loxprox_lan "$site"; _yaml_list_items "$4")
+    mapfile -t trusted < <(_nginx_geo_nets loxprox_lan "$site")
+    mapfile -t never_ban < <(_yaml_list_items "$4")
     if [[ ! -f "$wl" ]]; then
         echo "$wl is missing"
     elif ! grep -qx 'name: loxprox/trap-exempt' "$wl"; then
@@ -1239,26 +1242,68 @@ _trap_exempt_problems() {
         grep -qxF -- "$e" <<<"$in_wl" || echo "$e: not in $wl"
         grep -qxF -- "$e" <<<"$in_geo" || echo "$e: not in the nginx geo \$loxprox_trap_exempt ($site)"
         if ! command -v python3 >/dev/null 2>&1; then
-            for t in "${trusted[@]}"; do [[ "$e" == "$t" ]] && echo "$e: TRUSTED ($t in \$loxprox_lan / $4)"; done
+            for t in "${trusted[@]}"; do [[ "$e" == "$t" ]] && echo "$e: TRUSTED ($t in \$loxprox_lan)"; done
+            for t in "${never_ban[@]}"; do [[ "$e" == "$t" ]] && echo "$e: also never-banned by CROWDSEC_WHITELIST_IPS ($t); list a source in one never-ban list only"; done
         fi
     done
     command -v python3 >/dev/null 2>&1 || return 0
-    python3 -I - "${#entries[@]}" "${entries[@]}" "${trusted[@]}" <<'PY'
+    python3 -I - "${#entries[@]}" "${entries[@]}" "${#trusted[@]}" "${trusted[@]}" "${never_ban[@]}" <<'PY'
 import ipaddress, sys
-n = int(sys.argv[1])
+a = sys.argv[1:]
+n = int(a[0])
+entries, m = a[1:1 + n], int(a[1 + n])
+trusted, never_ban = a[2 + n:2 + n + m], a[2 + n + m:]
 def net(v):
     try:
         return ipaddress.ip_network(v, strict=False)
     except ValueError:
         return None
-trusted = [(t, net(t)) for t in sys.argv[2 + n:]]
-for e in sys.argv[2:2 + n]:
+def hit(e, lst):
     en = net(e)
-    for t, tn in trusted:
+    for t in lst:
+        tn = net(t)
         if t == e or (en and tn and en.version == tn.version and en.overlaps(tn)):
-            print(f"{e}: TRUSTED (overlaps {t} — nginx $loxprox_lan or CrowdSec's trusted whitelist)")
-            break
+            return t
+for e in entries:
+    t = hit(e, trusted)
+    if t:
+        print(f"{e}: TRUSTED (overlaps {t} — nginx $loxprox_lan: loopback, LAN_SUBNET, TRUSTED_SOURCES)")
+        continue
+    t = hit(e, never_ban)
+    if t:
+        print(f"{e}: also never-banned by CROWDSEC_WHITELIST_IPS (overlaps {t}); list a source in one never-ban list only")
 PY
+}
+
+# 2026-10-21: deploy.conf's TRUSTED_SOURCES, space-separated — config.env's
+# copy, else the array from deploy.conf (the generic _gw_conf would return
+# only an array's first element).
+_gw_trusted_sources() {
+    if [[ -f /etc/loxprox/config.env ]] && grep -q '^TRUSTED_SOURCES=' /etc/loxprox/config.env; then
+        awk -F'"' 'index($0, "TRUSTED_SOURCES=") == 1 {print $2; exit}' /etc/loxprox/config.env
+    elif [[ -f /etc/loxprox/deploy.conf ]]; then
+        (set +u; source /etc/loxprox/deploy.conf >/dev/null 2>&1; printf '%s ' "${TRUSTED_SOURCES[@]}")
+    fi
+}
+
+# The entries of site $1's geo $loxprox_lan other than loopback, $2
+# (LAN_SUBNET) and the remaining arguments (TRUSTED_SOURCES), one per line;
+# "NO-GEO" when the site has no such block. nginx trusts every entry there
+# (admin and unknown paths, no auth / WebSocket limits), so the CrowdSec
+# whitelist — ban exemption only — must never show up in it.
+_trusted_geo_extra() {
+    local site="$1" geo net t
+    shift
+    local -a allowed=(127.0.0.0/8 ::1 "$@")
+    grep -q '^geo \$loxprox_lan {' "$site" 2>/dev/null || { echo NO-GEO; return 0; }
+    geo=$(awk '/^geo \$loxprox_lan \{/ {on = 1; next} on && /^\}/ {exit} on && $1 != "default" {print $1}' "$site")
+    while read -r net; do
+        [[ -n "$net" ]] || continue
+        for t in "${allowed[@]}"; do
+            [[ "$net" == "$t" ]] && continue 2
+        done
+        printf '%s\n' "$net"
+    done <<<"$geo"
 }
 
 test_edge() {
@@ -1279,6 +1324,19 @@ test_edge() {
         if [[ "$(_gw_conf REMOTE_ADMIN_PATHS)" != "allow" ]]; then
             grep -qE '"0:admin"[[:space:]]+403;' "$site" && pass "admin endpoints answer 403 to untrusted sources" \
                 || fail "REMOTE_ADMIN_PATHS=deny but the site has no admin denial"
+        fi
+        # 2026-10-21: nginx trusts loopback, LAN_SUBNET and TRUSTED_SOURCES,
+        # nothing else — CROWDSEC_WHITELIST_IPS is ban exemption, not trust.
+        local -a trusted_cfg=()
+        local extra
+        read -r -a trusted_cfg <<<"$(_gw_trusted_sources)"
+        extra=$(_trusted_geo_extra "$site" "$(_gw_conf LAN_SUBNET)" "${trusted_cfg[@]}")
+        if [[ "$extra" == "NO-GEO" ]]; then
+            fail "site has no geo \$loxprox_lan (template < v6? re-run deploy.sh)"
+        elif [[ -n "$extra" ]]; then
+            fail "nginx trusts sources outside loopback, LAN_SUBNET and TRUSTED_SOURCES: $(tr '\n' ' ' <<<"$extra")(re-run deploy.sh; CROWDSEC_WHITELIST_IPS no longer grants trust)"
+        else
+            pass "nginx trusts only loopback, LAN_SUBNET and TRUSTED_SOURCES (${#trusted_cfg[@]} TRUSTED_SOURCES entries)"
         fi
     fi
 

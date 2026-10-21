@@ -39,7 +39,7 @@ first.
 - **The plain admin webservice paths are now answered with `403` from the
   internet.** That covers the file-system and system-control commands
   (`fsget`, `fsdel`, `sys/reboot`, `sps/restart`, the `cfg` setters and so
-  on); the LAN and `CROWDSEC_WHITELIST_IPS` are exempt. No LoxProx scenario
+  on); the LAN and `TRUSTED_SOURCES` are exempt. No LoxProx scenario
   bans on a 403, but repeated 403s/404s still count toward the stock
   `crowdsecurity/http-probing` scenario, which can lead to a SOFT ban. This
   filters plain HTTP paths only: the same commands can still reach the
@@ -61,6 +61,16 @@ first.
 - **Bans are much longer.** The first offence of an unambiguous scanner
   scenario now costs 7 days (was 4 hours), repeat offences 90 and then 365
   days. See Security.
+- **`CROWDSEC_WHITELIST_IPS` no longer makes a source trusted.** Until now
+  every whitelist entry was also put into nginx's trusted map: it reached
+  the admin paths, its unknown paths were never denied, and the auth and
+  WebSocket limits never counted it. But the whitelist is where "never ban"
+  addresses go, such as a household WAN IP behind CGNAT or a monitoring
+  service, and everyone else sending from such an address was trusted as
+  well. The whitelist now only stops bans. nginx trusts loopback,
+  `LAN_SUBNET` and the new `TRUSTED_SOURCES` (default empty). If a
+  whitelisted network really needs the admin paths, add it to
+  `TRUSTED_SOURCES` before you deploy (see Upgrade notes).
 
 ### Security
 
@@ -81,8 +91,21 @@ first.
     learning phase) or answered with a local 404 (`"deny"`).
 - **Limits.** Loxone authentication endpoints are limited to 3 requests per
   second per untrusted address (burst 30), and `/ws/` to 6 concurrent
-  connections per untrusted address. The LAN and `CROWDSEC_WHITELIST_IPS`
-  are never counted.
+  connections per untrusted address. The LAN and `TRUSTED_SOURCES` are
+  never counted.
+- **Ban exemption and nginx trust are separate keys.**
+  - `CROWDSEC_WHITELIST_IPS` feeds the CrowdSec whitelist only. Each
+    deploy names the entries that are never banned but not trusted.
+  - `TRUSTED_SOURCES` (new, default empty) is, besides loopback and
+    `LAN_SUBNET`, the only input of `geo $loxprox_lan`. `deploy.sh`
+    refuses an entry that is not an address or CIDR, or one wider than
+    `/24` (IPv6: `/48`) unless `TRUSTED_SOURCES_ALLOW_WIDE="true"`, and
+    warns about every public entry. A trusted source is not automatically
+    never banned.
+  - `test-gateway.sh` fails when the trusted map holds anything besides
+    loopback, `LAN_SUBNET` and `TRUSTED_SOURCES`.
+  - The panel's "Never ban" list still edits only the whitelist.
+    `TRUSTED_SOURCES` is set in `deploy.conf` over SSH, like `LAN_SUBNET`.
 - **Two ban ladders and a year of memory.**
   - HARD, for scenarios matching `BAN_HARD_SCENARIOS`: `168h 2160h 8760h`
     (7 days, 90 days, 365 days).
@@ -223,7 +246,9 @@ first.
     (`/etc/crowdsec/parsers/s02-enrich/whitelist-loxprox-trap-exempt.yaml`),
     and removes it when the list is empty.
   The rate limits and the admin/unknown denials still apply. An entry that
-  is trusted, or lies inside a trusted network, aborts the deploy.
+  is trusted, or lies inside a trusted network (loopback, `LAN_SUBNET`,
+  `TRUSTED_SOURCES`), aborts the deploy, and so does one that overlaps
+  `CROWDSEC_WHITELIST_IPS`.
   `test-gateway.sh` checks each entry against the whitelist file, the nginx
   geo and the trusted lists. Default empty. The nginx site is regenerated
   (template version 8).
@@ -290,6 +315,18 @@ Upgrade in place with `sudo bash deploy.sh` over SSH.
   name.** A client still on the IP is banned on its first request after the
   deploy (7 days). If one does get banned: `sudo cscli decisions delete --ip <IP>`, then
   re-add the connection with `https://<your-domain>:1080`.
+- **Whitelist entries lose nginx trust.** Every `CROWDSEC_WHITELIST_IPS`
+  entry outside `LAN_SUBNET` is still never banned, but from now on gets
+  the admin-path 403, the auth and WebSocket limits and, with
+  `UNKNOWN_PATH_MODE="deny"`, the 404 for unknown paths. The deploy names
+  these entries ("Never banned, not trusted by nginx"). Only if one of them
+  is a network you administer the Miniserver from (Loxone Config through
+  the gateway), add it to `TRUSTED_SOURCES` in `deploy.conf` *before* you
+  deploy. Never add a shared address there (cloud, CDN, anycast, CGNAT, a
+  monitoring or notification service). An existing `deploy.conf` deploys
+  unchanged; the nginx site is regenerated once. Afterwards
+  `sudo bash test-gateway.sh` must report "nginx trusts only loopback,
+  LAN_SUBNET and TRUSTED_SOURCES".
 - **Root SSH:** put your key on a sudo user first, otherwise HARD mode keeps
   `prohibit-password` and warns.
 - **Network watchdog.** In TLS mode the deploy disables the network watchdog

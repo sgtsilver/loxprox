@@ -81,6 +81,11 @@ CLIENT_HEADER_TIMEOUT="${CLIENT_HEADER_TIMEOUT-10}"
 ENABLE_APPSEC="${ENABLE_APPSEC-true}"
 APPSEC_MODE="${APPSEC_MODE-enforce}"
 declare -p CROWDSEC_WHITELIST_IPS &>/dev/null || CROWDSEC_WHITELIST_IPS=()
+# 2026-10-21: the sources besides loopback and LAN_SUBNET that nginx trusts
+# (admin / unknown paths, no auth / WebSocket limits). CROWDSEC_WHITELIST_IPS
+# is ban exemption only and never grants that trust.
+declare -p TRUSTED_SOURCES &>/dev/null || TRUSTED_SOURCES=()
+TRUSTED_SOURCES_ALLOW_WIDE="${TRUSTED_SOURCES_ALLOW_WIDE-false}"
 DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL-}"
 ALERT_EMAIL="${ALERT_EMAIL-}"
 AUTOREBOOT_TIME="${AUTOREBOOT_TIME-03:00}"
@@ -485,6 +490,78 @@ _loxprox_is_addr_or_cidr() {
     [[ "$1" =~ $v4 || "$1" =~ $v6 ]]
 }
 
+# 0 when the IPv4 address / CIDR $1 lies wholly inside the IPv4 CIDR $2.
+# Octets are read as decimal (10#): a leading zero is not octal here.
+_loxprox_v4_within() {
+    local a b c d n o p=32 q=32
+    [[ "$1" == */* ]] && p="${1##*/}"
+    [[ "$2" == */* ]] && q="${2##*/}"
+    IFS=. read -r a b c d <<<"${1%%/*}"
+    n=$(( (10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d ))
+    IFS=. read -r a b c d <<<"${2%%/*}"
+    o=$(( (10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d ))
+    (( p >= q && (q == 0 || (n >> (32 - q)) == (o >> (32 - q))) ))
+}
+
+# 0 when the address / CIDR $1 lies wholly inside loopback, link-local or a
+# private range (RFC 1918, RFC 4193). Everything else counts as public —
+# CGNAT (100.64.0.0/10) too: an ISP shares it between its customers.
+_loxprox_is_private_net() {
+    local addr="${1%%/*}" pfx="" r first
+    [[ "$1" == */* ]] && pfx="${1##*/}"
+    if [[ "$addr" == *:* ]]; then
+        pfx="${pfx:-128}"
+        [[ "${addr,,}" == "::1" && "$pfx" == "128" ]] && return 0
+        first="${addr%%:*}"
+        [[ "$first" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+        (( (16#$first & 0xfe00) == 0xfc00 && pfx >= 7 )) && return 0
+        (( (16#$first & 0xffc0) == 0xfe80 && pfx >= 10 )) && return 0
+        return 1
+    fi
+    for r in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 169.254.0.0/16; do
+        _loxprox_v4_within "$1" "$r" && return 0
+    done
+    return 1
+}
+
+# 2026-10-21: TRUSTED_SOURCES is the only way besides LAN_SUBNET into nginx's
+# trusted map: such a source reaches the Miniserver's admin webservices and
+# the unknown paths, and the auth / WebSocket limits never count it. So an
+# entry must be an address or CIDR, and no wider than a household segment
+# (IPv4 /24, IPv6 /48) unless TRUSTED_SOURCES_ALLOW_WIDE="true". A wider
+# range is a provider's block (cloud, CDN, anycast, CGNAT), not one
+# administrator's. A public entry is accepted with a warning: only the
+# operator knows whether nobody else can send from it.
+_loxprox_validate_trusted_sources() {
+    local fail=0 e min norm
+    norm=$(_loxprox_normalize_bool "$TRUSTED_SOURCES_ALLOW_WIDE")
+    if [[ -z "$norm" ]]; then
+        error "Invalid TRUSTED_SOURCES_ALLOW_WIDE value: '$TRUSTED_SOURCES_ALLOW_WIDE' (expected true/false)."
+        return 1
+    fi
+    TRUSTED_SOURCES_ALLOW_WIDE="$norm"
+    for e in "${TRUSTED_SOURCES[@]}"; do
+        if ! _loxprox_is_addr_or_cidr "$e"; then
+            error "TRUSTED_SOURCES entry '$e' is not an IPv4/IPv6 address or CIDR."
+            fail=1
+            continue
+        fi
+        min=24; [[ "$e" == *:* ]] && min=48
+        if [[ "$e" =~ /([0-9]+)$ ]] && (( BASH_REMATCH[1] < min )); then
+            if [[ "$TRUSTED_SOURCES_ALLOW_WIDE" != "true" ]]; then
+                error "TRUSTED_SOURCES entry '$e' is wider than /$min: every address in it would reach the Miniserver's admin webservices, with no auth limit. Narrow it, or set TRUSTED_SOURCES_ALLOW_WIDE=\"true\" if you really own the whole range."
+                fail=1
+                continue
+            fi
+            warn "TRUSTED_SOURCES entry '$e' is wider than /$min (TRUSTED_SOURCES_ALLOW_WIDE=\"true\"): nginx trusts every address in it."
+        fi
+        if ! _loxprox_is_private_net "$e"; then
+            warn "TRUSTED_SOURCES entry '$e' is a public address: nginx trusts it (admin and unknown paths, no auth / WebSocket limits). List only an address you control and nobody else can send from — never a cloud, CDN, anycast, CGNAT or monitoring-service address. For \"never ban\" alone use CROWDSEC_WHITELIST_IPS."
+        fi
+    done
+    return "$fail"
+}
+
 # 2026-10 breach hardening: the new keys fail loudly on a typo instead of
 # silently selecting the other behaviour. Modes are normalised in place.
 _loxprox_validate_hardening_config() {
@@ -552,22 +629,31 @@ _loxprox_validate_hardening_config() {
         error "GEOIP_URL_BASE6 must be an https:// URL without quotes or spaces."
         fail=1
     fi
+    _loxprox_validate_trusted_sources || fail=1
     _loxprox_validate_trap_exempt || fail=1
     return "$fail"
 }
 
 # 2026-10-21: TRAP_EXEMPT_IPS — addresses / CIDRs only, and never a trusted
-# source: an exempt address keeps every limit and denial, a trusted one has
-# none, so an entry in both keys (or inside a trusted network) is refused.
-# python3, where present, checks the values exactly (no host bits, overlaps).
+# source: an exempt address keeps every limit and denial, a trusted one —
+# loopback, LAN_SUBNET, TRUSTED_SOURCES — has none, so an entry that is or
+# lies inside a trusted network is refused. One that overlaps
+# CROWDSEC_WHITELIST_IPS is refused as well (the stricter of the two rules,
+# kept from before the trust split): loxprox/trap-exempt already never bans
+# it, and one never-ban list per source keeps each exemption's reason in
+# one place. python3, where present, checks the values exactly (no host
+# bits, overlaps).
 _loxprox_validate_trap_exempt() {
     local fail=0 e t out min
     for e in "${TRAP_EXEMPT_IPS[@]}"; do
         if ! _loxprox_is_addr_or_cidr "$e"; then
             error "TRAP_EXEMPT_IPS entry '$e' is not an IPv4/IPv6 address or CIDR."; fail=1; continue
         fi
-        for t in 127.0.0.0/8 ::1 "$LAN_SUBNET" "${CROWDSEC_WHITELIST_IPS[@]}"; do
+        for t in 127.0.0.0/8 ::1 "$LAN_SUBNET" "${TRUSTED_SOURCES[@]}"; do
             [[ "$e" == "$t" ]] && { error "TRAP_EXEMPT_IPS entry '$e' is trusted ($t) — exempt sources must not be trusted."; fail=1; }
+        done
+        for t in "${CROWDSEC_WHITELIST_IPS[@]}"; do
+            [[ "$e" == "$t" ]] && { error "TRAP_EXEMPT_IPS entry '$e' is also in CROWDSEC_WHITELIST_IPS — list a source in one never-ban list only."; fail=1; }
         done
         min=24; [[ "$e" == *:* ]] && min=48
         if [[ "$e" =~ /([0-9]+)$ ]] && (( BASH_REMATCH[1] < min )); then
@@ -577,25 +663,36 @@ _loxprox_validate_trap_exempt() {
     if (( fail || ${#TRAP_EXEMPT_IPS[@]} == 0 )) || ! command -v python3 >/dev/null 2>&1; then
         return "$fail"
     fi
-    out=$(python3 -I - "${#TRAP_EXEMPT_IPS[@]}" "${TRAP_EXEMPT_IPS[@]}" 127.0.0.0/8 ::1 "$LAN_SUBNET" "${CROWDSEC_WHITELIST_IPS[@]}" <<'PY'
+    local -a trusted=(127.0.0.0/8 ::1 "$LAN_SUBNET" "${TRUSTED_SOURCES[@]}")
+    out=$(python3 -I - "${#TRAP_EXEMPT_IPS[@]}" "${TRAP_EXEMPT_IPS[@]}" "${#trusted[@]}" "${trusted[@]}" "${CROWDSEC_WHITELIST_IPS[@]}" <<'PY'
 import ipaddress, sys
-n = int(sys.argv[1])
-trusted = []
-for t in sys.argv[2 + n:]:
-    try:
-        trusted.append((t, ipaddress.ip_network(t, strict=False)))
-    except ValueError:
-        pass
-for e in sys.argv[2:2 + n]:
+a = sys.argv[1:]
+n = int(a[0])
+exempt, m = a[1:1 + n], int(a[1 + n])
+def nets(values):
+    out = []
+    for t in values:
+        try:
+            out.append((t, ipaddress.ip_network(t, strict=False)))
+        except ValueError:
+            pass
+    return out
+trusted, never_ban = nets(a[2 + n:2 + n + m]), nets(a[2 + n + m:])
+def hit(net, lst):
+    return next((t for t, tnet in lst if tnet.version == net.version and tnet.overlaps(net)), None)
+for e in exempt:
     try:
         net = ipaddress.ip_network(e)
     except ValueError as exc:
         print(f"TRAP_EXEMPT_IPS entry '{e}' is not a valid address or network ({exc}).")
         continue
-    for t, tnet in trusted:
-        if tnet.version == net.version and tnet.overlaps(net):
-            print(f"TRAP_EXEMPT_IPS entry '{e}' overlaps the trusted network {t} — exempt sources must not be trusted.")
-            break
+    t = hit(net, trusted)
+    if t:
+        print(f"TRAP_EXEMPT_IPS entry '{e}' overlaps the trusted network {t} — exempt sources must not be trusted.")
+        continue
+    t = hit(net, never_ban)
+    if t:
+        print(f"TRAP_EXEMPT_IPS entry '{e}' overlaps the CROWDSEC_WHITELIST_IPS entry {t} — list a source in one never-ban list only.")
 PY
 )
     [[ -z "$out" ]] && return 0
@@ -687,6 +784,7 @@ _loxprox_detect_live_install() {
 #   ENABLE_TLS / TLS_*     — TLS marker in the nginx site, acme.sh state
 #   ENABLE_TUNNEL/TUNNEL_* — frpc unit + /etc/frp/frpc.toml
 #   ENABLE_GUI / GUI_PORT  — panel unit + /etc/loxprox/config.env
+#   TRUSTED_SOURCES        — an existing deploy.conf only (never the live geo)
 #
 # v2.3 (H1): the TLS, tunnel and panel keys used to be omitted entirely, so the
 # first `deploy.sh` after a bootstrap reverted the TLS site (cleartext on a
@@ -853,6 +951,20 @@ _loxprox_extract_config_from_live_state() {
     : "${gui_port:=1081}"
     gui_password=$(_loxprox_conf_value GUI_PASSWORD)
 
+    # 2026-10-21: nginx trust is operator intent only. It comes from an
+    # existing deploy.conf and is never read back from the live geo, which on
+    # an older install still lists the CrowdSec whitelist. Absent = none.
+    local -a trusted_lines=()
+    local tr_line allow_wide
+    if [[ -f "$LOXPROX_DEPLOY_CONF" ]]; then
+        # shellcheck disable=SC1090
+        while IFS= read -r tr_line; do
+            _loxprox_is_addr_or_cidr "$tr_line" && trusted_lines+=("$tr_line")
+        done < <(set +u; unset TRUSTED_SOURCES; source "$LOXPROX_DEPLOY_CONF" >/dev/null 2>&1
+                 printf '%s\n' "${TRUSTED_SOURCES[@]}")
+    fi
+    allow_wide=$(_loxprox_conf_value TRUSTED_SOURCES_ALLOW_WIDE); : "${allow_wide:=false}"
+
     # Alerting values live in config.env once deploy.sh has run at least once.
     local alert_email
     alert_email=$(_loxprox_conf_value ALERT_EMAIL)
@@ -960,6 +1072,12 @@ _loxprox_extract_config_from_live_state() {
         echo "ENABLE_GUI=\"$enable_gui\""
         echo "GUI_PORT=\"$gui_port\""
         echo "GUI_PASSWORD=\"$gui_password\""
+        echo
+        echo "# Trusted by nginx besides loopback and LAN_SUBNET (deploy.conf.example)."
+        printf 'TRUSTED_SOURCES=('
+        (( ${#trusted_lines[@]} )) && printf ' "%s"' "${trusted_lines[@]}"
+        printf ' )\n'
+        echo "TRUSTED_SOURCES_ALLOW_WIDE=\"$allow_wide\""
     } > "$out"
     return 0
 }
@@ -1598,7 +1716,7 @@ _loxprox_site_params_fingerprint() {
         "$PROXY_CONNECT_TIMEOUT" "$PROXY_SEND_TIMEOUT" "$PROXY_READ_TIMEOUT" \
         "$CLIENT_BODY_TIMEOUT" "$CLIENT_HEADER_TIMEOUT" \
         "$ENABLE_APPSEC" "$NGINX_APPSEC_INCLUDE" \
-        "$LAN_SUBNET" "${CROWDSEC_WHITELIST_IPS[*]}" "${TRAP_EXEMPT_IPS[*]}" \
+        "$LAN_SUBNET" "${TRUSTED_SOURCES[*]}" "${TRAP_EXEMPT_IPS[*]}" \
         "$UNKNOWN_PATH_MODE" "$REMOTE_ADMIN_PATHS" \
         "$(_loxprox_tls_server_names)" "$(_loxprox_server_tokens_line)" "$(_loxprox_variables_hash_line)" \
         | sha256sum 2>/dev/null | cut -c1-16) || digest=""
@@ -1650,10 +1768,11 @@ _loxprox_variables_hash_line() { _loxprox_http_directive_line variables_hash_max
 # geo lines for the sources the per-endpoint limits and the admin / unknown
 # denials never apply to: loopback (local probes; tunnelled requests carry the
 # real client address after real-IP restoration), LAN_SUBNET and
-# CROWDSEC_WHITELIST_IPS. Deduplicated; a malformed entry is skipped (with a
+# TRUSTED_SOURCES — never CROWDSEC_WHITELIST_IPS (2026-10-21: ban exemption
+# is not trust). Deduplicated; a malformed entry is skipped (with a
 # warning on stderr — stdout is the config) instead of failing `nginx -t`.
 _loxprox_trusted_geo_entries() {
-    _loxprox_geo_entries "nginx's trusted networks" 127.0.0.0/8 ::1 "$LAN_SUBNET" "${CROWDSEC_WHITELIST_IPS[@]}"
+    _loxprox_geo_entries "nginx's trusted networks" 127.0.0.0/8 ::1 "$LAN_SUBNET" "${TRUSTED_SOURCES[@]}"
 }
 
 #   _loxprox_geo_entries WHAT NET… → "    NET 1;" geo lines (see above).
@@ -1680,6 +1799,24 @@ _loxprox_geo_entries() {
         seen+=("$net")
         printf '    %-24s 1;\n' "$net"
     done
+}
+
+# CROWDSEC_WHITELIST_IPS entries nginx does not trust — outside loopback,
+# LAN_SUBNET and TRUSTED_SOURCES (IPv4 by containment, IPv6 by equal text) —
+# space-separated. configure_crowdsec names them on every deploy.
+_loxprox_whitelist_untrusted_entries() {
+    local w t out=""
+    for w in "${CROWDSEC_WHITELIST_IPS[@]}"; do
+        _loxprox_is_addr_or_cidr "$w" || continue
+        for t in 127.0.0.0/8 ::1 "$LAN_SUBNET" "${TRUSTED_SOURCES[@]}"; do
+            [[ "$w" == "$t" ]] && continue 2
+            if [[ "$w" != *:* && "$t" != *:* ]] && _loxprox_is_addr_or_cidr "$t" && _loxprox_v4_within "$w" "$t"; then
+                continue 2
+            fi
+        done
+        out+="${out:+ }$w"
+    done
+    printf '%s' "$out"
 }
 
 _loxprox_write_appsec_passthrough_include() {
@@ -1907,9 +2044,10 @@ log_format loxprox_trap_hosts '\$time_iso8601 \$remote_addr host="\$host" sni="\
                               '"\$request_method \$loxone_log_uri" \$status "\$http_user_agent"';
 
 # ── 2026-10 breach hardening: path classes and per-endpoint limits ──────────
-# Trusted sources: loopback, LAN_SUBNET, CROWDSEC_WHITELIST_IPS. They are never
+# Trusted sources: loopback, LAN_SUBNET, TRUSTED_SOURCES. They are never
 # counted by the auth / WebSocket limits below and never get the admin /
-# unknown denials. The trap applies to everyone.
+# unknown denials. CROWDSEC_WHITELIST_IPS is not trusted (never banned only).
+# The trap applies to everyone.
 geo \$loxprox_lan {
     default                  0;
 ${trusted_geo}
@@ -3730,12 +3868,20 @@ EOF
             fi
         fi
     done
+    # 2026-10-21: the whitelist no longer feeds nginx's trusted map. Name the
+    # entries that are never banned but not trusted, so an upgrade shows what
+    # lost the admin paths and the limit exemption.
+    local _untrusted
+    _untrusted=$(_loxprox_whitelist_untrusted_entries)
+    if [[ -n "$_untrusted" ]]; then
+        info "Never banned, not trusted by nginx (admin paths 403, auth / WebSocket limits apply): $_untrusted. Only LAN_SUBNET and TRUSTED_SOURCES are trusted."
+    fi
 
     {
         echo "name: whitelist-loxone"
-        echo "description: \"Trusted networks — never blocked\""
+        echo "description: \"LoxProx: sources never banned (CROWDSEC_WHITELIST_IPS; not trusted by nginx)\""
         echo "whitelist:"
-        echo "  reason: \"Trusted network\""
+        echo "  reason: \"Never-ban source (CROWDSEC_WHITELIST_IPS)\""
         echo "  ip:"
         for ip in "${CROWDSEC_WHITELIST_IPS[@]}"; do
             [[ "$ip" =~ / ]] || echo "    - \"$ip\""
@@ -5310,6 +5456,10 @@ LOXONE_IP="$LOXONE_IP"
 LOXONE_PORT="$LOXONE_PORT"
 GATEWAY_IP="$GATEWAY_IP"
 LAN_SUBNET="$LAN_SUBNET"
+# 2026-10-21 — deploy.conf's TRUSTED_SOURCES array, space-separated: with
+# loopback and LAN_SUBNET the only sources nginx trusts (test-gateway.sh
+# checks the live geo against exactly these).
+TRUSTED_SOURCES="${TRUSTED_SOURCES[*]}"
 DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 ALERT_EMAIL="$ALERT_EMAIL"
 APPSEC_MODE="$APPSEC_MODE"

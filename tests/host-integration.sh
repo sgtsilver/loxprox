@@ -828,7 +828,9 @@ EDGE_CTR=loxprox-ci-edge
 # of a Miniserver stand-in. LAN_SUBNET is 192.168.1.0/24, so requests to the
 # container's own eth0 address are "internet" (untrusted), loopback trusted.
 # 198.51.100.7 (added to lo by t_nginx_edge) is untrusted too, but in
-# TRAP_EXEMPT_IPS.
+# TRAP_EXEMPT_IPS. 2026-10-21: two more sources live on lo: 198.51.100.10
+# is only in CROWDSEC_WHITELIST_IPS (never banned, not trusted),
+# 203.0.113.10 only in TRUSTED_SOURCES (trusted).
 t_nginx_edge_setup() {
     local mode="${1:-tls}"
     systemctl() { true; }
@@ -836,7 +838,9 @@ t_nginx_edge_setup() {
     LOXONE_IP=127.0.0.1 LOXONE_PORT=8081 ENABLE_APPSEC=false TLS_DOMAIN=loxprox.test \
         EXTRA_SERVER_NAMES=alt.loxprox.test LAN_SUBNET=192.168.1.0/24 REMOTE_ADMIN_PATHS=deny UNKNOWN_PATH_MODE=log
     # shellcheck disable=SC2034
-    CROWDSEC_WHITELIST_IPS=("192.168.1.0/24")
+    CROWDSEC_WHITELIST_IPS=("192.168.1.0/24" "198.51.100.10")
+    # shellcheck disable=SC2034
+    TRUSTED_SOURCES=("203.0.113.10")
     # shellcheck disable=SC2034
     TRAP_EXEMPT_IPS=("198.51.100.7" "2001:db8:5::/48")
     [[ "$mode" == "tls-deny" ]] && UNKNOWN_PATH_MODE=deny
@@ -880,12 +884,15 @@ t_nginx_edge() {
     section "nginx-extras (Debian 12) — Host/SNI gate, path classes, limits, scrub, server_tokens (2026-10)"
     command -v docker >/dev/null || { fail "docker missing"; return; }
     local trap=/var/log/nginx/loxprox-trap.log unknown=/var/log/nginx/loxprox-unknown.log access=/var/log/nginx/loxone-access.log
-    local ip code before after hdrs p n
+    local ip code before after hdrs p n last
     docker rm -f "$EDGE_CTR" >/dev/null 2>&1
-    # NET_ADMIN: a second untrusted source address (TRAP_EXEMPT_IPS) on lo.
+    # NET_ADMIN: more source addresses on the container's own lo (its
+    # network namespace only): TRAP_EXEMPT_IPS, whitelist-only, TRUSTED_SOURCES.
     docker run -d --name "$EDGE_CTR" --cap-add NET_ADMIN -e CI=true -v "$REPO:/workspace:ro" -w /workspace debian:12 sleep infinity >/dev/null
     docker exec "$EDGE_CTR" sh -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx-extras curl procps openssl iproute2 >/dev/null 2>&1' \
         || { fail "could not install nginx-extras in the container"; docker rm -f "$EDGE_CTR" >/dev/null 2>&1; return; }
+    docker exec "$EDGE_CTR" sh -c 'ip addr add 198.51.100.10/32 dev lo && ip addr add 203.0.113.10/32 dev lo' \
+        || { fail "could not add the test source addresses to lo"; docker rm -f "$EDGE_CTR" >/dev/null 2>&1; return; }
     docker exec "$EDGE_CTR" sh -c 'nginx -s quit 2>/dev/null; sleep 1; pkill -x nginx; true'
     if docker exec "$EDGE_CTR" bash /workspace/tests/host-integration.sh nginx-edge-setup tls; then
         pass "nginx -t accepts the v8 site with the TLS block, both trap servers and the exempt geo"
@@ -990,6 +997,25 @@ t_nginx_edge() {
     [[ "$code" == "403" ]] && pass "admin path from the internet: 403" || fail "admin from untrusted: HTTP $code"
     code=$(edge_code "${R[@]}" https://loxprox.test:1080/dev/fsget/log/def.log)
     [[ "$code" == "200" ]] && pass "admin path from a trusted source: proxied" || fail "admin from loopback: HTTP $code"
+    # 2026-10-21: ban exemption is not trust. The access log line proves the
+    # source nginx saw.
+    local W=(--resolve loxprox.test:1080:198.51.100.10) T=(--resolve loxprox.test:1080:203.0.113.10) geo
+    geo=$(docker exec "$EDGE_CTR" awk '/^geo \$loxprox_lan \{/ {on = 1; next} on && /^\}/ {exit} on' "$NGINX_SITE")
+    grep -qE '^[[:space:]]+203\.0\.113\.10[[:space:]]+1;' <<<"$geo" && ! grep -q '198\.51\.100\.10' <<<"$geo" \
+        && pass "geo \$loxprox_lan: TRUSTED_SOURCES 203.0.113.10 in, whitelist-only 198.51.100.10 out" \
+        || fail "trusted geo: $(tr '\n' ' ' <<<"$geo")"
+    code=$(edge_code "${W[@]}" https://loxprox.test:1080/dev/fsget/log/def.log)
+    sleep 1
+    last=$(docker exec "$EDGE_CTR" tail -n 1 "$access")
+    [[ "$code" == "403" && "$last" == "198.51.100.10 "*'"GET /dev/fsget/log/def.log HTTP/1.1" 403 '* ]] \
+        && pass "admin path from a CROWDSEC_WHITELIST_IPS-only source (198.51.100.10): 403" \
+        || fail "admin from the whitelist-only source: HTTP $code, log: $last"
+    code=$(edge_code "${T[@]}" https://loxprox.test:1080/dev/fsget/log/def.log)
+    sleep 1
+    last=$(docker exec "$EDGE_CTR" tail -n 1 "$access")
+    [[ "$code" == "200" && "$last" == "203.0.113.10 "*'"GET /dev/fsget/log/def.log HTTP/1.1" 200 '* ]] \
+        && pass "admin path from a TRUSTED_SOURCES source (203.0.113.10): proxied (200)" \
+        || fail "admin from the TRUSTED_SOURCES source: HTTP $code, log: $last"
     before=$(edge_lines "$unknown")
     n=0
     for p in /jdev/cfg/api /jdev/cfg/apiKey /jdev/sys/getcertificate /dev/sys/getcertificate /favicon.ico \
@@ -1022,6 +1048,11 @@ t_nginx_edge() {
     (( burst >= 1 )) && pass "45 rapid auth requests from the internet: $burst rejected (loxone_auth 3r/s, burst 30)" || fail "auth burst never limited"
     burst=$(docker exec "$EDGE_CTR" sh -c "for i in \$(seq 45); do curl -sk -o /dev/null -w '%{http_code}\n' --resolve loxprox.test:1080:127.0.0.1 https://loxprox.test:1080/jdev/sys/getkey2/ciuser; done" | grep -c '^503$' || true)
     [[ "$burst" == "0" ]] && pass "the same burst from a trusted source: none rejected" || fail "trusted source rate-limited ($burst × 503)"
+    burst=$(docker exec "$EDGE_CTR" sh -c "for i in \$(seq 45); do curl -sk -o /dev/null -w '%{http_code}\n' --resolve loxprox.test:1080:198.51.100.10 https://loxprox.test:1080/jdev/sys/getkey2/ciuser; done" | grep -c '^503$' || true)
+    (( burst >= 1 )) && pass "the same burst from a CROWDSEC_WHITELIST_IPS-only source: $burst rejected (never banned is not trusted)" \
+                     || fail "whitelist-only source never auth-limited"
+    burst=$(docker exec "$EDGE_CTR" sh -c "for i in \$(seq 45); do curl -sk -o /dev/null -w '%{http_code}\n' --resolve loxprox.test:1080:203.0.113.10 https://loxprox.test:1080/jdev/sys/getkey2/ciuser; done" | grep -c '^503$' || true)
+    [[ "$burst" == "0" ]] && pass "the same burst from a TRUSTED_SOURCES source: none rejected" || fail "TRUSTED_SOURCES source rate-limited ($burst × 503)"
     sleep 2
     code=$(docker exec "$EDGE_CTR" sh -c "for i in 1 2 3 4 5 6; do curl -sk -o /dev/null --max-time 8 --resolve loxprox.test:1080:$ip https://loxprox.test:1080/ws/rfc6455 & done; sleep 2; curl -sk -o /dev/null -w '%{http_code}' --max-time 3 --resolve loxprox.test:1080:$ip https://loxprox.test:1080/ws/rfc6455; wait" || true)
     [[ "$code" == "503" ]] && pass "7th concurrent /ws/ socket from one internet address: 503 (limit 6)" || fail "7th /ws/ socket: HTTP $code"
@@ -1096,6 +1127,11 @@ t_nginx_edge() {
         sleep 1
         after=$(edge_lines "$unknown")
         (( after - before == 2 )) && pass "deny mode still writes the unknown log" || fail "unknown log grew by $((after - before)), expected 2"
+        code=$(edge_code "${W[@]}" https://loxprox.test:1080/ci/unknown/deny)
+        [[ "$code" == "404" ]] && pass "deny mode, CROWDSEC_WHITELIST_IPS-only source: 404 like any internet client" \
+                               || fail "deny mode, whitelist-only source: HTTP $code"
+        code=$(edge_code "${T[@]}" https://loxprox.test:1080/ci/unknown/deny)
+        [[ "$code" == "200" ]] && pass "deny mode, TRUSTED_SOURCES source: proxied" || fail "deny mode, TRUSTED_SOURCES source: HTTP $code"
     else
         fail "switching the container to tls-deny failed"
     fi
