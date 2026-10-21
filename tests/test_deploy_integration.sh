@@ -174,6 +174,7 @@ CROWDSEC_LOXPROX_ACQUIS="$CROWDSEC_DIR/acquis.d/loxprox.yaml"
 CROWDSEC_SCENARIO_DIR="$CROWDSEC_DIR/scenarios"
 CROWDSEC_PROFILES="$CROWDSEC_DIR/profiles.yaml"
 CROWDSEC_CONFIG_LOCAL="$CROWDSEC_DIR/config.yaml.local"
+CROWDSEC_TRAP_EXEMPT_WHITELIST="$CROWDSEC_DIR/parsers/s02-enrich/whitelist-loxprox-trap-exempt.yaml"
 LOXPROX_TLS_DIR="$MOCK_ROOT/etc/loxprox/tls"
 ACME_WEBROOT="$MOCK_ROOT/var/www/acme"
 
@@ -2137,7 +2138,7 @@ test_breach_nginx_classes() {
     UNKNOWN_PATH_MODE=log REMOTE_ADMIN_PATHS=deny configure_nginx >/dev/null 2>&1
     grep -qx 'server_tokens off;' "$NGINX_SITE" && pass "server_tokens off at http level" || fail "server_tokens off missing"
     grep -qx 'variables_hash_max_size 2048;' "$NGINX_SITE" && pass "variables_hash_max_size 2048 at http level" || fail "variables_hash_max_size missing"
-    grep -q "^# LOXPROX-SITE-TEMPLATE-VERSION: 7$" "$NGINX_SITE" && pass "site template v7" || fail "site template not v7"
+    grep -q "^# LOXPROX-SITE-TEMPLATE-VERSION: 8$" "$NGINX_SITE" && pass "site template v8" || fail "site template not v8"
 
     # Trusted sources: loopback, LAN, whitelist — deduplicated.
     local geo
@@ -2164,8 +2165,8 @@ test_breach_nginx_classes() {
     grep -qF 'if ($loxprox_deny = 403) { return 403; }' "$NGINX_SITE" && pass "admin denial → 403" || fail "403 return missing"
     grep -qF 'if ($loxprox_deny = 404) { return 404; }' "$NGINX_SITE" && pass "unknown denial → 404" || fail "404 return missing"
     grep -qF 'error_page 405 = @loxprox_trap;' "$NGINX_SITE" && pass "TRACE/CONNECT 405 → trap" || fail "405 not routed to the trap"
-    grep -qF 'access_log /var/log/nginx/loxprox-trap.log    loxone_scrubbed if=$loxprox_trap;' "$NGINX_SITE" \
-        && pass "trap log (loxone_scrubbed, if=)" || fail "trap access_log missing"
+    grep -qF 'access_log /var/log/nginx/loxprox-trap.log    loxone_scrubbed if=$loxprox_trap_logged;' "$NGINX_SITE" \
+        && pass "trap log (loxone_scrubbed, if= trap hit of a non-exempt source)" || fail "trap access_log missing"
     grep -qF 'access_log /var/log/nginx/loxprox-unknown.log loxone_scrubbed if=$loxprox_unknown;' "$NGINX_SITE" \
         && pass "unknown log (loxone_scrubbed, if=)" || fail "unknown access_log missing"
     local trap_line appsec_line
@@ -2298,16 +2299,17 @@ test_breach_tls_gate() {
     [[ "$(grep -c '^    listen 1080 ssl;$' "$NGINX_SITE")" == "1" ]] && pass "real server still listen 1080 ssl" || fail "real listen line wrong"
     [[ "$(grep -c 'listen 80 default_server;' "$NGINX_SITE")" == "1" && "$(grep -c 'listen \[::\]:80 default_server;' "$NGINX_SITE")" == "1" ]] \
         && pass ":80 trap default_server (v4 + v6)" || fail ":80 trap default_server missing"
-    [[ "$(grep -c '^    access_log /var/log/nginx/loxprox-trap.log loxone_scrubbed;$' "$NGINX_SITE")" == "2" ]] \
-        && pass "both trap servers log to the trap log in loxone_scrubbed" || fail "trap servers do not log to the trap log"
+    [[ "$(grep -c '^    access_log /var/log/nginx/loxprox-trap.log loxone_scrubbed if=\$loxprox_trap_server_logged;$' "$NGINX_SITE")" == "2" ]] \
+        && pass "both trap servers log to the trap log in loxone_scrubbed (exempt sources excepted)" || fail "trap servers do not log to the trap log"
     # R5: Host/SNI log, written by the two trap servers only (and never read by CrowdSec).
-    [[ "$(grep -c '^    access_log /var/log/nginx/loxprox-trap-hosts.log loxprox_trap_hosts;$' "$NGINX_SITE")" == "2" \
+    [[ "$(grep -c '^    access_log /var/log/nginx/loxprox-trap-hosts.log loxprox_trap_hosts if=\$loxprox_trap_server_logged;$' "$NGINX_SITE")" == "2" \
         && "$(grep -c 'loxprox-trap-hosts.log' "$NGINX_SITE")" == "2" ]] \
         && pass "both trap servers (and nothing else) write the trap-hosts log" || fail "trap-hosts access_log count wrong"
     grep -qF "log_format loxprox_trap_hosts '\$time_iso8601 \$remote_addr host=\"\$host\" sni=\"\$ssl_server_name\" '" "$NGINX_SITE" \
         && grep -qF "'\"\$request_method \$loxone_log_uri\" \$status \"\$http_user_agent\"';" "$NGINX_SITE" \
         && pass "loxprox_trap_hosts format: time, client, host, sni, scrubbed request, status, UA" || fail "loxprox_trap_hosts log_format missing or wrong"
-    grep -qF 'error_page 405 497 = @loxprox_trap;' "$NGINX_SITE" && pass "cleartext + foreign Host (497) and 405 → trap" || fail "trap error_page missing"
+    grep -qF 'error_page 497 = @loxprox_trap_497;' "$NGINX_SITE" && [[ "$(grep -c 'error_page 405 = @loxprox_trap;' "$NGINX_SITE")" == "3" ]] \
+        && pass "cleartext + foreign Host (497) and 405 → trap" || fail "trap error_page missing"
     [[ "$(grep -c '^    return 444;$' "$NGINX_SITE")" -ge 2 ]] && pass "trap servers answer 444" || fail "trap servers lack return 444"
     grep -qF 'error_page 497 = @loxprox_https_redirect;' "$NGINX_SITE" && grep -qF 'return 301 https://$host:1080$request_uri;' "$NGINX_SITE" \
         && pass "real names keep the 497 → 301 grace redirect" || fail "497 → 301 for the real names lost"
@@ -2628,10 +2630,10 @@ test_breach_runtime_config() {
     local -a missing=()
     for key in ENABLE_TLS TLS_DOMAIN EXTRA_SERVER_NAMES UNKNOWN_PATH_MODE TRAP_BAN_MODE REMOTE_ADMIN_PATHS BAN_HARD_LADDER \
                BAN_SOFT_LADDER BAN_HARD_SCENARIOS PROGRESSIVE_BAN_WINDOW_DAYS SESSION_ALERT_ENABLED AUTH_RATE_ALERT_PER_CYCLE \
-               SSH_ALLOW_USERS GEOIP_IPV6_ENABLED GEOIP_URL_BASE6 ASN_LEARNING_DAYS SEC_UPDATE_MAX_AGE_DAYS; do
+               SSH_ALLOW_USERS GEOIP_IPV6_ENABLED GEOIP_URL_BASE6 ASN_LEARNING_DAYS SEC_UPDATE_MAX_AGE_DAYS TRAP_EXEMPT_IPS; do
         grep -q "^${key}=\"" "$GATEWAY_CONFIG_FILE" || missing+=("$key")
     done
-    (( ${#missing[@]} == 0 )) && pass "config.env carries all 17 hardening keys" || fail "config.env lacks: ${missing[*]}"
+    (( ${#missing[@]} == 0 )) && pass "config.env carries all 18 hardening keys" || fail "config.env lacks: ${missing[*]}"
     grep -qx 'TRAP_BAN_MODE="ban"' "$GATEWAY_CONFIG_FILE" && pass "TRAP_BAN_MODE defaults to ban" || fail "TRAP_BAN_MODE default wrong"
     TRAP_BAN_MODE=observe write_runtime_config >/dev/null 2>&1
     # shellcheck source=/dev/null
@@ -2708,6 +2710,19 @@ SESSION_ALERT_ENABLED=maybe|bad
 SSH_ALLOW_USERS='admin "root"'|bad
 SSH_ALLOW_USERS="admin backup@192.168.1.0/24"|ok
 GEOIP_URL_BASE6="http://example.com/v6"|bad
+TRAP_EXEMPT_IPS=()|ok
+TRAP_EXEMPT_IPS=("203.0.113.10")|ok
+TRAP_EXEMPT_IPS=("203.0.113.0/24" "2001:db8:10::/48" "2001:db8::7")|ok
+TRAP_EXEMPT_IPS=("not-an-address")|bad
+TRAP_EXEMPT_IPS=("203.0.113.300")|bad
+TRAP_EXEMPT_IPS=("203.0.113.0/33")|bad
+TRAP_EXEMPT_IPS=("2001:db8::/129")|bad
+TRAP_EXEMPT_IPS=('203.0.113.10";id;"')|bad
+TRAP_EXEMPT_IPS=("203.0.113.10 198.51.100.7")|bad
+TRAP_EXEMPT_IPS=("")|bad
+TRAP_EXEMPT_IPS=("192.168.1.0/24")|bad
+TRAP_EXEMPT_IPS=("203.0.113.10" "10.0.0.0/24")|bad
+TRAP_EXEMPT_IPS=("::1")|bad
 CASES
     if command -v python3 >/dev/null 2>&1; then
         ( BAN_HARD_SCENARIOS='^(unclosed$'; _loxprox_validate_hardening_config >/dev/null 2>&1 ) \
@@ -2718,6 +2733,179 @@ CASES
     _loxprox_validate_hardening_config >/dev/null 2>&1
     [[ "$UNKNOWN_PATH_MODE" == "log" ]] && pass "modes normalised to lower case" || fail "UNKNOWN_PATH_MODE not normalised"
     UNKNOWN_PATH_MODE="$saved"
+}
+
+# 2026-10-21: TRAP_EXEMPT_IPS — exempt from the trap logs and every ban,
+# never trusted. Synthetic documentation-range addresses only.
+test_trap_exempt() {
+    echo ""
+    echo "━━━ TRAP_EXEMPT_IPS — nginx geo, trap servers, CrowdSec whitelist (2026-10-21) ━━━"
+
+    local saved_backup="$BACKUP_DIR" wl="$CROWDSEC_TRAP_EXEMPT_WHITELIST" geo out h1 h2 m1 m2 back
+    local -a saved_exempt=("${TRAP_EXEMPT_IPS[@]}")
+    BACKUP_DIR="$MOCK_ROOT/root/loxprox-backup-exempt"
+    rm -rf "$BACKUP_DIR"; mkdir -p "$BACKUP_DIR"
+
+    # nginx: its own geo, not the trusted one; the trap logs skip it.
+    TRAP_EXEMPT_IPS=("203.0.113.10" "2001:db8:10::/48")
+    rm -f "$NGINX_SITE" "$NGINX_ACME_CONF"
+    configure_nginx >/dev/null 2>&1
+    geo=$(awk '/^geo \$loxprox_trap_exempt \{/ {on = 1; next} on && /^\}/ {exit} on' "$NGINX_SITE")
+    grep -qE '^ +default +0;$' <<<"$geo" && grep -qE '^ +203\.0\.113\.10 +1;$' <<<"$geo" && grep -qE '^ +2001:db8:10::/48 +1;$' <<<"$geo" \
+        && pass "geo \$loxprox_trap_exempt lists both entries (default 0)" || fail "exempt geo: $geo"
+    geo=$(awk '/^geo \$loxprox_lan \{/ {on = 1; next} on && /^\}/ {exit} on' "$NGINX_SITE")
+    grep -qE '203\.0\.113\.10|2001:db8:10::' <<<"$geo" && fail "an exempt entry is in the trusted geo \$loxprox_lan" \
+                                                    || pass "exempt entries are NOT in the trusted geo \$loxprox_lan"
+    grep -qF 'map "$loxprox_trap_exempt:$loxprox_trap" $loxprox_trap_logged {' "$NGINX_SITE" \
+        && awk '/\$loxprox_trap_logged \{/ {on = 1; next} on && /^\}/ {exit} on' "$NGINX_SITE" | grep -qE '^ +"0:1" +1;$' \
+        && pass "real server logs a trap hit only for a non-exempt source" || fail "\$loxprox_trap_logged map missing"
+    out=$(awk '/^map \$loxprox_trap_exempt \$loxprox_trap_server_logged \{/ {on = 1; next} on && /^\}/ {exit} on' "$NGINX_SITE")
+    grep -qE '^ +default +1;$' <<<"$out" && grep -qE '^ +1 +0;$' <<<"$out" \
+        && pass "trap servers log every request except an exempt source's" || fail "\$loxprox_trap_server_logged map: $out"
+    grep -qF 'if ($loxprox_trap)       { return 444; }' "$NGINX_SITE" && pass "trap paths still 444 for everyone" || fail "trap return changed"
+
+    # The list is part of the render fingerprint: a change regenerates the site.
+    TRAP_EXEMPT_IPS=("203.0.113.20")
+    configure_nginx >/dev/null 2>&1
+    grep -qE '^ +203\.0\.113\.20 +1;$' "$NGINX_SITE" && ! grep -q '203\.0\.113\.10' "$NGINX_SITE" \
+        && pass "changed TRAP_EXEMPT_IPS → site regenerated with the new list" || fail "list change not rendered"
+    TRAP_EXEMPT_IPS=()
+    configure_nginx >/dev/null 2>&1
+    geo=$(awk '/^geo \$loxprox_trap_exempt \{/ {on = 1; next} on && /^\}/ {exit} on' "$NGINX_SITE")
+    [[ "$(grep -c '1;' <<<"$geo")" == "0" ]] && pass "empty list: the exempt geo holds only default 0" || fail "empty list geo: $geo"
+
+    # TLS block: 497 from an exempt source → exactly the real server's 301
+    # (to the Host it sent, as before the trap); the gateway's names never
+    # appear in the trap servers.
+    TRAP_EXEMPT_IPS=("203.0.113.10")
+    configure_nginx >/dev/null 2>&1
+    EXTRA_SERVER_NAMES="alt.example.com" _loxprox_site_enable_tls >/dev/null 2>&1
+    out=$(awk '/location @loxprox_trap_497 \{/ {on = 1; next} on && /^    \}/ {exit} on' "$NGINX_SITE")
+    grep -qxF '        if ($loxprox_trap_exempt) { return 301 https://$host:1080$request_uri; }' <<<"$out" \
+        && grep -qxF '        return 444;' <<<"$out" \
+        && pass "trap server 497: exempt → 301 to https://\$host:1080, anyone else → 444" || fail "@loxprox_trap_497: $out"
+    local real_301 trap_301
+    real_301=$(grep -o 'location @loxprox_https_redirect { return 301 [^;]*;' "$NGINX_SITE" | grep -o 'return 301 [^;]*;')
+    trap_301=$(grep -o 'return 301 [^;]*;' <<<"$out")
+    [[ -n "$real_301" && "$real_301" == "$trap_301" ]] \
+        && pass "the exempt redirect is byte-identical to the real server's ($trap_301)" || fail "redirects differ: real '$real_301', trap '$trap_301'"
+    out=$(awk '/# LOXPROX-TRAP-BEGIN/ {on = 1} on {print} /# LOXPROX-TRAP-END/ {exit}' "$NGINX_SITE")
+    grep -qE 'loxprox\.example\.com|alt\.example\.com' <<<"$out" && fail "a gateway name appears in the trap servers" \
+                                                         || pass "the trap servers never name the gateway (no TLS_DOMAIN in a redirect)"
+    [[ "$(grep -c 'loxprox_trap_exempt' "$NGINX_SITE")" == "4" ]] \
+        && pass "exempt variable used by the geo, the two log maps and the 497 location only" || fail "loxprox_trap_exempt uses: $(grep -c 'loxprox_trap_exempt' "$NGINX_SITE")"
+    rm -f "$NGINX_SITE" "$NGINX_ACME_CONF"
+
+    # CrowdSec whitelist: empty list + no file → nothing.
+    TRAP_EXEMPT_IPS=()
+    rm -f "$wl"
+    _loxprox_write_trap_exempt_whitelist >/dev/null 2>&1 && [[ ! -e "$wl" ]] \
+        && pass "empty list, no file: nothing written (rc 0)" || fail "empty list wrote $wl"
+
+    # The 2026-10-21 stopgap (hand-made, same path and name) is taken over.
+    mkdir -p "$(dirname "$wl")"
+    printf '%s\n' '# stopgap' 'name: loxprox/trap-exempt' 'whitelist:' '  reason: "stopgap"' '  ip:' '    - "198.51.100.99"' > "$wl"
+    TRAP_EXEMPT_IPS=("203.0.113.10" "203.0.113.128/25" "2001:db8:10::7" "2001:db8:20::/48")
+    _LOXPROX_CROWDSEC_BAN_FILES=()
+    # Not in $(…): the rollback set is a variable of this shell.
+    _loxprox_write_trap_exempt_whitelist > "$MOCK_ROOT/exempt.out" 2>&1
+    out=$(cat "$MOCK_ROOT/exempt.out")
+    grep -q 'Replacing the hand-made' <<<"$out" && pass "hand-made stopgap is announced and replaced" || fail "takeover not announced: $out"
+    grep -q '^# LOXPROX-MANAGED' "$wl" && grep -qx 'name: loxprox/trap-exempt' "$wl" && ! grep -q '198.51.100.99' "$wl" \
+        && pass "managed file: LOXPROX-MANAGED, name loxprox/trap-exempt, stopgap entry gone" || fail "managed file: $(tr '\n' '|' < "$wl")"
+    [[ "$(awk '/^  ip:$/ {on = "ip"; next} /^  cidr:$/ {on = "cidr"; next} /^    - / {printf "%s=%s ", on, $2}' "$wl")" \
+        == 'ip="203.0.113.10" ip="2001:db8:10::7" cidr="203.0.113.128/25" cidr="2001:db8:20::/48" ' ]] \
+        && pass "addresses under ip:, networks under cidr: (IPv4 + IPv6)" || fail "whitelist lists: $(tr '\n' '|' < "$wl")"
+    grep -q '198.51.100.99' "$BACKUP_DIR/files$wl" 2>/dev/null && [[ " ${_LOXPROX_CROWDSEC_BAN_FILES[*]} " == *" $wl "* ]] \
+        && pass "stopgap backed up and the file joins the rollback set" || fail "no backup / not in the rollback set"
+    [[ "$(stat -c %a "$wl" 2>/dev/null || stat -f %Lp "$wl")" == "644" ]] && pass "whitelist is 0644" || fail "whitelist mode wrong"
+
+    # Idempotent: the same list leaves the file byte-identical and untouched.
+    h1=$(sha256sum "$wl" | awk '{print $1}'); m1=$(stat -c %Y "$wl" 2>/dev/null || stat -f %m "$wl")
+    sleep 1
+    _LOXPROX_CROWDSEC_BAN_FILES=()
+    _loxprox_write_trap_exempt_whitelist > "$MOCK_ROOT/exempt.out" 2>&1
+    out=$(cat "$MOCK_ROOT/exempt.out")
+    h2=$(sha256sum "$wl" | awk '{print $1}'); m2=$(stat -c %Y "$wl" 2>/dev/null || stat -f %m "$wl")
+    [[ "$h1" == "$h2" && "$m1" == "$m2" ]] && grep -q 'unchanged' <<<"$out" && (( ${#_LOXPROX_CROWDSEC_BAN_FILES[@]} == 0 )) \
+        && pass "re-run with the same list: file untouched, nothing to roll back" || fail "re-run changed the file ($m1 → $m2): $out"
+
+    # A refused CrowdSec restart rolls the takeover back to the stopgap.
+    rm -rf "$BACKUP_DIR"; mkdir -p "$BACKUP_DIR"
+    printf '%s\n' '# stopgap' 'name: loxprox/trap-exempt' 'whitelist:' '  ip:' '    - "198.51.100.99"' > "$wl"
+    _LOXPROX_CROWDSEC_BAN_FILES=()
+    _loxprox_write_trap_exempt_whitelist >/dev/null 2>&1
+    _loxprox_crowdsec_rollback_bans && grep -q '198.51.100.99' "$wl" && ! grep -q 'LOXPROX-MANAGED' "$wl" \
+        && pass "rollback restores the previous (stopgap) file" || fail "rollback did not restore the stopgap"
+
+    # IPv4 only: no empty cidr: key.
+    TRAP_EXEMPT_IPS=("203.0.113.10")
+    _loxprox_write_trap_exempt_whitelist >/dev/null 2>&1
+    grep -q '^  ip:$' "$wl" && ! grep -q 'cidr:' "$wl" && pass "single address: ip: only, no empty cidr: list" || fail "single-address file: $(tr '\n' '|' < "$wl")"
+
+    # Empty list: the managed file is removed quietly, a hand-made one with a warning naming it.
+    TRAP_EXEMPT_IPS=()
+    out=$(_loxprox_write_trap_exempt_whitelist 2>&1)
+    [[ ! -e "$wl" ]] && ! grep -q 'WARN' <<<"$out" && pass "empty list removes the managed whitelist" || fail "managed file not removed: $out"
+    printf '%s\n' 'name: loxprox/trap-exempt' 'whitelist:' '  ip:' '    - "198.51.100.99"' > "$wl"
+    out=$(_loxprox_write_trap_exempt_whitelist 2>&1)
+    [[ ! -e "$wl" ]] && grep -q 'removing the hand-made' <<<"$out" && grep -q '198.51.100.99' <<<"$out" \
+        && pass "empty list removes a hand-made file too, warning with its entries" || fail "hand-made removal: $out"
+
+    # config.env: space-separated, read back by test-gateway.sh's reader.
+    TRAP_EXEMPT_IPS=("203.0.113.10" "2001:db8:10::/48")
+    write_runtime_config >/dev/null 2>&1
+    grep -qx 'TRAP_EXEMPT_IPS="203.0.113.10 2001:db8:10::/48"' "$GATEWAY_CONFIG_FILE" \
+        && pass "config.env: TRAP_EXEMPT_IPS space-separated" || fail "config.env: $(grep '^TRAP_EXEMPT_IPS' "$GATEWAY_CONFIG_FILE")"
+    TRAP_EXEMPT_IPS=()
+    write_runtime_config >/dev/null 2>&1
+    grep -qx 'TRAP_EXEMPT_IPS=""' "$GATEWAY_CONFIG_FILE" && pass "config.env: empty list → TRAP_EXEMPT_IPS=\"\"" || fail "empty list in config.env"
+
+    # --bootstrap-config carries the live file over (address-shaped entries only).
+    mkdir -p "$(dirname "$NGINX_SITE")"
+    printf '%s\n' 'upstream loxone_backend {' '    server 192.168.42.20:80;' '}' 'server {' '    listen 1080;' '}' > "$NGINX_SITE"
+    printf '%s\n' 'table inet filter {' '    chain input {' '        tcp dport 22 ip saddr { 192.168.42.0/24 } accept' '    }' '}' > "$NFTABLES_CONF"
+    printf '%s\n' 'name: loxprox/trap-exempt' 'whitelist:' '  ip:' '    - "203.0.113.10"' '    - "$(id)"' '  cidr:' '    - "2001:db8:10::/48"' > "$wl"
+    out=$(mktemp -t loxprox-extract.XXXXXX)
+    _loxprox_extract_config_from_live_state "$out" >/dev/null 2>&1
+    # shellcheck source=/dev/null
+    back=$(set +u; source "$out" >/dev/null 2>&1; printf '%s|' "${TRAP_EXEMPT_IPS[@]}")
+    [[ "$back" == "203.0.113.10|2001:db8:10::/48|" ]] && pass "bootstrap: TRAP_EXEMPT_IPS read back from the live whitelist, non-addresses dropped" \
+                                                     || fail "bootstrap TRAP_EXEMPT_IPS: '$back' ($(grep '^TRAP_EXEMPT_IPS' "$out"))"
+    rm -f "$out" "$wl" "$NGINX_SITE" "$NFTABLES_CONF"
+
+    # test-gateway.sh: every entry exempt in both places, none trusted.
+    local tg_site="$MOCK_ROOT/tg-site" tg_trusted="$MOCK_ROOT/tg-whitelist-loxone.yaml" problems
+    TRAP_EXEMPT_IPS=("203.0.113.10" "2001:db8:10::/48")
+    configure_nginx >/dev/null 2>&1
+    cp "$NGINX_SITE" "$tg_site"
+    _loxprox_write_trap_exempt_whitelist >/dev/null 2>&1
+    printf '%s\n' 'name: whitelist-loxone' 'whitelist:' '  ip:' '  cidr:' '    - "192.168.1.0/24"' '    - "10.0.0.0/24"' > "$tg_trusted"
+    tg() { (source "$PROJECT_DIR/test-gateway.sh"; _trap_exempt_problems "$1" "$wl" "$tg_site" "$tg_trusted") 2>&1; }
+    problems=$(tg "203.0.113.10 2001:db8:10::/48")
+    [[ -z "$problems" ]] && pass "test-gateway.sh: the deployed entries pass (whitelist + exempt geo, none trusted)" || fail "test-gateway.sh flags a good deploy: $problems"
+    problems=$(tg "203.0.113.10 203.0.113.11")
+    grep -q '^203.0.113.11: not in .*whitelist-loxprox-trap-exempt.yaml$' <<<"$problems" && grep -q '^203.0.113.11: not in the nginx geo' <<<"$problems" \
+        && ! grep -q '^203.0.113.10' <<<"$problems" && pass "test-gateway.sh: an undeployed entry is missing from the file and the geo" || fail "undeployed entry: $problems"
+    problems=$(tg "10.0.0.0/24")
+    grep -q '^10.0.0.0/24: TRUSTED' <<<"$problems" && pass "test-gateway.sh: an entry in the trusted lists is flagged TRUSTED" || fail "trusted entry not flagged: $problems"
+    if command -v python3 >/dev/null 2>&1; then
+        problems=$(tg "192.168.1.77")
+        grep -q '^192.168.1.77: TRUSTED (overlaps 192.168.1.0/24' <<<"$problems" && pass "test-gateway.sh: an entry inside a trusted network is flagged" || fail "contained entry: $problems"
+        ( TRAP_EXEMPT_IPS=("192.168.1.77"); _loxprox_validate_hardening_config >/dev/null 2>&1 ) \
+            && fail "validation accepted an entry inside LAN_SUBNET" || pass "validation refuses an entry inside LAN_SUBNET (python3)"
+        ( TRAP_EXEMPT_IPS=("203.0.113.7/24"); _loxprox_validate_hardening_config >/dev/null 2>&1 ) \
+            && fail "validation accepted a network with host bits" || pass "validation refuses host bits (203.0.113.7/24)"
+        ( TRAP_EXEMPT_IPS=("127.0.0.2"); _loxprox_validate_hardening_config >/dev/null 2>&1 ) \
+            && fail "validation accepted a loopback address" || pass "validation refuses a loopback address"
+    fi
+    out=$( (TRAP_EXEMPT_IPS=("2001:db8::/32"); _loxprox_validate_trap_exempt) 2>&1)
+    grep -q 'wider than /48' <<<"$out" && pass "a wide entry (IPv6 /32) is warned about" || fail "no width warning: $out"
+    rm -f "$wl" "$wl".* "$tg_site" "$tg_trusted" "$NGINX_SITE" "$NGINX_ACME_CONF"
+    unset -f tg
+
+    TRAP_EXEMPT_IPS=("${saved_exempt[@]}")
+    BACKUP_DIR="$saved_backup"
 }
 
 # The reboot-loop guard (feedback: a probe that misreads a healthy gateway
@@ -2893,6 +3081,7 @@ test_breach_nginx_classes
 test_breach_tls_gate
 test_breach_firewall
 test_breach_crowdsec
+test_trap_exempt
 test_breach_sshd
 test_breach_unattended_upgrades
 test_breach_runtime_config

@@ -827,6 +827,8 @@ EDGE_CTR=loxprox-ci-edge
 # mode $1 — tls (UNKNOWN_PATH_MODE=log), tls-deny (=deny) or plain — in front
 # of a Miniserver stand-in. LAN_SUBNET is 192.168.1.0/24, so requests to the
 # container's own eth0 address are "internet" (untrusted), loopback trusted.
+# 198.51.100.7 (added to lo by t_nginx_edge) is untrusted too, but in
+# TRAP_EXEMPT_IPS.
 t_nginx_edge_setup() {
     local mode="${1:-tls}"
     systemctl() { true; }
@@ -835,6 +837,8 @@ t_nginx_edge_setup() {
         EXTRA_SERVER_NAMES=alt.loxprox.test LAN_SUBNET=192.168.1.0/24 REMOTE_ADMIN_PATHS=deny UNKNOWN_PATH_MODE=log
     # shellcheck disable=SC2034
     CROWDSEC_WHITELIST_IPS=("192.168.1.0/24")
+    # shellcheck disable=SC2034
+    TRAP_EXEMPT_IPS=("198.51.100.7" "2001:db8:5::/48")
     [[ "$mode" == "tls-deny" ]] && UNKNOWN_PATH_MODE=deny
     mkdir -p /etc/loxprox/tls /var/log/nginx "$ACME_WEBROOT/.well-known/acme-challenge"
     [[ -s /etc/loxprox/tls/fullchain.pem ]] || openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=loxprox.test \
@@ -878,12 +882,13 @@ t_nginx_edge() {
     local trap=/var/log/nginx/loxprox-trap.log unknown=/var/log/nginx/loxprox-unknown.log access=/var/log/nginx/loxone-access.log
     local ip code before after hdrs p n
     docker rm -f "$EDGE_CTR" >/dev/null 2>&1
-    docker run -d --name "$EDGE_CTR" -e CI=true -v "$REPO:/workspace:ro" -w /workspace debian:12 sleep infinity >/dev/null
-    docker exec "$EDGE_CTR" sh -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx-extras curl procps openssl >/dev/null 2>&1' \
+    # NET_ADMIN: a second untrusted source address (TRAP_EXEMPT_IPS) on lo.
+    docker run -d --name "$EDGE_CTR" --cap-add NET_ADMIN -e CI=true -v "$REPO:/workspace:ro" -w /workspace debian:12 sleep infinity >/dev/null
+    docker exec "$EDGE_CTR" sh -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx-extras curl procps openssl iproute2 >/dev/null 2>&1' \
         || { fail "could not install nginx-extras in the container"; docker rm -f "$EDGE_CTR" >/dev/null 2>&1; return; }
     docker exec "$EDGE_CTR" sh -c 'nginx -s quit 2>/dev/null; sleep 1; pkill -x nginx; true'
     if docker exec "$EDGE_CTR" bash /workspace/tests/host-integration.sh nginx-edge-setup tls; then
-        pass "nginx -t accepts the v7 site with the TLS block and both trap servers"
+        pass "nginx -t accepts the v8 site with the TLS block, both trap servers and the exempt geo"
     else
         fail "edge setup (tls) failed"; docker rm -f "$EDGE_CTR" >/dev/null 2>&1; return
     fi
@@ -1023,6 +1028,62 @@ t_nginx_edge() {
     code=$(docker exec "$EDGE_CTR" sh -c "for i in 1 2 3 4 5 6; do curl -sk -o /dev/null --max-time 8 --resolve loxprox.test:1080:127.0.0.1 https://loxprox.test:1080/ws/rfc6455 & done; sleep 2; curl -sk -o /dev/null -w '%{http_code}' --max-time 3 --resolve loxprox.test:1080:127.0.0.1 https://loxprox.test:1080/ws/rfc6455; wait" || true)
     [[ "$code" != "503" ]] && pass "7 concurrent /ws/ sockets from a trusted source: not limited" || fail "trusted /ws/ sockets limited"
 
+    # ── TRAP_EXEMPT_IPS (2026-10-21): exempt from the trap logs, NOT trusted.
+    # The probe it is for: plain HTTP to the TLS port, bare IP as Host, no
+    # SNI, no user agent. The same probe from the non-exempt $ip is the control.
+    local E=198.51.100.7 hosts=/var/log/nginx/loxprox-trap-hosts.log tb hb ta ha
+    if docker exec "$EDGE_CTR" ip addr add "$E/32" dev lo; then
+        note "trap-exempt source = $E (on lo, in TRAP_EXEMPT_IPS); non-exempt control = $ip"
+        tb=$(edge_lines "$trap"); hb=$(edge_lines "$hosts")
+        # Host = the bare public IP the probe asks for (203.0.113.80 here): the
+        # 301 must be the real server's, to https://$host:1080 — as before the
+        # trap — and must never name the gateway (TLS_DOMAIN loxprox.test).
+        local probe_host=203.0.113.80
+        hdrs=$(docker exec "$EDGE_CTR" curl -s -D - -o /dev/null --max-time 10 -H 'User-Agent:' -H "Host: $probe_host" "http://$E:1080/dev/sys/getcertificate" | tr -d '\r')
+        if grep -q '^HTTP/1.1 301' <<<"$hdrs" && grep -qx "Location: https://$probe_host:1080/dev/sys/getcertificate" <<<"$hdrs"; then
+            pass "exempt $E: cleartext to :1080 with Host $probe_host (bare IP) → 301 to https://$probe_host:1080/dev/sys/getcertificate"
+        else
+            fail "exempt cleartext probe: '$(head -1 <<<"$hdrs")' $(grep -i '^Location' <<<"$hdrs")"
+        fi
+        if grep -qi '^Location:' <<<"$hdrs" && ! grep -qi '^Location:.*loxprox\.test' <<<"$hdrs"; then
+            pass "exempt $E: the redirect does not disclose the gateway's name (no loxprox.test in Location)"
+        else
+            fail "exempt redirect Location names the gateway or is missing: $(grep -i '^Location' <<<"$hdrs")"
+        fi
+        code=$(edge_code "https://$E:1080/dev/sys/getcertificate")
+        [[ "$code" == "000" ]] && pass "exempt $E: TLS without SNI (bare IP) → 444" || fail "exempt, TLS bare IP: HTTP $code"
+        code=$(edge_code --resolve "evil.example:1080:$E" https://evil.example:1080/)
+        [[ "$code" == "000" ]] && pass "exempt $E: TLS with a wrong SNI → 444" || fail "exempt, wrong SNI: HTTP $code"
+        code=$(edge_code -X TRACE "http://$E:1080/")
+        [[ "$code" == "000" ]] && pass "exempt $E: cleartext TRACE (405, not 497) → 444, no redirect" || fail "exempt, cleartext TRACE: HTTP $code"
+        code=$(edge_code "http://$E:80/")
+        [[ "$code" == "000" ]] && pass "exempt $E: :80 with a foreign Host → 444" || fail "exempt, :80: HTTP $code"
+        code=$(edge_code --resolve "loxprox.test:1080:$E" https://loxprox.test:1080/.env)
+        [[ "$code" == "000" ]] && pass "exempt $E: scanner path on the real name → 444" || fail "exempt, /.env: HTTP $code"
+        sleep 1
+        ta=$(edge_lines "$trap"); ha=$(edge_lines "$hosts")
+        (( ta == tb && ha == hb )) && pass "exempt $E: none of its 6 requests is in loxprox-trap.log or loxprox-trap-hosts.log" \
+                                   || fail "exempt requests logged: trap +$((ta - tb)), trap-hosts +$((ha - hb))"
+        code=$(edge_code --resolve "loxprox.test:1080:$E" https://loxprox.test:1080/dev/fsget/log/def.log)
+        [[ "$code" == "403" ]] && pass "exempt $E is not trusted: admin path → 403" || fail "exempt, admin path: HTTP $code"
+        burst=$(docker exec "$EDGE_CTR" sh -c "for i in \$(seq 45); do curl -sk -o /dev/null -w '%{http_code}\n' --resolve loxprox.test:1080:$E https://loxprox.test:1080/jdev/sys/getkey2/ciuser; done" | grep -c '^503$' || true)
+        (( burst >= 1 )) && pass "exempt $E is not trusted: 45 rapid auth requests, $burst rejected (rate limit)" || fail "exempt source never rate-limited"
+        tb=$(edge_lines "$trap"); hb=$(edge_lines "$hosts")
+        code=$(edge_code -H 'User-Agent:' "http://$ip:1080/dev/sys/getcertificate")
+        [[ "$code" == "000" ]] && pass "non-exempt $ip: the same cleartext probe → 444" || fail "non-exempt cleartext probe: HTTP $code"
+        sleep 1
+        ta=$(edge_lines "$trap"); ha=$(edge_lines "$hosts")
+        if (( ta - tb == 1 && ha - hb == 1 )) \
+                && docker exec "$EDGE_CTR" grep -q "^$ip - - .*\"GET /dev/sys/getcertificate HTTP/1.1\" 444 " "$trap" \
+                && docker exec "$EDGE_CTR" grep -qF "$ip host=\"$ip\" sni=\"-\" \"GET /dev/sys/getcertificate\" 444" "$hosts"; then
+            pass "non-exempt $ip: logged to loxprox-trap.log and loxprox-trap-hosts.log (host=\"$ip\" sni=\"-\")"
+        else
+            fail "non-exempt probe: trap +$((ta - tb)), trap-hosts +$((ha - hb)); last: $(docker exec "$EDGE_CTR" tail -n 1 "$hosts")"
+        fi
+    else
+        fail "could not add $E to the container's lo (needs --cap-add NET_ADMIN and iproute2)"
+    fi
+
     # ── UNKNOWN_PATH_MODE=deny
     if edge_mode tls-deny; then
         before=$(edge_lines "$unknown")
@@ -1045,6 +1106,17 @@ t_nginx_edge() {
         [[ "$code" == "200" ]] && pass "plain mode: any Host served (server_name _)" || fail "plain mode: HTTP $code"
         code=$(edge_code http://127.0.0.1:1080/.env)
         [[ "$code" == "000" ]] && pass "plain mode: trap paths still 444" || fail "plain mode trap path: HTTP $code"
+        before=$(edge_lines "$trap")
+        code=$(edge_code "http://$E:1080/.env")
+        sleep 1
+        after=$(edge_lines "$trap")
+        [[ "$code" == "000" ]] && (( after == before )) && pass "plain mode: exempt $E gets 444 for /.env, not logged as a trap hit" \
+                                                       || fail "plain mode, exempt /.env: HTTP $code, trap log +$((after - before))"
+        code=$(edge_code "http://$ip:1080/.env")
+        sleep 1
+        before=$(edge_lines "$trap")
+        [[ "$code" == "000" ]] && (( before == after + 1 )) && pass "plain mode: non-exempt $ip's /.env is logged" \
+                                                         || fail "plain mode, non-exempt /.env: HTTP $code, trap log +$((before - after))"
         docker exec "$EDGE_CTR" grep -q 'LOXPROX-TRAP' "$NGINX_SITE" && fail "trap servers left in plain mode" || pass "plain mode: no trap servers, no default_server"
     else
         fail "switching the container to plain mode failed"
@@ -1164,6 +1236,14 @@ t_crowdsec() {
     mkdir -p /var/log/nginx
     local f out dir dec
     for f in loxone-access loxone-error loxprox-trap loxprox-unknown; do touch "/var/log/nginx/$f.log"; done
+    # 2026-10-21: trap-exempt sources (an address and an IPv4 + IPv6 network),
+    # read by cs_configure's configure_crowdsec. The hand-made stopgap of the
+    # same path and parser name is taken over.
+    local xwl="$CROWDSEC_TRAP_EXEMPT_WHITELIST"
+    # shellcheck disable=SC2034
+    TRAP_EXEMPT_IPS=("203.0.113.50" "203.0.113.128/25" "2001:db8:5::/48")
+    mkdir -p "$(dirname "$xwl")"
+    printf '%s\n' '# stopgap' 'name: loxprox/trap-exempt' 'whitelist:' '  reason: "stopgap"' '  ip:' '    - "203.0.113.99"' > "$xwl"
     if cs_configure ban; then
         pass "configure_crowdsec returns 0 against the real CrowdSec ($(cscli version 2>&1 | awk '/version:/ {print $2; exit}'))"
     else
@@ -1184,16 +1264,35 @@ t_crowdsec() {
     out=$(cscli simulation status 2>&1)
     grep -qF loxprox/auth-bf <<<"$out" && grep -qF loxprox/unknown-path <<<"$out" && ! grep -qF loxprox/scanner-trap <<<"$out" \
         && pass "simulation: auth-bf + unknown-path alert only, scanner-trap bans" || fail "simulation status: $out"
+    grep -q 'LOXPROX-MANAGED' "$xwl" && grep -qx 'name: loxprox/trap-exempt' "$xwl" && grep -qx '    - "203.0.113.50"' "$xwl" \
+        && grep -qx '    - "2001:db8:5::/48"' "$xwl" && ! grep -q '203.0.113.99' "$xwl" \
+        && pass "trap-exempt whitelist: the hand-made stopgap replaced by the managed file ($xwl)" || fail "trap-exempt file: $(tr '\n' '|' < "$xwl")"
+    out=$(cscli parsers list 2>&1)
+    grep -qF 'loxprox/trap-exempt' <<<"$out" && pass "cscli parsers list: loxprox/trap-exempt loaded (local)" || fail "loxprox/trap-exempt not listed: $out"
 
     # Log routing, proven both ways with cscli explain (read-only, -no-api).
     explain() { (source "$REPO/test-gateway.sh"; _cs_explain "$@"); }
     out=$(explain loxprox-trap.log 198.51.100.7 "GET /.env" 444)
     grep -qF 'crowdsecurity/nginx-logs' <<<"$out" && pass "explain: crowdsecurity/nginx-logs parses a trap-log line" || fail "trap-log line not parsed"
     grep -qF 'loxprox/scanner-trap' <<<"$out" && pass "explain: a trap-log line fires loxprox/scanner-trap" || { fail "trap-log line did not reach loxprox/scanner-trap"; note "$out"; }
+    grep -qF '[whitelisted]' <<<"$out" && fail "explain: the non-exempt 198.51.100.7 was whitelisted" \
+                                       || pass "explain: non-exempt 198.51.100.7 is not whitelisted (reaches loxprox/scanner-trap)"
+    # TRAP_EXEMPT_IPS: the same trap-log line from an exempt address / network.
+    for f in 203.0.113.50 203.0.113.200; do
+        out=$(explain loxprox-trap.log "$f" "GET /dev/sys/getcertificate" 444)
+        if grep -qE 'loxprox/trap-exempt .*\[whitelisted\]' <<<"$out" && grep -qF 'ignored by whitelist' <<<"$out" \
+                && ! grep -qF 'loxprox/scanner-trap' <<<"$out"; then
+            pass "explain: a trap-log line from exempt $f is whitelisted by loxprox/trap-exempt, never reaches loxprox/scanner-trap"
+            note "$(grep -E 'loxprox/trap-exempt|ignored by whitelist' <<<"$out" | tr -s '\t ' ' ' | tr '\n' ';')"
+        else
+            fail "explain: exempt $f not whitelisted"; note "$out"
+        fi
+    done
     out=$(explain loxone-access.log 198.51.100.7 "GET /.env" 444)
     grep -qF 'loxprox/scanner-trap' <<<"$out" && fail "explain: the same line in the access log fired scanner-trap" || pass "explain: the same line in loxone-access.log does not (routing by evt.Line.Src)"
     out=$(explain loxone-access.log 198.51.100.7 "GET /jdev/cfg/api" 200)
-    grep -qF 'loxprox/' <<<"$out" && fail "explain: a normal app line reached a loxprox scenario" || pass "explain: a normal app line reaches no loxprox scenario"
+    # Scenario names only: the parser list names loxprox/trap-exempt for every line.
+    grep -qE 'loxprox/(scanner-trap|unknown-path|auth-bf)' <<<"$out" && fail "explain: a normal app line reached a loxprox scenario" || pass "explain: a normal app line reaches no loxprox scenario"
     out=$(explain loxprox-unknown.log 198.51.100.7 "GET /ci/unknown" 200)
     grep -qF 'loxprox/unknown-path' <<<"$out" && pass "explain: an unknown-log line pours into loxprox/unknown-path" || fail "unknown-log line not routed"
     out=$(explain loxone-access.log 198.51.100.7 "GET /jdev/sys/getkey2/<redacted>" 200)
@@ -1240,6 +1339,7 @@ t_crowdsec() {
 
     dir=$(mktemp -d /var/tmp/loxprox-replay.XXXXXX)
     printf '198.51.100.7 - - [%s] "GET /.env HTTP/1.1" 444 0 "-" "ci"\n' "$now" > "$dir/loxprox-trap.log"
+    printf '203.0.113.50 - - [%s] "GET /.env HTTP/1.1" 444 0 "-" "ci"\n' "$now" >> "$dir/loxprox-trap.log"
     for f in $(seq 1 12); do
         printf '198.51.100.8 - - [%s] "GET /ci-probe-%s HTTP/1.1" 404 0 "-" "ci"\n' "$now" "$f"
     done > "$dir/loxone-access.log"
@@ -1253,9 +1353,23 @@ t_crowdsec() {
     [[ "$out" =~ ^loxprox/scanner-trap\ 16[78]h ]] && pass "trap hit → loxprox_hard_ip profile → first HARD ban ($out)" || fail "trap replay decision: '${out:-none}'"
     out=$(jq -r '[.[]?.decisions[]? | select(.value == "198.51.100.8")][0] | "\(.scenario) \(.duration)"' <<<"$dec" 2>/dev/null)
     [[ "$out" =~ ^crowdsecurity/http-probing\ 2[34]h ]] && pass "an ambiguous scenario → default profile → first SOFT ban ($out)" || fail "SOFT replay decision: '${out:-none}'"
+    out=$(jq -r '[.[]?.decisions[]? | select(.value == "203.0.113.50")] | length' <<<"$dec" 2>/dev/null)
+    f=$(cscli alerts list --ip 203.0.113.50 --limit 0 -o json 2>/dev/null | jq -r 'length' 2>/dev/null)
+    [[ "$out" == "0" && "${f:-0}" =~ ^(0|null)$ ]] && pass "the same trap hit from exempt 203.0.113.50: no alert, no decision" \
+                                                || fail "exempt replay: decisions=${out:-?} alerts=${f:-?}"
     cscli decisions delete --ip 198.51.100.7 >/dev/null 2>&1 || true
     cscli decisions delete --ip 198.51.100.8 >/dev/null 2>&1 || true
     rm -rf "$dir"
+
+    # An empty TRAP_EXEMPT_IPS removes the whitelist; the trap bans that source again.
+    # shellcheck disable=SC2034
+    TRAP_EXEMPT_IPS=()
+    cs_configure ban || fail "configure_crowdsec with an empty TRAP_EXEMPT_IPS failed"
+    systemctl is-active --quiet crowdsec && [[ ! -e "$xwl" ]] && ! grep -qF 'loxprox/trap-exempt' <<<"$(cscli parsers list 2>&1)" \
+        && pass "empty TRAP_EXEMPT_IPS: whitelist file removed, parser gone, crowdsec active" || fail "removal: file $(ls "$xwl" 2>&1), crowdsec $(systemctl is-active crowdsec)"
+    out=$(explain loxprox-trap.log 203.0.113.50 "GET /dev/sys/getcertificate" 444)
+    grep -qF 'loxprox/scanner-trap' <<<"$out" && ! grep -qF '[whitelisted]' <<<"$out" \
+        && pass "explain: without the exemption, 203.0.113.50's trap-log line reaches loxprox/scanner-trap" || { fail "post-removal explain"; note "$out"; }
 }
 
 # The package's crowdsec-hubupdate.timer runs `cscli hub upgrade` on EVERY

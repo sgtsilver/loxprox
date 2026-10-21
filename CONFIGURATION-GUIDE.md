@@ -440,6 +440,25 @@ While in observe mode, scanners are logged but not banned.
 
 `loxprox/auth-bf` and (while `UNKNOWN_PATH_MODE="log"`) `loxprox/unknown-path` are always simulated. If `deploy.sh` cannot confirm a simulation with `cscli simulation status`, it removes that scenario rather than let it ban, and reports the CrowdSec step as degraded; fix it with `sudo cscli simulation enable <scenario>` and re-run `sudo bash deploy.sh`.
 
+### `TRAP_EXEMPT_IPS` — exempt a known prober from the trap (not trusted)
+
+| Key | Default | What it does |
+|---|---|---|
+| `TRAP_EXEMPT_IPS` | `()` | Bash array of IPv4/IPv6 addresses or CIDRs, e.g. `("203.0.113.10" "2001:db8:10::/48")`. These sources are exempt from the trap and from every ban, but they are **not trusted**. |
+
+**When to use it:** a known service probes the gateway's bare IP and must not be banned. The typical case is a vendor cloud probe that sends plain HTTP to `:1080` once a day, with the bare IP as `Host`, no SNI and no user agent. Before the Host/SNI gate it got the 301 redirect to `https://`; since the gate it is a trap hit and gets a HARD ban.
+
+What an exempt source gets:
+
+- **No trap log.** Its requests are never written to `loxprox-trap.log` or `loxprox-trap-hosts.log`. They are not written to the access log either, so the trap servers keep no record of them at all.
+- **No alert, no ban.** `deploy.sh` writes the CrowdSec whitelist `loxprox/trap-exempt` (`/etc/crowdsec/parsers/s02-enrich/whitelist-loxprox-trap-exempt.yaml`). It applies to every local scenario, not only the trap. Like `CROWDSEC_WHITELIST_IPS`, it does not lift community-blocklist (CAPI) decisions.
+- **The 301 for its cleartext probe** (TLS mode): plain HTTP to `:1080` with a foreign `Host` gets the real server's redirect instead of the 444. That is the same 301 it got before the trap existed: to `https://<the Host it sent>:1080<path>`, so the bare IP it asked for. The redirect never names the gateway, so the probe does not learn `TLS_DOMAIN`. If the probe follows the redirect to the bare IP, that lands in the trap again: a 444, not logged. Everything else on the trap servers is still a 444: TLS with a foreign or missing SNI, `:80` with a foreign `Host`, `TRACE`/`CONNECT`, scanner paths.
+- **Everything else unchanged.** The rate limits and auth/WebSocket limits apply. The admin paths answer `403` and `UNKNOWN_PATH_MODE="deny"` answers `404`, exactly as for any internet client.
+
+This is what separates it from `CROWDSEC_WHITELIST_IPS`, which is *trusted*: no limits, no admin/unknown denials. An entry that is trusted, or lies inside a trusted network (loopback, `LAN_SUBNET`, `CROWDSEC_WHITELIST_IPS`), aborts the deploy, and so does an entry that is not an address or CIDR. An entry wider than `/24` (IPv4) or `/48` (IPv6) is warned about.
+
+An empty list (the default) removes the whitelist file on the next deploy. That includes a hand-made file at that path: the deploy warns and names the entries it removes. So put the sources into `TRAP_EXEMPT_IPS` *before* you deploy. `test-gateway.sh` checks that every entry is in the whitelist file and the nginx exempt geo, and that none is trusted.
+
 ### `SSH_ALLOW_USERS` and HARD-mode root login
 
 | Key | Default | What it does |

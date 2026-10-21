@@ -129,6 +129,8 @@ GEOIP_IPV6_ENABLED="${GEOIP_IPV6_ENABLED-true}"
 GEOIP_URL_BASE6="${GEOIP_URL_BASE6-}"
 ASN_LEARNING_DAYS="${ASN_LEARNING_DAYS-7}"
 SEC_UPDATE_MAX_AGE_DAYS="${SEC_UPDATE_MAX_AGE_DAYS-2}"
+# 2026-10-21: sources exempt from the scanner trap and its bans, NOT trusted.
+declare -p TRAP_EXEMPT_IPS &>/dev/null || TRAP_EXEMPT_IPS=()
 
 # Operator config file path. Override via env (LOXPROX_DEPLOY_CONF=/path) for
 # testing only — production callers should use the default.
@@ -233,6 +235,7 @@ CROWDSEC_LOXPROX_ACQUIS="${CROWDSEC_LOXPROX_ACQUIS:-$CROWDSEC_DIR/acquis.d/loxpr
 CROWDSEC_SCENARIO_DIR="${CROWDSEC_SCENARIO_DIR:-$CROWDSEC_DIR/scenarios}"
 CROWDSEC_PROFILES="${CROWDSEC_PROFILES:-$CROWDSEC_DIR/profiles.yaml}"
 CROWDSEC_CONFIG_LOCAL="${CROWDSEC_CONFIG_LOCAL:-$CROWDSEC_DIR/config.yaml.local}"
+CROWDSEC_TRAP_EXEMPT_WHITELIST="${CROWDSEC_TRAP_EXEMPT_WHITELIST:-$CROWDSEC_DIR/parsers/s02-enrich/whitelist-loxprox-trap-exempt.yaml}"
 LOXPROX_PASSWD_FILE="${LOXPROX_PASSWD_FILE:-/etc/passwd}"
 # The CrowdSec package's nightly blanket hub upgrade (masked by
 # _loxprox_mask_package_hubupdate; overridable for tests).
@@ -473,6 +476,15 @@ validate_network() {
     return 1
 }
 
+# An IPv4/IPv6 address or CIDR, shape only and silent (no ipcalc fallback):
+# the value goes into an nginx geo block, a CrowdSec YAML list and config.env.
+_loxprox_is_addr_or_cidr() {
+    local o='(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)'
+    local v4="^${o}(\\.${o}){3}(/([0-9]|[12][0-9]|3[0-2]))?\$"
+    local v6='^[0-9A-Fa-f:]*:[0-9A-Fa-f:]*(/([0-9]|[1-9][0-9]|1[01][0-9]|12[0-8]))?$'
+    [[ "$1" =~ $v4 || "$1" =~ $v6 ]]
+}
+
 # 2026-10 breach hardening: the new keys fail loudly on a typo instead of
 # silently selecting the other behaviour. Modes are normalised in place.
 _loxprox_validate_hardening_config() {
@@ -540,7 +552,55 @@ _loxprox_validate_hardening_config() {
         error "GEOIP_URL_BASE6 must be an https:// URL without quotes or spaces."
         fail=1
     fi
+    _loxprox_validate_trap_exempt || fail=1
     return "$fail"
+}
+
+# 2026-10-21: TRAP_EXEMPT_IPS — addresses / CIDRs only, and never a trusted
+# source: an exempt address keeps every limit and denial, a trusted one has
+# none, so an entry in both keys (or inside a trusted network) is refused.
+# python3, where present, checks the values exactly (no host bits, overlaps).
+_loxprox_validate_trap_exempt() {
+    local fail=0 e t out min
+    for e in "${TRAP_EXEMPT_IPS[@]}"; do
+        if ! _loxprox_is_addr_or_cidr "$e"; then
+            error "TRAP_EXEMPT_IPS entry '$e' is not an IPv4/IPv6 address or CIDR."; fail=1; continue
+        fi
+        for t in 127.0.0.0/8 ::1 "$LAN_SUBNET" "${CROWDSEC_WHITELIST_IPS[@]}"; do
+            [[ "$e" == "$t" ]] && { error "TRAP_EXEMPT_IPS entry '$e' is trusted ($t) — exempt sources must not be trusted."; fail=1; }
+        done
+        min=24; [[ "$e" == *:* ]] && min=48
+        if [[ "$e" =~ /([0-9]+)$ ]] && (( BASH_REMATCH[1] < min )); then
+            warn "TRAP_EXEMPT_IPS entry '$e' is wider than /$min — the trap logs and bans nothing from that whole range."
+        fi
+    done
+    if (( fail || ${#TRAP_EXEMPT_IPS[@]} == 0 )) || ! command -v python3 >/dev/null 2>&1; then
+        return "$fail"
+    fi
+    out=$(python3 -I - "${#TRAP_EXEMPT_IPS[@]}" "${TRAP_EXEMPT_IPS[@]}" 127.0.0.0/8 ::1 "$LAN_SUBNET" "${CROWDSEC_WHITELIST_IPS[@]}" <<'PY'
+import ipaddress, sys
+n = int(sys.argv[1])
+trusted = []
+for t in sys.argv[2 + n:]:
+    try:
+        trusted.append((t, ipaddress.ip_network(t, strict=False)))
+    except ValueError:
+        pass
+for e in sys.argv[2:2 + n]:
+    try:
+        net = ipaddress.ip_network(e)
+    except ValueError as exc:
+        print(f"TRAP_EXEMPT_IPS entry '{e}' is not a valid address or network ({exc}).")
+        continue
+    for t, tnet in trusted:
+        if tnet.version == net.version and tnet.overlaps(net):
+            print(f"TRAP_EXEMPT_IPS entry '{e}' overlaps the trusted network {t} — exempt sources must not be trusted.")
+            break
+PY
+)
+    [[ -z "$out" ]] && return 0
+    while IFS= read -r t; do error "$t"; done <<<"$out"
+    return 1
 }
 
 # ─── Configuration loader ────────────────────────────────────────────────────
@@ -622,6 +682,7 @@ _loxprox_detect_live_install() {
 #   ENABLE_APPSEC          — presence of `auth_request /crowdsec-appsec` in nginx site
 #   APPSEC_MODE            — /etc/crowdsec/acquis.d/appsec.yaml (monitor config ref)
 #   CROWDSEC_WHITELIST_IPS — /etc/crowdsec/parsers/s02-enrich/whitelist-loxone.yaml
+#   TRAP_EXEMPT_IPS        — .../s02-enrich/whitelist-loxprox-trap-exempt.yaml
 #   DISCORD_WEBHOOK_URL    — /etc/loxprox/config.env (runtime config, separate file)
 #   ENABLE_TLS / TLS_*     — TLS marker in the nginx site, acme.sh state
 #   ENABLE_TUNNEL/TUNNEL_* — frpc unit + /etc/frp/frpc.toml
@@ -707,6 +768,14 @@ _loxprox_extract_config_from_live_state() {
             gsub(/^[[:space:]]*-[[:space:]]*"?|"?[[:space:]]*$/, "");
             print
         }' /etc/crowdsec/parsers/s02-enrich/whitelist-loxone.yaml)
+    fi
+    # Address-shaped entries only: they are written into a file root sources.
+    local exempt_lines=() ex_line
+    if [[ -f "$CROWDSEC_TRAP_EXEMPT_WHITELIST" ]]; then
+        while IFS= read -r ex_line; do
+            _loxprox_is_addr_or_cidr "$ex_line" && exempt_lines+=("$ex_line")
+        done < <(awk '/^[[:space:]]*-[[:space:]]+/ { gsub(/^[[:space:]]*-[[:space:]]*"?|"?[[:space:]]*$/, ""); print }' \
+                     "$CROWDSEC_TRAP_EXEMPT_WHITELIST")
     fi
 
     # ── H1: TLS / tunnel / panel state ───────────────────────────────────────
@@ -857,6 +926,10 @@ _loxprox_extract_config_from_live_state() {
             echo "    \"$lan_subnet\"   # fallback — extracted LAN_SUBNET"
         fi
         echo ")"
+        echo "# Exempt from the scanner trap and its bans, not trusted (deploy.conf.example)."
+        printf 'TRAP_EXEMPT_IPS=('
+        (( ${#exempt_lines[@]} )) && printf ' "%s"' "${exempt_lines[@]}"
+        printf ' )\n'
         echo
         echo "DISCORD_WEBHOOK_URL=\"$webhook\""
         echo "ALERT_EMAIL=\"$alert_email\""
@@ -1481,7 +1554,10 @@ install_nginx() {
 #                 Host/SNI gate (real server names + trap default servers).
 #   v7 (2026-10): variables_hash_max_size 2048 at http level (nginx-extras
 #                 warned that the v6 maps no longer fit the 1024 default).
-_LOXPROX_SITE_TEMPLATE_VERSION=7
+#   v8 (2026-10): TRAP_EXEMPT_IPS — geo $loxprox_trap_exempt; the trap logs
+#                 skip those sources, their cleartext probe gets the 301
+#                 to https://$host:1080 (as before the trap).
+_LOXPROX_SITE_TEMPLATE_VERSION=8
 _LOXPROX_SITE_VERSION_MARKER="# LOXPROX-SITE-TEMPLATE-VERSION:"
 _LOXPROX_SITE_PARAMS_MARKER="# LOXPROX-SITE-PARAMS:"
 
@@ -1522,7 +1598,7 @@ _loxprox_site_params_fingerprint() {
         "$PROXY_CONNECT_TIMEOUT" "$PROXY_SEND_TIMEOUT" "$PROXY_READ_TIMEOUT" \
         "$CLIENT_BODY_TIMEOUT" "$CLIENT_HEADER_TIMEOUT" \
         "$ENABLE_APPSEC" "$NGINX_APPSEC_INCLUDE" \
-        "$LAN_SUBNET" "${CROWDSEC_WHITELIST_IPS[*]}" \
+        "$LAN_SUBNET" "${CROWDSEC_WHITELIST_IPS[*]}" "${TRAP_EXEMPT_IPS[*]}" \
         "$UNKNOWN_PATH_MODE" "$REMOTE_ADMIN_PATHS" \
         "$(_loxprox_tls_server_names)" "$(_loxprox_server_tokens_line)" "$(_loxprox_variables_hash_line)" \
         | sha256sum 2>/dev/null | cut -c1-16) || digest=""
@@ -1577,9 +1653,15 @@ _loxprox_variables_hash_line() { _loxprox_http_directive_line variables_hash_max
 # CROWDSEC_WHITELIST_IPS. Deduplicated; a malformed entry is skipped (with a
 # warning on stderr — stdout is the config) instead of failing `nginx -t`.
 _loxprox_trusted_geo_entries() {
+    _loxprox_geo_entries "nginx's trusted networks" 127.0.0.0/8 ::1 "$LAN_SUBNET" "${CROWDSEC_WHITELIST_IPS[@]}"
+}
+
+#   _loxprox_geo_entries WHAT NET… → "    NET 1;" geo lines (see above).
+_loxprox_geo_entries() {
+    local what="$1"; shift
     local -a seen=()
     local net known ok
-    for net in 127.0.0.0/8 ::1 "$LAN_SUBNET" "${CROWDSEC_WHITELIST_IPS[@]}"; do
+    for net in "$@"; do
         [[ -n "$net" ]] || continue
         if [[ "$net" == *:* ]]; then
             ok=0; [[ "$net" =~ ^[0-9A-Fa-f:]+(/[0-9]{1,3})?$ ]] && ok=1
@@ -1589,7 +1671,7 @@ _loxprox_trusted_geo_entries() {
             ok=0; validate_ip "$net" >/dev/null 2>&1 && ok=1
         fi
         if (( ! ok )); then
-            warn "Not adding '$net' to nginx's trusted networks (not an address or CIDR)." >&2
+            warn "Not adding '$net' to $what (not an address or CIDR)." >&2
             continue
         fi
         for known in "${seen[@]}"; do
@@ -1743,7 +1825,7 @@ log_format appsec_evt '\''$time_iso8601 $remote_addr "$request_method $loxone_lo
         fi
 
         # 2026-10: the denials untrusted sources get (the trap applies to all).
-        local deny_entries="" trusted_geo server_tokens_line variables_hash_line
+        local deny_entries="" trusted_geo trap_exempt_geo server_tokens_line variables_hash_line
         if [[ "$REMOTE_ADMIN_PATHS" == "deny" ]]; then
             deny_entries+='    "0:admin"    403;'$'\n'
         fi
@@ -1751,6 +1833,7 @@ log_format appsec_evt '\''$time_iso8601 $remote_addr "$request_method $loxone_lo
             deny_entries+='    "0:unknown"  404;'$'\n'
         fi
         trusted_geo=$(_loxprox_trusted_geo_entries)
+        trap_exempt_geo=$(_loxprox_geo_entries "the trap-exempt sources" "${TRAP_EXEMPT_IPS[@]}")
         server_tokens_line=$(_loxprox_server_tokens_line)
         variables_hash_line=$(_loxprox_variables_hash_line)
 
@@ -1830,6 +1913,15 @@ log_format loxprox_trap_hosts '\$time_iso8601 \$remote_addr host="\$host" sni="\
 geo \$loxprox_lan {
     default                  0;
 ${trusted_geo}
+}
+# 2026-10-21: TRAP_EXEMPT_IPS — e.g. a vendor cloud probe of the bare IP. NOT
+# trusted: limits, denials and the trap's 444 apply as to anyone; the trap
+# logs skip them (CrowdSec whitelist loxprox/trap-exempt does the rest), and
+# the trap server answers their cleartext request (497) with the real server's
+# 301 to https://\$host:1080 (the Host they sent, as before the trap).
+geo \$loxprox_trap_exempt {
+    default                  0;
+${trap_exempt_geo}
 }
 # Key for the per-endpoint limits: "" (= not accounted) for a trusted source.
 map \$loxprox_lan \$loxprox_limit_key {
@@ -1916,6 +2008,16 @@ map "\$loxprox_trap:\$loxprox_path_class" \$loxprox_unknown {
     default      0;
     "0:unknown"  1;
 }
+# Trap-log conditions: a trap-class request (this server) / any request (the
+# trap servers), never from a trap-exempt source.
+map "\$loxprox_trap_exempt:\$loxprox_trap" \$loxprox_trap_logged {
+    default      0;
+    "0:1"        1;
+}
+map \$loxprox_trap_exempt \$loxprox_trap_server_logged {
+    default      1;
+    1            0;
+}
 # REMOTE_ADMIN_PATHS=${REMOTE_ADMIN_PATHS}, UNKNOWN_PATH_MODE=${UNKNOWN_PATH_MODE}
 map "\$loxprox_lan:\$loxprox_path_class" \$loxprox_deny {
     default      "";
@@ -1931,7 +2033,7 @@ server {
     server_name _;
 
     access_log /var/log/nginx/loxone-access.log loxone_scrubbed;
-    access_log /var/log/nginx/loxprox-trap.log    loxone_scrubbed if=\$loxprox_trap;
+    access_log /var/log/nginx/loxprox-trap.log    loxone_scrubbed if=\$loxprox_trap_logged;
     access_log /var/log/nginx/loxprox-unknown.log loxone_scrubbed if=\$loxprox_unknown;
     error_log  /var/log/nginx/loxone-error.log;
 ${appsec_access_log}
@@ -2589,6 +2691,12 @@ _loxprox_ensure_trap_cert() {
 # whose SNI/Host is not one of the gateway's names — IP scans, Shodan/Censys
 # sweeps — goes to the trap log (loxone_scrubbed, so CrowdSec's nginx parser
 # reads it) and gets 444: connection closed, not one byte of fingerprint.
+# 2026-10-21: TRAP_EXEMPT_IPS sources are not logged; they get 444 as well,
+# except a cleartext request to :1080 (497), which gets exactly the real
+# server's @loxprox_https_redirect: 301 to https://$host:1080 — the Host they
+# sent, as before the trap existed. Never the gateway's name: that would
+# disclose it to a third party that only ever asked for the bare IP. A
+# redirect back to the bare IP lands in the trap again (444, not logged).
 _loxprox_trap_servers_block() {
     cat <<EOF
 ${_LOXPROX_TRAP_BEGIN_MARKER}
@@ -2601,14 +2709,19 @@ server {
     ssl_protocols       TLSv1.3 TLSv1.2;
     ssl_ciphers         ${_LOXPROX_TLS_CIPHERS};
     ssl_session_tickets off;
-    access_log /var/log/nginx/loxprox-trap.log loxone_scrubbed;
-    access_log /var/log/nginx/loxprox-trap-hosts.log loxprox_trap_hosts;
+    access_log /var/log/nginx/loxprox-trap.log loxone_scrubbed if=\$loxprox_trap_server_logged;
+    access_log /var/log/nginx/loxprox-trap-hosts.log loxprox_trap_hosts if=\$loxprox_trap_server_logged;
     # Cleartext to the TLS port with a foreign Host (497) and TRACE/CONNECT
     # (405, rejected by nginx before any rewrite) end in the trap as well.
-    error_page 405 497 = @loxprox_trap;
+    error_page 405 = @loxprox_trap;
+    error_page 497 = @loxprox_trap_497;
     return 444;
 
     location @loxprox_trap {
+        return 444;
+    }
+    location @loxprox_trap_497 {
+        if (\$loxprox_trap_exempt) { return 301 https://\$host:1080\$request_uri; }
         return 444;
     }
 }
@@ -2616,8 +2729,8 @@ server {
     listen 80 default_server;
     listen [::]:80 default_server;
     server_name _;
-    access_log /var/log/nginx/loxprox-trap.log loxone_scrubbed;
-    access_log /var/log/nginx/loxprox-trap-hosts.log loxprox_trap_hosts;
+    access_log /var/log/nginx/loxprox-trap.log loxone_scrubbed if=\$loxprox_trap_server_logged;
+    access_log /var/log/nginx/loxprox-trap-hosts.log loxprox_trap_hosts if=\$loxprox_trap_server_logged;
     error_page 405 = @loxprox_trap;
     return 444;
 
@@ -3638,6 +3751,7 @@ EOF
     # After the ban configuration: it installs loxprox.yaml, and its rollback
     # list (reset there) also restores what the de-duplication moves away.
     _loxprox_dedupe_crowdsec_acquisition
+    _loxprox_write_trap_exempt_whitelist || bans_ok=0
 
     # M19: an unguarded `systemctl restart crowdsec` aborted the deploy before
     # SSH hardening, monitoring and config.env were written. It is also the one
@@ -3680,6 +3794,55 @@ EOF
     # Recorded as a degraded step: CrowdSec runs, the LoxProx bans do not.
     (( bans_ok && ! bans_rolled_back )) || return 1
     ok "CrowdSec configured and running (AppSec mode: $APPSEC_MODE; ban ladders HARD ${BAN_HARD_LADDER} / SOFT ${BAN_SOFT_LADDER})."
+}
+
+# 2026-10-21 (owner decision): TRAP_EXEMPT_IPS → the CrowdSec whitelist
+# loxprox/trap-exempt, so nothing those sources send raises a local alert or
+# ban. It is not whitelist-loxone: nginx does not trust them (see the site's
+# geo $loxprox_trap_exempt). Written when the list is non-empty — replacing a
+# hand-made file of the same path (the 2026-10-21 stopgap) — and removed when
+# it is empty. Byte-stable: an unchanged list leaves the file untouched. Runs
+# after _loxprox_configure_crowdsec_bans, so a refused restart rolls it back too.
+_loxprox_write_trap_exempt_whitelist() {
+    local f="$CROWDSEC_TRAP_EXEMPT_WHITELIST" e tmp
+    local -a ips=() cidrs=()
+    if (( ${#TRAP_EXEMPT_IPS[@]} == 0 )); then
+        [[ -e "$f" ]] || return 0
+        grep -q 'LOXPROX-MANAGED' "$f" 2>/dev/null \
+            || warn "TRAP_EXEMPT_IPS is empty — removing the hand-made $f ($(awk '/^[[:space:]]*-/ {printf "%s ", $2}' "$f")). List those sources in TRAP_EXEMPT_IPS to keep them exempt."
+        backup_file "$f"
+        _LOXPROX_CROWDSEC_BAN_FILES+=("$f")
+        rm -f "$f"
+        info "TRAP_EXEMPT_IPS is empty — CrowdSec trap-exempt whitelist removed ($f)."
+        return 0
+    fi
+    for e in "${TRAP_EXEMPT_IPS[@]}"; do
+        if [[ "$e" == */* ]]; then cidrs+=("$e"); else ips+=("$e"); fi
+    done
+    _loxprox_mkdir_mode 0755 "$(dirname "$f")"
+    tmp=$(mktemp "$f.XXXXXX") || { error "Cannot write $f."; return 1; }
+    {
+        echo "# LOXPROX-MANAGED — written by deploy.sh from TRAP_EXEMPT_IPS (deploy.conf);"
+        echo "# replaced on every deploy, removed when TRAP_EXEMPT_IPS is empty. These"
+        echo "# sources never raise a local alert or ban. They are NOT trusted: nginx"
+        echo "# rate-limits them, denies admin paths and answers the trap with 444."
+        echo "name: loxprox/trap-exempt"
+        echo "description: \"LoxProx: sources exempt from the scanner trap and its bans (not trusted)\""
+        echo "whitelist:"
+        echo "  reason: \"loxprox trap-exempt source (TRAP_EXEMPT_IPS)\""
+        if (( ${#ips[@]} )); then echo "  ip:"; printf '    - "%s"\n' "${ips[@]}"; fi
+        if (( ${#cidrs[@]} )); then echo "  cidr:"; printf '    - "%s"\n' "${cidrs[@]}"; fi
+    } > "$tmp"
+    if cmp -s "$tmp" "$f"; then
+        rm -f "$tmp"
+        info "CrowdSec trap-exempt whitelist unchanged (${#TRAP_EXEMPT_IPS[@]} entries, $f)."
+        return 0
+    fi
+    [[ -f "$f" ]] && ! grep -q 'LOXPROX-MANAGED' "$f" && info "Replacing the hand-made $f — TRAP_EXEMPT_IPS manages it from now on."
+    backup_file "$f"
+    _LOXPROX_CROWDSEC_BAN_FILES+=("$f")
+    chmod 0644 "$tmp" && mv -f "$tmp" "$f" || { rm -f "$tmp"; error "Cannot install $f."; return 1; }
+    ok "CrowdSec trap-exempt whitelist loxprox/trap-exempt: ${TRAP_EXEMPT_IPS[*]} ($f)."
 }
 
 # CrowdSec profile durations are Go durations, which have no "d" unit; the
@@ -5185,6 +5348,9 @@ GEOIP_IPV6_ENABLED="$GEOIP_IPV6_ENABLED"
 GEOIP_URL_BASE6="$GEOIP_URL_BASE6"
 ASN_LEARNING_DAYS="$ASN_LEARNING_DAYS"
 SEC_UPDATE_MAX_AGE_DAYS="$SEC_UPDATE_MAX_AGE_DAYS"
+# 2026-10-21 — deploy.conf's TRAP_EXEMPT_IPS array, space-separated (read by
+# test-gateway.sh; the nginx geo and the CrowdSec whitelist carry it live).
+TRAP_EXEMPT_IPS="${TRAP_EXEMPT_IPS[*]}"
 EOF
 
     chmod 640 "$GATEWAY_CONFIG_FILE"

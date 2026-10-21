@@ -1197,6 +1197,70 @@ _cs_explain() {
     printf '%s\n' "$out"
 }
 
+# 2026-10-21: TRAP_EXEMPT_IPS, space-separated — config.env (what was
+# deployed), else deploy.conf's array.
+_gw_trap_exempt_ips() {
+    if [[ -f /etc/loxprox/config.env ]] && grep -q '^TRAP_EXEMPT_IPS=' /etc/loxprox/config.env; then
+        awk -F'"' '/^TRAP_EXEMPT_IPS=/ {print $2; exit}' /etc/loxprox/config.env
+    elif [[ -f /etc/loxprox/deploy.conf ]]; then
+        (set +u; TRAP_EXEMPT_IPS=(); source /etc/loxprox/deploy.conf >/dev/null 2>&1; printf '%s ' "${TRAP_EXEMPT_IPS[@]}")
+    fi
+}
+
+_yaml_list_items() {   # FILE → the "- item" values, quotes stripped
+    [[ -f "$1" ]] || return 0
+    awk '/^[[:space:]]*-[[:space:]]+/ {sub(/^[[:space:]]*-[[:space:]]*/, ""); sub(/[[:space:]]+#.*$/, ""); gsub(/["'\''[:space:]]/, ""); print}' "$1"
+}
+
+_nginx_geo_nets() {    # VAR FILE → the networks of `geo $VAR { … }`
+    [[ -f "$2" ]] || return 0
+    awk -v hdr="geo \$$1 {" '$0 == hdr {on = 1; next} on && /^}/ {exit} on && NF >= 2 && $1 != "default" {print $1}' "$2"
+}
+
+# Exempt must never mean trusted. Echoes one line per problem: an entry the
+# loxprox/trap-exempt whitelist or the nginx geo $loxprox_trap_exempt lacks,
+# or one that is (or lies inside) a trusted network — the nginx geo
+# $loxprox_lan or CrowdSec's trusted whitelist. Nothing when all is well.
+#   _trap_exempt_problems "ENTRIES" EXEMPT_WHITELIST NGINX_SITE TRUSTED_WHITELIST
+_trap_exempt_problems() {
+    local wl="$2" site="$3" e t in_wl in_geo
+    local -a entries=() trusted=()
+    read -r -a entries <<<"$1"
+    (( ${#entries[@]} )) || return 0
+    in_wl=$(_yaml_list_items "$wl")
+    in_geo=$(_nginx_geo_nets loxprox_trap_exempt "$site")
+    mapfile -t trusted < <(_nginx_geo_nets loxprox_lan "$site"; _yaml_list_items "$4")
+    if [[ ! -f "$wl" ]]; then
+        echo "$wl is missing"
+    elif ! grep -qx 'name: loxprox/trap-exempt' "$wl"; then
+        echo "$wl does not define the parser loxprox/trap-exempt"
+    fi
+    for e in "${entries[@]}"; do
+        grep -qxF -- "$e" <<<"$in_wl" || echo "$e: not in $wl"
+        grep -qxF -- "$e" <<<"$in_geo" || echo "$e: not in the nginx geo \$loxprox_trap_exempt ($site)"
+        if ! command -v python3 >/dev/null 2>&1; then
+            for t in "${trusted[@]}"; do [[ "$e" == "$t" ]] && echo "$e: TRUSTED ($t in \$loxprox_lan / $4)"; done
+        fi
+    done
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 -I - "${#entries[@]}" "${entries[@]}" "${trusted[@]}" <<'PY'
+import ipaddress, sys
+n = int(sys.argv[1])
+def net(v):
+    try:
+        return ipaddress.ip_network(v, strict=False)
+    except ValueError:
+        return None
+trusted = [(t, net(t)) for t in sys.argv[2 + n:]]
+for e in sys.argv[2:2 + n]:
+    en = net(e)
+    for t, tn in trusted:
+        if t == e or (en and tn and en.version == tn.version and en.overlaps(tn)):
+            print(f"{e}: TRUSTED (overlaps {t} — nginx $loxprox_lan or CrowdSec's trusted whitelist)")
+            break
+PY
+}
+
 test_edge() {
     test_header "Edge filtering, bans & host config (2026-10)"
 
@@ -1375,6 +1439,32 @@ test_edge() {
         out=$(_cs_explain loxone-access.log 198.51.100.7 "GET /jdev/cfg/api" 200)
         grep -qF 'loxprox/scanner-trap' <<<"$out" && fail "cscli explain: a normal access-log line fired loxprox/scanner-trap" \
                                                   || pass "cscli explain: a normal access-log line does not reach loxprox/scanner-trap"
+    fi
+
+    # TRAP_EXEMPT_IPS (2026-10-21): exempt from the trap and its bans, never trusted.
+    local exempt_wl=/etc/crowdsec/parsers/s02-enrich/whitelist-loxprox-trap-exempt.yaml problems line e
+    local -a exempt=()
+    read -r -a exempt <<<"$(_gw_trap_exempt_ips)"
+    if (( ${#exempt[@]} )); then
+        problems=$(_trap_exempt_problems "${exempt[*]}" "$exempt_wl" "$site" /etc/crowdsec/parsers/s02-enrich/whitelist-loxone.yaml)
+        if [[ -z "$problems" ]]; then
+            pass "TRAP_EXEMPT_IPS (${#exempt[@]}): in loxprox/trap-exempt and the nginx exempt geo, none trusted"
+        else
+            while IFS= read -r line; do fail "TRAP_EXEMPT_IPS: $line"; done <<<"$problems"
+        fi
+        for e in "${exempt[@]}"; do
+            [[ "$e" == */* ]] && continue
+            command -v cscli >/dev/null 2>&1 || break
+            out=$(_cs_explain loxprox-trap.log "$e" "GET /" 444)
+            if grep -qE 'loxprox/trap-exempt .*\[whitelisted\]' <<<"$out" && ! grep -qF 'loxprox/scanner-trap' <<<"$out"; then
+                pass "cscli explain: a trap-log line from the exempt $e is whitelisted (no loxprox/scanner-trap)"
+            else
+                fail "cscli explain: a trap-log line from the exempt $e is not whitelisted by loxprox/trap-exempt"
+            fi
+            break
+        done
+    elif [[ -f "$exempt_wl" ]]; then
+        warn "$exempt_wl exists but TRAP_EXEMPT_IPS is empty — the next deploy.sh removes it; list its sources ($(_yaml_list_items "$exempt_wl" | tr '\n' ' ')) in TRAP_EXEMPT_IPS"
     fi
 
     # Schedules, retention, tools.

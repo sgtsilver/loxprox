@@ -206,6 +206,27 @@ first.
   `GEOIP_URL_BASE6`, `SSH_ALLOW_USERS` and `TRAP_BAN_MODE` (`ban` or `observe`;
   observe withholds trap bans while you check your own devices). Invalid values abort the deploy
   instead of silently selecting another behaviour.
+- **`TRAP_EXEMPT_IPS`: exempt a known prober from the trap and its bans,
+  without trusting it.** Owner decision of 2026-10-21. The case behind it
+  is a vendor cloud probe that sends plain HTTP to `:1080` once a day, with
+  the bare IP as `Host`, no SNI and no user agent. Before the gate it got
+  the 301 to `https://`; since the gate it was a trap hit and got a HARD
+  ban. For the listed addresses or CIDRs:
+  - nginx never writes them to `loxprox-trap.log` or
+    `loxprox-trap-hosts.log` (`geo $loxprox_trap_exempt`, separate from the
+    trusted `$loxprox_lan`);
+  - the trap server answers their cleartext request (error 497) exactly as
+    the real server did before the trap: a 301 to `https://$host:1080`,
+    the address they asked for. It never names the gateway. Everything
+    else on the trap servers is still a 444;
+  - `deploy.sh` writes the CrowdSec whitelist `loxprox/trap-exempt`
+    (`/etc/crowdsec/parsers/s02-enrich/whitelist-loxprox-trap-exempt.yaml`),
+    and removes it when the list is empty.
+  The rate limits and the admin/unknown denials still apply. An entry that
+  is trusted, or lies inside a trusted network, aborts the deploy.
+  `test-gateway.sh` checks each entry against the whitelist file, the nginx
+  geo and the trusted lists. Default empty. The nginx site is regenerated
+  (template version 8).
 
 ### Fixed
 
@@ -296,6 +317,11 @@ Upgrade in place with `sudo bash deploy.sh` over SSH.
   hour, when CrowdSec has stopped reading a log. You get a Discord WARNING
   each time it does. AppSec answers 500 for the few seconds of that
   restart.
+- **A known service that probes the bare IP** (for example a vendor cloud
+  probe): list it in `TRAP_EXEMPT_IPS` *before* you deploy. A hand-made
+  `/etc/crowdsec/parsers/s02-enrich/whitelist-loxprox-trap-exempt.yaml` is
+  replaced by the managed file. With an empty list the deploy removes that
+  file; it warns and names the entries.
 
 ## [2.3.0] — 2026-10-06
 
