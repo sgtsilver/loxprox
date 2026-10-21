@@ -122,13 +122,13 @@ LAN_SUBNET="192.168.1.0/24"
 
 **Was rein gehört:**
 - Dein Heim-LAN: `"192.168.1.0/24"`
-- Ein Site-to-Site-VPN: `"192.168.100.0/24"`
+- Ein Site-to-Site-VPN: `"192.168.2.0/24"`
 - Eine konkrete Jump-Box: `"203.0.113.45"`
 - Ein OpenVPN/WireGuard-Subnetz: `"10.8.0.0/24"`
 
 **Beispiel:**
 ```bash
-SSH_ALLOWED_SUBNETS=("192.168.1.0/24" "192.168.100.0/24")
+SSH_ALLOWED_SUBNETS=("192.168.1.0/24" "192.168.2.0/24")
 ```
 
 **Wie du es nach dem Deploy testest:**
@@ -326,7 +326,7 @@ Diese IPs/Netze werden von CrowdSec **niemals** gebannt, selbst wenn sie Attack-
 ```bash
 CROWDSEC_WHITELIST_IPS=(
     "192.168.1.0/24"      # Heim-LAN
-    "192.168.100.0/24"      # Site-to-Site-VPN zum anderen Standort
+    "192.168.2.0/24"      # Site-to-Site-VPN zum anderen Standort
     "203.0.113.45"        # Uptime-Monitoring-Service
     "198.51.100.22"       # Notification-Gateway
 )

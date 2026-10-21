@@ -57,7 +57,7 @@ LAN_SUBNET="192.168.1.0/24"
 #   Only IPs from these networks can connect via SSH.
 #   NEVER add 0.0.0.0/0 here — that exposes SSH to the entire internet.
 #   Add your home LAN, a site-to-site VPN, and any jump boxes.
-#   Example: ("192.168.1.0/24" "192.168.100.0/24" "10.8.0.0/24")
+#   Example: ("192.168.1.0/24" "192.168.2.0/24" "10.8.0.0/24")
 SSH_ALLOWED_SUBNETS=("192.168.1.0/24" "10.0.0.0/24")
 
 # ═══════════════════════════════════════════════════════════════════════════════
