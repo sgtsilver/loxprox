@@ -818,8 +818,9 @@ _acq_reader_deaths() {
                 f=$(sed -nE 's/.* tail=([^ ]+).*/\1/p' <<<"$line")
                 m=$(sed -nE 's/.*msg="([^"]*)".*/\1/p' <<<"$line")
                 all+=$'\n'"$e|$t|${f:-?}|${m//|//}"
+            # Only the text is used (the bytes up to the size recorded above).
             done < <(tail -c +$((from + 1)) "$CROWDSEC_LOG" 2>/dev/null | head -c $((size - from)) \
-                     | grep -F 'file reader died' | tail -n 20)
+                     | grep -F 'file reader died' | tail -n 20 || true)
         fi
     fi
     while IFS='|' read -r e t f m; do
