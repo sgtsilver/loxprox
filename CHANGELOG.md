@@ -215,9 +215,10 @@ first.
   - nginx never writes them to `loxprox-trap.log` or
     `loxprox-trap-hosts.log` (`geo $loxprox_trap_exempt`, separate from the
     trusted `$loxprox_lan`);
-  - the trap server answers their cleartext request (error 497) with the
-    real server's 301 to `https://<TLS_DOMAIN>:1080`. Everything else on
-    the trap servers is still a 444;
+  - the trap server answers their cleartext request (error 497) exactly as
+    the real server did before the trap: a 301 to `https://$host:1080`,
+    the address they asked for. It never names the gateway. Everything
+    else on the trap servers is still a 444;
   - `deploy.sh` writes the CrowdSec whitelist `loxprox/trap-exempt`
     (`/etc/crowdsec/parsers/s02-enrich/whitelist-loxprox-trap-exempt.yaml`),
     and removes it when the list is empty.

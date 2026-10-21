@@ -357,8 +357,9 @@ TRAP_BAN_MODE="ban"
 # What changes for them: they are never written to the trap logs, CrowdSec
 # never alerts on or bans them (whitelist loxprox/trap-exempt in
 # /etc/crowdsec/parsers/s02-enrich/whitelist-loxprox-trap-exempt.yaml), and
-# their cleartext request to :1080 with a foreign Host gets the real name's
-# 301 to https://TLS_DOMAIN:1080 instead of the 444 (TLS mode). Addresses or
+# their cleartext request to :1080 with a foreign Host gets the real server's
+# 301 instead of the 444 (TLS mode), exactly as before the trap: to
+# https://<the Host they sent>:1080, never to TLS_DOMAIN. Addresses or
 # CIDRs (IPv4/IPv6); an entry that is trusted (LAN_SUBNET,
 # CROWDSEC_WHITELIST_IPS, loopback) is refused. Empty (default) = nobody;
 # the deploy then removes the whitelist file — also a hand-made one.

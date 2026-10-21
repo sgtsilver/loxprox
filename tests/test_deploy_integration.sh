@@ -2774,16 +2774,24 @@ test_trap_exempt() {
     geo=$(awk '/^geo \$loxprox_trap_exempt \{/ {on = 1; next} on && /^\}/ {exit} on' "$NGINX_SITE")
     [[ "$(grep -c '1;' <<<"$geo")" == "0" ]] && pass "empty list: the exempt geo holds only default 0" || fail "empty list geo: $geo"
 
-    # TLS block: 497 from an exempt source → 301 to the first real name, never to \$host.
+    # TLS block: 497 from an exempt source → exactly the real server's 301
+    # (to the Host it sent, as before the trap); the gateway's names never
+    # appear in the trap servers.
     TRAP_EXEMPT_IPS=("203.0.113.10")
     configure_nginx >/dev/null 2>&1
     EXTRA_SERVER_NAMES="alt.example.com" _loxprox_site_enable_tls >/dev/null 2>&1
     out=$(awk '/location @loxprox_trap_497 \{/ {on = 1; next} on && /^    \}/ {exit} on' "$NGINX_SITE")
-    grep -qxF '        if ($loxprox_trap_exempt) { return 301 https://loxprox.example.com:1080$request_uri; }' <<<"$out" \
+    grep -qxF '        if ($loxprox_trap_exempt) { return 301 https://$host:1080$request_uri; }' <<<"$out" \
         && grep -qxF '        return 444;' <<<"$out" \
-        && pass "trap server 497: exempt → 301 to https://TLS_DOMAIN:1080, anyone else → 444" || fail "@loxprox_trap_497: $out"
-    [[ "$(grep -c 'return 301 https://\$host' "$NGINX_SITE")" == "1" ]] \
-        && pass "the trap server never redirects to the Host it was sent (only the real server uses \$host)" || fail "\$host redirect count wrong"
+        && pass "trap server 497: exempt → 301 to https://\$host:1080, anyone else → 444" || fail "@loxprox_trap_497: $out"
+    local real_301 trap_301
+    real_301=$(grep -o 'location @loxprox_https_redirect { return 301 [^;]*;' "$NGINX_SITE" | grep -o 'return 301 [^;]*;')
+    trap_301=$(grep -o 'return 301 [^;]*;' <<<"$out")
+    [[ -n "$real_301" && "$real_301" == "$trap_301" ]] \
+        && pass "the exempt redirect is byte-identical to the real server's ($trap_301)" || fail "redirects differ: real '$real_301', trap '$trap_301'"
+    out=$(awk '/# LOXPROX-TRAP-BEGIN/ {on = 1} on {print} /# LOXPROX-TRAP-END/ {exit}' "$NGINX_SITE")
+    grep -qE 'loxprox\.example\.com|alt\.example\.com' <<<"$out" && fail "a gateway name appears in the trap servers" \
+                                                         || pass "the trap servers never name the gateway (no TLS_DOMAIN in a redirect)"
     [[ "$(grep -c 'loxprox_trap_exempt' "$NGINX_SITE")" == "4" ]] \
         && pass "exempt variable used by the geo, the two log maps and the 497 location only" || fail "loxprox_trap_exempt uses: $(grep -c 'loxprox_trap_exempt' "$NGINX_SITE")"
     rm -f "$NGINX_SITE" "$NGINX_ACME_CONF"

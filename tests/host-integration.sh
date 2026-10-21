@@ -1035,11 +1035,20 @@ t_nginx_edge() {
     if docker exec "$EDGE_CTR" ip addr add "$E/32" dev lo; then
         note "trap-exempt source = $E (on lo, in TRAP_EXEMPT_IPS); non-exempt control = $ip"
         tb=$(edge_lines "$trap"); hb=$(edge_lines "$hosts")
-        hdrs=$(docker exec "$EDGE_CTR" curl -s -D - -o /dev/null --max-time 10 -H 'User-Agent:' "http://$E:1080/dev/sys/getcertificate" | tr -d '\r')
-        if grep -q '^HTTP/1.1 301' <<<"$hdrs" && grep -qx 'Location: https://loxprox.test:1080/dev/sys/getcertificate' <<<"$hdrs"; then
-            pass "exempt $E: cleartext to :1080, bare IP as Host → 301 to https://loxprox.test:1080/dev/sys/getcertificate"
+        # Host = the bare public IP the probe asks for (203.0.113.80 here): the
+        # 301 must be the real server's, to https://$host:1080 — as before the
+        # trap — and must never name the gateway (TLS_DOMAIN loxprox.test).
+        local probe_host=203.0.113.80
+        hdrs=$(docker exec "$EDGE_CTR" curl -s -D - -o /dev/null --max-time 10 -H 'User-Agent:' -H "Host: $probe_host" "http://$E:1080/dev/sys/getcertificate" | tr -d '\r')
+        if grep -q '^HTTP/1.1 301' <<<"$hdrs" && grep -qx "Location: https://$probe_host:1080/dev/sys/getcertificate" <<<"$hdrs"; then
+            pass "exempt $E: cleartext to :1080 with Host $probe_host (bare IP) → 301 to https://$probe_host:1080/dev/sys/getcertificate"
         else
             fail "exempt cleartext probe: '$(head -1 <<<"$hdrs")' $(grep -i '^Location' <<<"$hdrs")"
+        fi
+        if grep -qi '^Location:' <<<"$hdrs" && ! grep -qi '^Location:.*loxprox\.test' <<<"$hdrs"; then
+            pass "exempt $E: the redirect does not disclose the gateway's name (no loxprox.test in Location)"
+        else
+            fail "exempt redirect Location names the gateway or is missing: $(grep -i '^Location' <<<"$hdrs")"
         fi
         code=$(edge_code "https://$E:1080/dev/sys/getcertificate")
         [[ "$code" == "000" ]] && pass "exempt $E: TLS without SNI (bare IP) → 444" || fail "exempt, TLS bare IP: HTTP $code"
