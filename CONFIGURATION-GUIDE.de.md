@@ -443,6 +443,25 @@ Im Observe-Modus werden Scanner geloggt, aber nicht gebannt.
 
 `loxprox/auth-bf` und (bei `UNKNOWN_PATH_MODE="log"`) `loxprox/unknown-path` laufen immer in der Simulation. Kann `deploy.sh` eine Simulation nicht mit `cscli simulation status` bestätigen, entfernt es dieses Scenario, statt es bannen zu lassen, und meldet den CrowdSec-Schritt als degradiert; beheben mit `sudo cscli simulation enable <scenario>` und erneutem `sudo bash deploy.sh`.
 
+### `TRAP_EXEMPT_IPS` — einen bekannten Prober vom Trap ausnehmen (nicht vertrauenswürdig)
+
+| Key | Default | Was es tut |
+|---|---|---|
+| `TRAP_EXEMPT_IPS` | `()` | Bash-Array aus IPv4-/IPv6-Adressen oder CIDRs, z. B. `("203.0.113.10" "2001:db8:10::/48")`. Diese Quellen sind vom Trap und von jedem Ban ausgenommen, aber sie sind **nicht vertrauenswürdig**. |
+
+**Wann nutzen:** Ein bekannter Dienst fragt die nackte IP des Gateways ab und darf nicht gebannt werden. Der typische Fall ist ein Cloud-Probe eines Herstellers, der einmal am Tag Klartext-HTTP an `:1080` schickt, mit der nackten IP als `Host`, ohne SNI und ohne User-Agent. Vor dem Host/SNI-Gate bekam er den 301-Redirect auf `https://`; seit dem Gate ist er ein Trap-Treffer und bekommt einen HARD-Ban.
+
+Was eine ausgenommene Quelle bekommt:
+
+- **Kein Trap-Log.** Ihre Anfragen landen nie in `loxprox-trap.log` oder `loxprox-trap-hosts.log`. Ins Access-Log schreiben die Trap-Server sie auch nicht, sie hinterlassen dort also gar keine Spur.
+- **Kein Alert, kein Ban.** `deploy.sh` schreibt die CrowdSec-Whitelist `loxprox/trap-exempt` (`/etc/crowdsec/parsers/s02-enrich/whitelist-loxprox-trap-exempt.yaml`). Sie gilt für jedes lokale Scenario, nicht nur für den Trap. Wie `CROWDSEC_WHITELIST_IPS` hebt sie Community-Blocklist-Decisions (CAPI) nicht auf.
+- **Den 301 für ihren Klartext-Probe** (TLS-Modus): Klartext-HTTP an `:1080` mit fremdem `Host` bekommt statt der 444 den Redirect des echten Servers auf `https://<TLS_DOMAIN>:1080<Pfad>`. Alles andere auf den Trap-Servern bleibt eine 444: TLS mit fremdem oder fehlendem SNI, `:80` mit fremdem `Host`, `TRACE`/`CONNECT`, Scanner-Pfade.
+- **Sonst ändert sich nichts.** Die Rate-Limits und die Auth-/WebSocket-Limits gelten. Die Admin-Pfade antworten mit `403` und `UNKNOWN_PATH_MODE="deny"` mit `404`, genau wie für jeden Internet-Client.
+
+Das unterscheidet den Key von `CROWDSEC_WHITELIST_IPS`, das *vertrauenswürdig* macht: keine Limits, keine Admin-/Unknown-Sperren. Ein Eintrag, der vertrauenswürdig ist oder in einem vertrauenswürdigen Netz liegt (Loopback, `LAN_SUBNET`, `CROWDSEC_WHITELIST_IPS`), bricht den Deploy ab, ebenso ein Eintrag, der keine Adresse und kein CIDR ist. Vor einem Eintrag breiter als `/24` (IPv4) oder `/48` (IPv6) wird gewarnt.
+
+Eine leere Liste (der Default) entfernt die Whitelist-Datei beim nächsten Deploy. Das gilt auch für eine von Hand angelegte Datei unter diesem Pfad: Der Deploy warnt und nennt die Einträge, die er entfernt. Trag die Quellen also *vor* dem Deploy in `TRAP_EXEMPT_IPS` ein. `test-gateway.sh` prüft, dass jeder Eintrag in der Whitelist-Datei und im nginx-Exempt-Geo steht und keiner vertrauenswürdig ist.
+
 ### `SSH_ALLOW_USERS` und Root-Login im HARD-Modus
 
 | Key | Default | Was er tut |

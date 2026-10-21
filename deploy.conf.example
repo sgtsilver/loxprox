@@ -350,6 +350,21 @@ REMOTE_ADMIN_PATHS="deny"
 #      deploy (or a panel apply) puts the trap back into observe mode.
 TRAP_BAN_MODE="ban"
 
+# Sources exempt from the trap and from every ban — for a known service that
+# probes the bare IP, e.g. a vendor cloud probe sending plain HTTP to :1080
+# once a day. Exempt is NOT trusted: unlike CROWDSEC_WHITELIST_IPS these
+# sources keep the rate limits, the admin/unknown denials and the trap's 444.
+# What changes for them: they are never written to the trap logs, CrowdSec
+# never alerts on or bans them (whitelist loxprox/trap-exempt in
+# /etc/crowdsec/parsers/s02-enrich/whitelist-loxprox-trap-exempt.yaml), and
+# their cleartext request to :1080 with a foreign Host gets the real name's
+# 301 to https://TLS_DOMAIN:1080 instead of the 444 (TLS mode). Addresses or
+# CIDRs (IPv4/IPv6); an entry that is trusted (LAN_SUBNET,
+# CROWDSEC_WHITELIST_IPS, loopback) is refused. Empty (default) = nobody;
+# the deploy then removes the whitelist file — also a hand-made one.
+#   Example: TRAP_EXEMPT_IPS=("203.0.113.10" "2001:db8:10::/48")
+TRAP_EXEMPT_IPS=()
+
 # Ban durations per offence, as CrowdSec durations (m/h/d). HARD applies to
 # unambiguous scanner scenarios (BAN_HARD_SCENARIOS), SOFT to everything else.
 # The first value is the ban CrowdSec issues (deploy.sh writes it into

@@ -62,7 +62,7 @@ Stack:
 - auditd for config tampering detection
 - Discord alerting on security events
 
-Deploy: one script (`deploy.sh`, ~5700 lines, idempotent). Validate: 50+ automated checks. Grade: A- across CIS Debian 12, OWASP Top 10, and OWASP IoT Top 10.
+Deploy: one script (`deploy.sh`, ~6000 lines, idempotent). Validate: 50+ automated checks. Grade: A- across CIS Debian 12, OWASP Top 10, and OWASP IoT Top 10.
 
 LAN bypasses the gateway entirely — only internet-facing traffic is hardened. Runs on a 1 vCPU / 1 GB VM (2 vCPU / 2 GB recommended for attack headroom) or a Raspberry Pi 4. **VM-only — LXC unsupported**, because several kernel-level defenses (sysctls including the Fragnesia mitigation, auditd, AppArmor enforcement, nftables) cannot be applied from inside a container and would silently no-op.
 
