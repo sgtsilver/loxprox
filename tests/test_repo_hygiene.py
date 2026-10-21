@@ -14,6 +14,7 @@ real config) is never enumerated by `git ls-files`, so it can hold whatever it w
 Run: `pytest tests/test_repo_hygiene.py -v`  (or the whole `tests/` dir).
 """
 
+import hashlib
 import re
 import subprocess
 from functools import lru_cache
@@ -85,30 +86,126 @@ def fmt(violations):
 
 # ── 1. OpSec: no real production details in the public repo ───────────────────
 
-# Real prod identifiers for the live production gateway. These must NEVER appear in a
-# tracked (public) file. Placeholders (192.168.1.x, 10.0.0.x, 1.2.3.4) and the
-# generic DDNS provider name "selfhost.eu" are fine and deliberately not matched.
+# Generic leak shapes. These name no real value, so they stay readable regexes.
+# Placeholders (192.168.1.x, 192.168.2.x, 10.0.0.x, 1.2.3.4, the documentation
+# ranges) and generic DDNS provider names are fine and deliberately not matched.
 OPSEC_FORBIDDEN = [
-    (r"dewia71", "real DDNS subdomain label"),
-    (r"192\.168\.178\.\d{1,3}", "real production LAN subnet"),
-    (r"loxprox-wiener", "real SSH alias"),
-    (r"\bwiener\b", "real deployment codename"),
-    (r"discord\.com/api/webhooks/\d{15,}", "real Discord webhook (15+ digit snowflake)"),
-    (r"paul\.schneider", "maintainer real name/email local-part"),
-    (r"@wtnet\.de", "maintainer real email domain"),
+    (r"discord(?:app)?\.com/api/webhooks/\d{15,}", "real Discord webhook (15+ digit snowflake)"),
 ]
+
+# Real identifiers of the live deployment and its maintainer. They must NEVER
+# appear in a tracked (public) file, and this public guard must not spell them
+# out either, so it stores only sha256(lower-cased value). Every tracked text
+# file, this one included, is tokenised; each candidate string is hashed and
+# looked up. A hit reports the label and path:line, never the matched text.
+#
+# Adding an entry: hash the value locally and commit only the hash —
+#     printf %s '<value>' | tr A-Z a-z | sha256sum      (macOS: shasum -a 256)
+# Run that in a terminal, never in a commit, PR, issue, or CI log. For a
+# network, hash its /24 network address ('10.1.2.0'); any address or prefix
+# inside that /24 then matches. See opsec_candidates() for what one token yields.
+#
+# Limits: sha256 keeps the values out of the source and out of search, but a
+# low-entropy value (a /24, a short word) can be recovered by trying every
+# candidate. This is a guard against re-publishing, not a place to keep secrets.
+OPSEC_FORBIDDEN_SHA256 = {
+    "fe5b65852360d95941ca2920dc1409ca99e367e246d03a1ca2aa10558049622d": "real SSH alias #1",
+    "f5e74d93933870bc6075381e066eaa1d3d53f519547c3fe5bf2c1b36c22d2374": "real SSH alias #2",
+    "61a13826027fc3371224b35a703586281896ccfafb962d2778a0e7586732acca": "real SSH alias #3",
+    "29feb5d3b68f493955a9c688197c580c99cd2ec416221d3537ce00c48c5765f2": "real deployment codename",
+    "b40c1321f736b8234bb5bd049eedd21ec503f629fc7ffce4d203a58dcca03cf2": "maintainer real email local-part",
+    "91b1fc4f9af93380d481da0f760058198f69f644b66387e2a0ab8bb4e5bba276": "maintainer real email domain",
+    "64987d7d98418ba06e6690f5f35d477cbdc452979a2a0524c416f7896defa1a5": "production gateway hostname",
+    "e925e4871f0db772a2e276eba64101927b58859902b690caa44ce159fe2368c7": "production DDNS label",
+    "50bdc3ebbbf4b3c3b3b7eb2b4700d94cec412bb6bc9b810760dd9f924214b9cd": "real site-to-site subnet",
+    "b3d5c873a7a1eae8f0a740e0cf708cf0a4187ab81b642f36bc19a11af0dd674b": "real production LAN subnet",
+    "ed7e163a400889ee46cc4461e536c205f3054e48db69bc1c5573188985a4dc4a": "maintainer workstation hostname",
+}
+
+_OPSEC_TOKEN_RX = re.compile(r"[A-Za-z0-9._@-]+")
+_OPSEC_NET24_RX = re.compile(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\.|$)")
+
+
+@lru_cache(maxsize=None)
+def _sha256(s):
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def opsec_candidates(token):
+    """Lower-cased strings checked for one token: the token, its user and
+    domain parts around '@', every dot-label and every '-'/'_' part of a
+    label, every parent domain (a.b.c -> b.c), and, for a dotted-quad or a
+    three-octet prefix, its /24 network address (192.0.2.7 and 192.0.2.x
+    both -> 192.0.2.0)."""
+    t = token.strip("._-@").lower()
+    if not t:
+        return set()
+    out = {t}
+    for part in t.split("@"):
+        labels = [label for label in part.split(".") if label]
+        if not labels:
+            continue
+        out.add(".".join(labels))
+        out.update(labels)
+        out.update(".".join(labels[i:]) for i in range(1, len(labels) - 1))
+        for label in labels:
+            out.update(p for p in re.split(r"[-_]", label) if p)
+    m = _OPSEC_NET24_RX.match(t)
+    if m:
+        out.add(f"{m.group(1)}.{m.group(2)}.{m.group(3)}.0")
+    return out
+
+
+def opsec_hash_hits(text, deny):
+    """Return [(lineno, label)] for every line of `text` containing a token
+    whose candidate hashes to an entry of `deny` ({sha256: label}). Regex
+    escapes (`\\.`) are undone first so an escaped value cannot slip past."""
+    hits = []
+    for i, line in enumerate(text.splitlines(), 1):
+        found = set()
+        for tok in _OPSEC_TOKEN_RX.findall(line.replace("\\.", ".")):
+            for cand in opsec_candidates(tok):
+                if _sha256(cand) in deny:
+                    found.add(deny[_sha256(cand)])
+        hits.extend((i, label) for label in sorted(found))
+    return hits
 
 
 def test_no_opsec_leaks():
+    # Report label + location only: echoing the line would re-publish the
+    # very value the check exists to keep out (CI logs are public).
     hits = []
     for pat, why in OPSEC_FORBIDDEN:
-        for f, ln, txt in scan(pat):
-            hits.append((f, ln, f"[{why}] {txt}"))
+        for f, ln, _txt in scan(pat):
+            hits.append((f, ln, f"[{why}]"))
+    for f in text_files() + [SELF]:
+        for ln, why in opsec_hash_hits(read(f), OPSEC_FORBIDDEN_SHA256):
+            hits.append((f, ln, f"[{why}]"))
     assert not hits, (
         "Real production details leaked into tracked (public) files:\n" + fmt(hits)
         + "\n\nScrub to a placeholder, or move the file to the gitignored "
           "local-deployment/."
     )
+
+
+def test_opsec_hash_guard_matches_without_echoing():
+    # Inert canaries, hashed the same way as the real entries.
+    host, net = "canary-gw.example.invalid", "198.51.100.0"
+    deny = {_sha256(host): "canary host", _sha256(net): "canary subnet",
+            _sha256("canary-alias"): "canary alias"}
+    text = "\n".join([
+        "ssh admin@Canary-GW.example.invalid -p 22",   # 1: user@host, case-folded
+        "allow 198.51.100.7/24 and 198.51.100.x",      # 2: address and prefix -> /24
+        r"(r'198\.51\.100\.\d+', 'escaped')",          # 3: regex-escaped prefix
+        "Host canary-alias",                           # 4: bare alias
+        "198.51.101.7 canary-gw2.example.invalid",     # 5: neighbours must not match
+        "ProxyJump canary-alias-2",                    # 6: a longer alias is another token
+    ])
+    assert opsec_hash_hits(text, deny) == [
+        (1, "canary host"), (2, "canary subnet"), (3, "canary subnet"), (4, "canary alias"),
+    ]
+    report = fmt([("f", ln, f"[{why}]") for ln, why in opsec_hash_hits(text, deny)])
+    assert host not in report.lower() and "198.51.100" not in report
 
 
 # ── 2. Hardware: no stale 512MB-as-minimum ────────────────────────────────────

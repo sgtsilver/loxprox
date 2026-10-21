@@ -270,7 +270,7 @@ tests/
 ├── run-tests.sh              # unified test runner (runs all of tests/)
 ├── test_gui.py               # pytest for the Panel: pure logic, static-asset/CSP/i18n guards, invite page
 ├── test_progressive_ban.py   # 22 pytest cases for ban script
-├── test_repo_hygiene.py      # 14 repo-hygiene guards (OpSec, versions, hardware,
+├── test_repo_hygiene.py      # 15 repo-hygiene guards (OpSec, versions, hardware,
 │                             #   config model, dead-file refs, links, bilingual,
 │                             #   naming) — the automated audit; tracked files only
 ├── test_deploy_integration.sh # 166 assertions for deploy.sh logic (incl. v2.0 tunnel)
@@ -279,8 +279,9 @@ tests/
 
 **`test_repo_hygiene.py` replaces the manual "deep clean" audits.** It scans only
 git-tracked files (the public repo), so the gitignored `local-deployment/`
-production config is never inspected. Run it before any docs/release PR:
-`pytest tests/ -v`.
+production config is never inspected. Real deployment identifiers are listed only as
+sha256 hashes, and a hit reports the label and path:line, never the value.
+Run it before any docs/release PR: `pytest tests/ -v`.
 
 Run locally:
 ```bash
