@@ -1272,13 +1272,15 @@ test_edge() {
         masked)
             if systemctl is-active --quiet crowdsec-hubupdate.timer 2>/dev/null; then
                 fail "crowdsec-hubupdate.timer is masked but still scheduled (sudo systemctl stop crowdsec-hubupdate.timer)"
+            elif systemctl is-failed --quiet crowdsec-hubupdate.timer 2>/dev/null; then
+                fail "crowdsec-hubupdate.timer is masked but in failed state (sudo systemctl reset-failed crowdsec-hubupdate.timer)"
             else
                 pass "crowdsec-hubupdate.timer masked — hub-refresh.sh is the only unattended hub update"
             fi ;;
         ""|not-found)
             pass "crowdsec-hubupdate.timer not present (this CrowdSec package ships none)" ;;
         *)
-            fail "crowdsec-hubupdate.timer is '$hubupdate' — CrowdSec's package upgrades EVERY hub item nightly, without snapshot or rollback (re-run deploy.sh, or: sudo systemctl mask --now crowdsec-hubupdate.timer)" ;;
+            fail "crowdsec-hubupdate.timer is '$hubupdate' — CrowdSec's package upgrades EVERY hub item nightly, without snapshot or rollback (re-run deploy.sh, or: sudo systemctl stop crowdsec-hubupdate.timer && sudo systemctl mask crowdsec-hubupdate.timer)" ;;
     esac
     if grep -qF '/var/log/nginx/loxprox-trap.log' /etc/logrotate.d/loxone-nginx 2>/dev/null \
             && grep -qE '^[[:space:]]+rotate 90$' /etc/logrotate.d/loxone-nginx; then

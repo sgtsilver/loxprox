@@ -180,7 +180,7 @@ first.
   update && cscli hub upgrade` every night: every installed hub item
   upgraded and CrowdSec reloaded, with no snapshot and no rollback, so the
   protection above was bypassed. `deploy.sh` masks the timer
-  (`systemctl mask --now`) once `hub-refresh.sh` and its cron line are in
+  (`systemctl stop`, then `mask`) once `hub-refresh.sh` and its cron line are in
   place; `test-gateway.sh` checks that it stays masked.
 - **`test-gateway.sh`** gets an *Edge filtering, bans & host config*
   section; the new checks and scripts have CI tests.
@@ -207,6 +207,10 @@ first.
   to loopback, and probe an app-class path, so `UNKNOWN_PATH_MODE="deny"`
   can never hide a Miniserver outage.
 - The deploy summary's "Verify proxy" hint now prints the working command.
+- Masking the package's `crowdsec-hubupdate.timer` no longer leaves it in the
+  failed state: the deploy stops the timer before masking it (`mask --now`
+  made a running timer fail on systemd 252), and `test-gateway.sh` flags a
+  failed timer.
 
 ### Upgrade notes — from v2.3.0
 
