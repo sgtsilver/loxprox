@@ -1261,6 +1261,37 @@ for e in sys.argv[2:2 + n]:
 PY
 }
 
+# 2026-10-21: deploy.conf's TRUSTED_SOURCES, space-separated — config.env's
+# copy, else the array from deploy.conf (the generic _gw_conf would return
+# only an array's first element).
+_gw_trusted_sources() {
+    if [[ -f /etc/loxprox/config.env ]] && grep -q '^TRUSTED_SOURCES=' /etc/loxprox/config.env; then
+        awk -F'"' 'index($0, "TRUSTED_SOURCES=") == 1 {print $2; exit}' /etc/loxprox/config.env
+    elif [[ -f /etc/loxprox/deploy.conf ]]; then
+        (set +u; source /etc/loxprox/deploy.conf >/dev/null 2>&1; printf '%s ' "${TRUSTED_SOURCES[@]}")
+    fi
+}
+
+# The entries of site $1's geo $loxprox_lan other than loopback, $2
+# (LAN_SUBNET) and the remaining arguments (TRUSTED_SOURCES), one per line;
+# "NO-GEO" when the site has no such block. nginx trusts every entry there
+# (admin and unknown paths, no auth / WebSocket limits), so the CrowdSec
+# whitelist — ban exemption only — must never show up in it.
+_trusted_geo_extra() {
+    local site="$1" geo net t
+    shift
+    local -a allowed=(127.0.0.0/8 ::1 "$@")
+    grep -q '^geo \$loxprox_lan {' "$site" 2>/dev/null || { echo NO-GEO; return 0; }
+    geo=$(awk '/^geo \$loxprox_lan \{/ {on = 1; next} on && /^\}/ {exit} on && $1 != "default" {print $1}' "$site")
+    while read -r net; do
+        [[ -n "$net" ]] || continue
+        for t in "${allowed[@]}"; do
+            [[ "$net" == "$t" ]] && continue 2
+        done
+        printf '%s\n' "$net"
+    done <<<"$geo"
+}
+
 test_edge() {
     test_header "Edge filtering, bans & host config (2026-10)"
 
@@ -1279,6 +1310,19 @@ test_edge() {
         if [[ "$(_gw_conf REMOTE_ADMIN_PATHS)" != "allow" ]]; then
             grep -qE '"0:admin"[[:space:]]+403;' "$site" && pass "admin endpoints answer 403 to untrusted sources" \
                 || fail "REMOTE_ADMIN_PATHS=deny but the site has no admin denial"
+        fi
+        # 2026-10-21: nginx trusts loopback, LAN_SUBNET and TRUSTED_SOURCES,
+        # nothing else — CROWDSEC_WHITELIST_IPS is ban exemption, not trust.
+        local -a trusted_cfg=()
+        local extra
+        read -r -a trusted_cfg <<<"$(_gw_trusted_sources)"
+        extra=$(_trusted_geo_extra "$site" "$(_gw_conf LAN_SUBNET)" "${trusted_cfg[@]}")
+        if [[ "$extra" == "NO-GEO" ]]; then
+            fail "site has no geo \$loxprox_lan (template < v6? re-run deploy.sh)"
+        elif [[ -n "$extra" ]]; then
+            fail "nginx trusts sources outside loopback, LAN_SUBNET and TRUSTED_SOURCES: $(tr '\n' ' ' <<<"$extra")(re-run deploy.sh; CROWDSEC_WHITELIST_IPS no longer grants trust)"
+        else
+            pass "nginx trusts only loopback, LAN_SUBNET and TRUSTED_SOURCES (${#trusted_cfg[@]} TRUSTED_SOURCES entries)"
         fi
     fi
 
