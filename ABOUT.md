@@ -77,7 +77,7 @@ Published **LoxProx**, an open-source security gateway for Loxone Miniserver Gen
 LoxProx deploys a six-layer defense stack (nftables → nginx → CrowdSec IDS → AppSec WAF → firewall bouncer → AppArmor/auditd) on a Debian 12 VM, transparently protecting external access without affecting LAN users.
 
 Technical highlights:
-- Idempotent ~5700-line deployment script
+- Idempotent ~6000-line deployment script
 - 50+-check automated validation suite
 - Self-contained HTML security report (A- grade)
 - Raspberry Pi 4/5 compatible

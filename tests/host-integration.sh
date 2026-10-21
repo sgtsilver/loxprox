@@ -1282,7 +1282,8 @@ t_crowdsec() {
     out=$(explain loxone-access.log 198.51.100.7 "GET /.env" 444)
     grep -qF 'loxprox/scanner-trap' <<<"$out" && fail "explain: the same line in the access log fired scanner-trap" || pass "explain: the same line in loxone-access.log does not (routing by evt.Line.Src)"
     out=$(explain loxone-access.log 198.51.100.7 "GET /jdev/cfg/api" 200)
-    grep -qF 'loxprox/' <<<"$out" && fail "explain: a normal app line reached a loxprox scenario" || pass "explain: a normal app line reaches no loxprox scenario"
+    # Scenario names only: the parser list names loxprox/trap-exempt for every line.
+    grep -qE 'loxprox/(scanner-trap|unknown-path|auth-bf)' <<<"$out" && fail "explain: a normal app line reached a loxprox scenario" || pass "explain: a normal app line reaches no loxprox scenario"
     out=$(explain loxprox-unknown.log 198.51.100.7 "GET /ci/unknown" 200)
     grep -qF 'loxprox/unknown-path' <<<"$out" && pass "explain: an unknown-log line pours into loxprox/unknown-path" || fail "unknown-log line not routed"
     out=$(explain loxone-access.log 198.51.100.7 "GET /jdev/sys/getkey2/<redacted>" 200)
