@@ -246,7 +246,9 @@ first.
     (`/etc/crowdsec/parsers/s02-enrich/whitelist-loxprox-trap-exempt.yaml`),
     and removes it when the list is empty.
   The rate limits and the admin/unknown denials still apply. An entry that
-  is trusted, or lies inside a trusted network, aborts the deploy.
+  is trusted, or lies inside a trusted network (loopback, `LAN_SUBNET`,
+  `TRUSTED_SOURCES`), aborts the deploy, and so does one that overlaps
+  `CROWDSEC_WHITELIST_IPS`.
   `test-gateway.sh` checks each entry against the whitelist file, the nginx
   geo and the trusted lists. Default empty. The nginx site is regenerated
   (template version 8).

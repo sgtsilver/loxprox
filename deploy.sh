@@ -635,17 +635,25 @@ _loxprox_validate_hardening_config() {
 }
 
 # 2026-10-21: TRAP_EXEMPT_IPS — addresses / CIDRs only, and never a trusted
-# source: an exempt address keeps every limit and denial, a trusted one has
-# none, so an entry in both keys (or inside a trusted network) is refused.
-# python3, where present, checks the values exactly (no host bits, overlaps).
+# source: an exempt address keeps every limit and denial, a trusted one —
+# loopback, LAN_SUBNET, TRUSTED_SOURCES — has none, so an entry that is or
+# lies inside a trusted network is refused. One that overlaps
+# CROWDSEC_WHITELIST_IPS is refused as well (the stricter of the two rules,
+# kept from before the trust split): loxprox/trap-exempt already never bans
+# it, and one never-ban list per source keeps each exemption's reason in
+# one place. python3, where present, checks the values exactly (no host
+# bits, overlaps).
 _loxprox_validate_trap_exempt() {
     local fail=0 e t out min
     for e in "${TRAP_EXEMPT_IPS[@]}"; do
         if ! _loxprox_is_addr_or_cidr "$e"; then
             error "TRAP_EXEMPT_IPS entry '$e' is not an IPv4/IPv6 address or CIDR."; fail=1; continue
         fi
-        for t in 127.0.0.0/8 ::1 "$LAN_SUBNET" "${CROWDSEC_WHITELIST_IPS[@]}"; do
+        for t in 127.0.0.0/8 ::1 "$LAN_SUBNET" "${TRUSTED_SOURCES[@]}"; do
             [[ "$e" == "$t" ]] && { error "TRAP_EXEMPT_IPS entry '$e' is trusted ($t) — exempt sources must not be trusted."; fail=1; }
+        done
+        for t in "${CROWDSEC_WHITELIST_IPS[@]}"; do
+            [[ "$e" == "$t" ]] && { error "TRAP_EXEMPT_IPS entry '$e' is also in CROWDSEC_WHITELIST_IPS — list a source in one never-ban list only."; fail=1; }
         done
         min=24; [[ "$e" == *:* ]] && min=48
         if [[ "$e" =~ /([0-9]+)$ ]] && (( BASH_REMATCH[1] < min )); then
@@ -655,25 +663,36 @@ _loxprox_validate_trap_exempt() {
     if (( fail || ${#TRAP_EXEMPT_IPS[@]} == 0 )) || ! command -v python3 >/dev/null 2>&1; then
         return "$fail"
     fi
-    out=$(python3 -I - "${#TRAP_EXEMPT_IPS[@]}" "${TRAP_EXEMPT_IPS[@]}" 127.0.0.0/8 ::1 "$LAN_SUBNET" "${CROWDSEC_WHITELIST_IPS[@]}" <<'PY'
+    local -a trusted=(127.0.0.0/8 ::1 "$LAN_SUBNET" "${TRUSTED_SOURCES[@]}")
+    out=$(python3 -I - "${#TRAP_EXEMPT_IPS[@]}" "${TRAP_EXEMPT_IPS[@]}" "${#trusted[@]}" "${trusted[@]}" "${CROWDSEC_WHITELIST_IPS[@]}" <<'PY'
 import ipaddress, sys
-n = int(sys.argv[1])
-trusted = []
-for t in sys.argv[2 + n:]:
-    try:
-        trusted.append((t, ipaddress.ip_network(t, strict=False)))
-    except ValueError:
-        pass
-for e in sys.argv[2:2 + n]:
+a = sys.argv[1:]
+n = int(a[0])
+exempt, m = a[1:1 + n], int(a[1 + n])
+def nets(values):
+    out = []
+    for t in values:
+        try:
+            out.append((t, ipaddress.ip_network(t, strict=False)))
+        except ValueError:
+            pass
+    return out
+trusted, never_ban = nets(a[2 + n:2 + n + m]), nets(a[2 + n + m:])
+def hit(net, lst):
+    return next((t for t, tnet in lst if tnet.version == net.version and tnet.overlaps(net)), None)
+for e in exempt:
     try:
         net = ipaddress.ip_network(e)
     except ValueError as exc:
         print(f"TRAP_EXEMPT_IPS entry '{e}' is not a valid address or network ({exc}).")
         continue
-    for t, tnet in trusted:
-        if tnet.version == net.version and tnet.overlaps(net):
-            print(f"TRAP_EXEMPT_IPS entry '{e}' overlaps the trusted network {t} — exempt sources must not be trusted.")
-            break
+    t = hit(net, trusted)
+    if t:
+        print(f"TRAP_EXEMPT_IPS entry '{e}' overlaps the trusted network {t} — exempt sources must not be trusted.")
+        continue
+    t = hit(net, never_ban)
+    if t:
+        print(f"TRAP_EXEMPT_IPS entry '{e}' overlaps the CROWDSEC_WHITELIST_IPS entry {t} — list a source in one never-ban list only.")
 PY
 )
     [[ -z "$out" ]] && return 0

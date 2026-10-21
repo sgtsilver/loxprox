@@ -1219,17 +1219,20 @@ _nginx_geo_nets() {    # VAR FILE → the networks of `geo $VAR { … }`
 
 # Exempt must never mean trusted. Echoes one line per problem: an entry the
 # loxprox/trap-exempt whitelist or the nginx geo $loxprox_trap_exempt lacks,
-# or one that is (or lies inside) a trusted network — the nginx geo
-# $loxprox_lan or CrowdSec's trusted whitelist. Nothing when all is well.
-#   _trap_exempt_problems "ENTRIES" EXEMPT_WHITELIST NGINX_SITE TRUSTED_WHITELIST
+# one that is (or lies inside) a trusted network — the nginx geo
+# $loxprox_lan: loopback, LAN_SUBNET, TRUSTED_SOURCES — or one that overlaps
+# the never-ban whitelist CROWDSEC_WHITELIST_IPS (deploy.sh refuses both).
+# Nothing when all is well.
+#   _trap_exempt_problems "ENTRIES" EXEMPT_WHITELIST NGINX_SITE NEVER_BAN_WHITELIST
 _trap_exempt_problems() {
     local wl="$2" site="$3" e t in_wl in_geo
-    local -a entries=() trusted=()
+    local -a entries=() trusted=() never_ban=()
     read -r -a entries <<<"$1"
     (( ${#entries[@]} )) || return 0
     in_wl=$(_yaml_list_items "$wl")
     in_geo=$(_nginx_geo_nets loxprox_trap_exempt "$site")
-    mapfile -t trusted < <(_nginx_geo_nets loxprox_lan "$site"; _yaml_list_items "$4")
+    mapfile -t trusted < <(_nginx_geo_nets loxprox_lan "$site")
+    mapfile -t never_ban < <(_yaml_list_items "$4")
     if [[ ! -f "$wl" ]]; then
         echo "$wl is missing"
     elif ! grep -qx 'name: loxprox/trap-exempt' "$wl"; then
@@ -1239,25 +1242,36 @@ _trap_exempt_problems() {
         grep -qxF -- "$e" <<<"$in_wl" || echo "$e: not in $wl"
         grep -qxF -- "$e" <<<"$in_geo" || echo "$e: not in the nginx geo \$loxprox_trap_exempt ($site)"
         if ! command -v python3 >/dev/null 2>&1; then
-            for t in "${trusted[@]}"; do [[ "$e" == "$t" ]] && echo "$e: TRUSTED ($t in \$loxprox_lan / $4)"; done
+            for t in "${trusted[@]}"; do [[ "$e" == "$t" ]] && echo "$e: TRUSTED ($t in \$loxprox_lan)"; done
+            for t in "${never_ban[@]}"; do [[ "$e" == "$t" ]] && echo "$e: also never-banned by CROWDSEC_WHITELIST_IPS ($t); list a source in one never-ban list only"; done
         fi
     done
     command -v python3 >/dev/null 2>&1 || return 0
-    python3 -I - "${#entries[@]}" "${entries[@]}" "${trusted[@]}" <<'PY'
+    python3 -I - "${#entries[@]}" "${entries[@]}" "${#trusted[@]}" "${trusted[@]}" "${never_ban[@]}" <<'PY'
 import ipaddress, sys
-n = int(sys.argv[1])
+a = sys.argv[1:]
+n = int(a[0])
+entries, m = a[1:1 + n], int(a[1 + n])
+trusted, never_ban = a[2 + n:2 + n + m], a[2 + n + m:]
 def net(v):
     try:
         return ipaddress.ip_network(v, strict=False)
     except ValueError:
         return None
-trusted = [(t, net(t)) for t in sys.argv[2 + n:]]
-for e in sys.argv[2:2 + n]:
+def hit(e, lst):
     en = net(e)
-    for t, tn in trusted:
+    for t in lst:
+        tn = net(t)
         if t == e or (en and tn and en.version == tn.version and en.overlaps(tn)):
-            print(f"{e}: TRUSTED (overlaps {t} — nginx $loxprox_lan or CrowdSec's trusted whitelist)")
-            break
+            return t
+for e in entries:
+    t = hit(e, trusted)
+    if t:
+        print(f"{e}: TRUSTED (overlaps {t} — nginx $loxprox_lan: loopback, LAN_SUBNET, TRUSTED_SOURCES)")
+        continue
+    t = hit(e, never_ban)
+    if t:
+        print(f"{e}: also never-banned by CROWDSEC_WHITELIST_IPS (overlaps {t}); list a source in one never-ban list only")
 PY
 }
 

@@ -2771,6 +2771,7 @@ TRAP_EXEMPT_IPS=("")|bad
 TRAP_EXEMPT_IPS=("192.168.1.0/24")|bad
 TRAP_EXEMPT_IPS=("203.0.113.10" "10.0.0.0/24")|bad
 TRAP_EXEMPT_IPS=("::1")|bad
+TRUSTED_SOURCES=("203.0.113.10"); TRAP_EXEMPT_IPS=("203.0.113.10")|bad
 TRUSTED_SOURCES=("203.0.113.10")|ok
 TRUSTED_SOURCES=("192.168.2.0/24" "fd00:10::/48" "203.0.113.10")|ok
 TRUSTED_SOURCES=("not-an-address")|bad
@@ -2945,7 +2946,8 @@ test_trap_exempt() {
     grep -q '^203.0.113.11: not in .*whitelist-loxprox-trap-exempt.yaml$' <<<"$problems" && grep -q '^203.0.113.11: not in the nginx geo' <<<"$problems" \
         && ! grep -q '^203.0.113.10' <<<"$problems" && pass "test-gateway.sh: an undeployed entry is missing from the file and the geo" || fail "undeployed entry: $problems"
     problems=$(tg "10.0.0.0/24")
-    grep -q '^10.0.0.0/24: TRUSTED' <<<"$problems" && pass "test-gateway.sh: an entry in the trusted lists is flagged TRUSTED" || fail "trusted entry not flagged: $problems"
+    grep -q '^10.0.0.0/24: also never-banned by CROWDSEC_WHITELIST_IPS' <<<"$problems" \
+        && pass "test-gateway.sh: an entry in the never-ban whitelist is flagged (one never-ban list per source)" || fail "whitelisted entry not flagged: $problems"
     if command -v python3 >/dev/null 2>&1; then
         problems=$(tg "192.168.1.77")
         grep -q '^192.168.1.77: TRUSTED (overlaps 192.168.1.0/24' <<<"$problems" && pass "test-gateway.sh: an entry inside a trusted network is flagged" || fail "contained entry: $problems"
@@ -2958,6 +2960,27 @@ test_trap_exempt() {
     fi
     out=$( (TRAP_EXEMPT_IPS=("2001:db8::/32"); _loxprox_validate_trap_exempt) 2>&1)
     grep -q 'wider than /48' <<<"$out" && pass "a wide entry (IPv6 /32) is warned about" || fail "no width warning: $out"
+    # 2026-10-21 (TRUSTED_SOURCES): trusted is loopback, LAN_SUBNET and
+    # TRUSTED_SOURCES; an overlap with CROWDSEC_WHITELIST_IPS is refused too,
+    # with its own message.
+    local -a saved_trusted_x=("${TRUSTED_SOURCES[@]}")
+    TRUSTED_SOURCES=("198.51.100.0/24")
+    configure_nginx >/dev/null 2>&1
+    cp "$NGINX_SITE" "$tg_site"
+    problems=$(tg "198.51.100.0/24")
+    grep -q '^198.51.100.0/24: TRUSTED' <<<"$problems" && pass "test-gateway.sh: an entry that is a TRUSTED_SOURCES network is flagged TRUSTED" \
+                                                     || fail "TRUSTED_SOURCES entry not flagged: $problems"
+    out=$( (TRAP_EXEMPT_IPS=("198.51.100.0/24"); _loxprox_validate_trap_exempt) 2>&1) && fail "validation accepted an exempt entry that is in TRUSTED_SOURCES" \
+        || { grep -q "'198.51.100.0/24' is trusted (198.51.100.0/24)" <<<"$out" && pass "validation refuses an exempt entry that is in TRUSTED_SOURCES" || fail "TRUSTED_SOURCES refusal: $out"; }
+    out=$( (TRAP_EXEMPT_IPS=("10.0.0.0/24"); _loxprox_validate_trap_exempt) 2>&1) && fail "validation accepted an exempt entry that is in CROWDSEC_WHITELIST_IPS" \
+        || { grep -q "'10.0.0.0/24' is also in CROWDSEC_WHITELIST_IPS" <<<"$out" && pass "validation refuses an exempt entry in CROWDSEC_WHITELIST_IPS (one never-ban list)" || fail "whitelist refusal: $out"; }
+    if command -v python3 >/dev/null 2>&1; then
+        out=$( (TRAP_EXEMPT_IPS=("198.51.100.9"); _loxprox_validate_trap_exempt) 2>&1) && fail "validation accepted an exempt entry inside a TRUSTED_SOURCES network" \
+            || { grep -q "overlaps the trusted network 198.51.100.0/24" <<<"$out" && pass "validation refuses an exempt entry inside a TRUSTED_SOURCES network (python3)" || fail "contained TRUSTED_SOURCES refusal: $out"; }
+        out=$( (TRAP_EXEMPT_IPS=("10.0.0.9"); _loxprox_validate_trap_exempt) 2>&1) && fail "validation accepted an exempt entry inside a whitelisted network" \
+            || { grep -q "overlaps the CROWDSEC_WHITELIST_IPS entry 10.0.0.0/24" <<<"$out" && pass "…and one inside a CROWDSEC_WHITELIST_IPS network (python3)" || fail "contained whitelist refusal: $out"; }
+    fi
+    TRUSTED_SOURCES=("${saved_trusted_x[@]}")
     rm -f "$wl" "$wl".* "$tg_site" "$tg_trusted" "$NGINX_SITE" "$NGINX_ACME_CONF"
     unset -f tg
 
