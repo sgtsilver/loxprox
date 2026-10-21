@@ -303,6 +303,9 @@ jobs:
       - name: hub-refresh.sh on the real hub (layout, full run, snapshot, tamper → restore, fail-safe)
         run: sudo CI=true bash tests/host-integration.sh crowdsec-hub-refresh
 
+      - name: File acquisition across logrotate — production's layout vs deploy.sh's (real CrowdSec + logrotate)
+        run: sudo CI=true bash tests/host-integration.sh crowdsec-rotation
+
   markdown-lint:
     runs-on: ubuntu-latest
     steps:
