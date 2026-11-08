@@ -680,6 +680,7 @@ Läuft auf dem Gateway selbst und ist ausschließlich aus `LAN_SUBNET` +
 | `ENABLE_GUI` | `"true"` | Master-Toggle. Auf `"false"` setzen zum Deaktivieren. |
 | `GUI_PORT` | `"1081"` | TCP-Port, auf dem das Panel lauscht. |
 | `GUI_PASSWORD` | `""` | Leer = keine Auth. Setzen, um bei jedem mutierenden Request den Header `X-LoxProx-Auth` zu verlangen — empfohlen, wenn untrusted Geräte (Gäste, IoT, Kinder-Tablets) dein LAN teilen. |
+| `GUI_HOSTS` | `""` | Weitere Namen, auf die das Panel antwortet, durch Leerzeichen getrennt — z. B. der LAN-DNS-Name des Gateways. Ohne Eintrag liefert der Aufruf über den Namen `403 host not allowed` (Host-Header-Whitelist gegen DNS-Rebinding). Nur exakte Hostnamen oder Adressen. |
 
 Vollständige Feature-Tour, Security-Modell und Troubleshooting:
 [`docs/GUI-PANEL.de.md`](docs/GUI-PANEL.de.md).

@@ -99,6 +99,44 @@ def test_valid_host(value, ok):
     assert gui.valid_host(value) is ok
 
 
+# ------------------------------------------------------- Host-header allowlist
+
+_LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+
+
+def test_build_allowed_hosts_defaults(monkeypatch):
+    monkeypatch.delenv("LOXPROX_GUI_HOSTS", raising=False)
+    hosts = gui.build_allowed_hosts({"GATEWAY_IP": "192.168.1.5", "TLS_DOMAIN": "GW.example.org"})
+    assert hosts == _LOOPBACK | {"192.168.1.5", "gw.example.org"}
+
+
+def test_build_allowed_hosts_adds_gui_hosts_from_deploy_conf(monkeypatch):
+    monkeypatch.delenv("LOXPROX_GUI_HOSTS", raising=False)
+    conf = gui.parse_shell_conf('GATEWAY_IP="192.168.1.5"\n'
+                                'GUI_HOSTS="Panel.home.example  panel 2001:db8::5 [2001:db8::6]"\n')
+    hosts = gui.build_allowed_hosts(conf)
+    assert hosts == _LOOPBACK | {"192.168.1.5", "panel.home.example", "panel", "2001:db8::5", "2001:db8::6"}
+
+
+@pytest.mark.parametrize("entry", [
+    "*.home.example", "panel.home.example:1081", "bad_name", "a;b", "-lead.example", "",
+])
+def test_build_allowed_hosts_drops_wildcards_ports_and_garbage(monkeypatch, entry):
+    monkeypatch.delenv("LOXPROX_GUI_HOSTS", raising=False)
+    assert gui.build_allowed_hosts({"GUI_HOSTS": entry}) == _LOOPBACK
+
+
+def test_build_allowed_hosts_environment_still_works(monkeypatch):
+    monkeypatch.setenv("LOXPROX_GUI_HOSTS", "a.example.org, b.example.org")
+    hosts = gui.build_allowed_hosts({"GUI_HOSTS": "c.example.org"})
+    assert hosts == _LOOPBACK | {"a.example.org", "b.example.org", "c.example.org"}
+
+
+def test_gui_hosts_is_not_editable_in_the_panel():
+    # The allowlist is the DNS-rebinding guard; the panel must not widen it.
+    assert "GUI_HOSTS" not in gui.EDITABLE_KEYS
+
+
 def test_validate_changes_accepts_good_and_rejects_bad():
     clean, errors = gui.validate_changes({
         "LOXONE_IP": "192.168.1.101",

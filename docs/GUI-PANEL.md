@@ -140,9 +140,12 @@ built to fail closed:
   the same trust boundary SSH already uses. There is no path from the
   public `:1080` listener into the panel.
 - **Host-header allowlist.** The panel only answers requests whose `Host`
-  header matches the gateway's IP, `127.0.0.1`, `localhost`, or those with
-  an explicit port — closing the DNS-rebinding angle even for someone who
-  could get a LAN device to resolve a hostile domain to the gateway's IP.
+  header (port ignored) is the gateway's IP, `TLS_DOMAIN`, `127.0.0.1`,
+  `localhost`, `::1` or a name listed in `GUI_HOSTS` — closing the
+  DNS-rebinding angle even for someone who could get a LAN device to resolve
+  a hostile domain to the gateway's IP. Any other name gets
+  `403 host not allowed`; to open the panel by the gateway's LAN DNS name,
+  add that name to `GUI_HOSTS` and re-run `deploy.sh`.
 - **CSRF header on every mutation.** All `POST` requests must carry
   `X-LoxProx-Gui: 1`; there is no CORS configuration that would let another
   origin forge this from a browser.
@@ -181,6 +184,7 @@ built to fail closed:
 | `ENABLE_GUI` | `"true"` | Master toggle. |
 | `GUI_PORT` | `"1081"` | TCP port the panel listens on. |
 | `GUI_PASSWORD` | `""` | Empty = no auth. Set to require `X-LoxProx-Auth` on every mutating request. Write-only in the config editor (never displayed back). |
+| `GUI_HOSTS` | `""` | Further names the panel answers to, space-separated (e.g. the gateway's LAN DNS name). Exact host names or addresses only — no wildcard, no port. Not editable in the config editor. |
 
 ## QR code / host detection
 

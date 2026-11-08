@@ -252,6 +252,14 @@ first.
   `test-gateway.sh` checks each entry against the whitelist file, the nginx
   geo and the trusted lists. Default empty. The nginx site is regenerated
   (template version 8).
+- **`GUI_HOSTS`** — further names the LoxProx Panel answers to,
+  space-separated, so it can be opened by the gateway's LAN DNS name.
+  Before, the Host-header allowlist held only `GATEWAY_IP`, `TLS_DOMAIN` and
+  loopback, and any other name got `403 host not allowed`; the only way
+  around it was the undocumented `LOXPROX_GUI_HOSTS` environment variable,
+  which still works. Exact host names or addresses only: `deploy.sh` rejects
+  a wildcard or a port, the panel drops such an entry, and the key is not
+  editable in the panel. `--bootstrap-config` carries it over. Default empty.
 
 ### Fixed
 

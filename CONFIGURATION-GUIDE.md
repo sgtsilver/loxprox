@@ -674,6 +674,7 @@ from the internet.
 | `ENABLE_GUI` | `"true"` | Master toggle. Set `"false"` to disable. |
 | `GUI_PORT` | `"1081"` | TCP port the panel listens on. |
 | `GUI_PASSWORD` | `""` | Empty = no auth. Set to require the `X-LoxProx-Auth` header on every mutating request — recommended if untrusted devices (guests, IoT, kids' tablets) share your LAN. |
+| `GUI_HOSTS` | `""` | Further names the panel answers to, space-separated — e.g. the gateway's LAN DNS name. Without it, opening the panel by name returns `403 host not allowed` (the Host-header allowlist against DNS rebinding). Exact host names or addresses only. |
 
 Full feature tour, security model, and troubleshooting:
 [`docs/GUI-PANEL.md`](docs/GUI-PANEL.md).
