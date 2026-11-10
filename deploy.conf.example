@@ -324,6 +324,14 @@ GUI_PORT="1081"
 # require it; recommended when untrusted devices share the LAN.
 GUI_PASSWORD=""
 
+# Further names the panel answers to, space-separated (2026-11). The panel
+# only serves a request whose Host header is GATEWAY_IP, TLS_DOMAIN, localhost
+# or one of these (anti DNS-rebinding), so opening it by the gateway's LAN
+# DNS name needs that name here. Exact host names or addresses only — no
+# wildcard, no port. Not editable in the panel. Empty = none.
+# Example: GUI_HOSTS="loxprox.home.example loxprox"
+GUI_HOSTS=""
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # OPTIONAL — Edge filtering, ban ladders, alerts (2026-10 breach hardening)
 # ═══════════════════════════════════════════════════════════════════════════════

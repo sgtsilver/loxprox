@@ -156,10 +156,13 @@ also auf Fail-Closed gebaut:
   als Quelle beschränkt ist — dieselbe Vertrauensgrenze, die SSH schon
   nutzt. Es gibt keinen Pfad vom öffentlichen `:1080`-Listener ins Panel.
 - **Host-Header-Whitelist.** Das Panel beantwortet nur Requests, deren
-  `Host`-Header der Gateway-IP, `127.0.0.1`, `localhost` oder Varianten mit
-  explizitem Port entspricht — das schließt die DNS-Rebinding-Flanke auch
-  dann, wenn jemand ein LAN-Gerät dazu bringen könnte, eine feindliche
-  Domain auf die Gateway-IP aufzulösen.
+  `Host`-Header (ohne Port) die Gateway-IP, `TLS_DOMAIN`, `127.0.0.1`,
+  `localhost`, `::1` oder ein Name aus `GUI_HOSTS` ist — das schließt die
+  DNS-Rebinding-Flanke auch dann, wenn jemand ein LAN-Gerät dazu bringen
+  könnte, eine feindliche Domain auf die Gateway-IP aufzulösen. Jeder andere
+  Name bekommt `403 host not allowed`; willst du das Panel über den
+  LAN-DNS-Namen des Gateways öffnen, trag den Namen in `GUI_HOSTS` ein und
+  lass `deploy.sh` erneut laufen.
 - **CSRF-Header bei jeder Mutation.** Jeder `POST`-Request muss den Header
   `X-LoxProx-Gui: 1` mitschicken; es gibt keine CORS-Konfiguration, die es
   einem anderen Origin erlauben würde, das aus einem Browser zu fälschen.
@@ -200,6 +203,7 @@ also auf Fail-Closed gebaut:
 | `ENABLE_GUI` | `"true"` | Master-Toggle. |
 | `GUI_PORT` | `"1081"` | TCP-Port, auf dem das Panel lauscht. |
 | `GUI_PASSWORD` | `""` | Leer = keine Auth. Setzen, um `X-LoxProx-Auth` bei jedem mutierenden Request zu verlangen. Im Config-Editor write-only (wird nie zurückangezeigt). |
+| `GUI_HOSTS` | `""` | Weitere Namen, auf die das Panel antwortet, durch Leerzeichen getrennt (z. B. der LAN-DNS-Name des Gateways). Nur exakte Hostnamen oder Adressen — kein Wildcard, kein Port. Im Config-Editor nicht änderbar. |
 
 ## QR-Code / Host-Erkennung
 

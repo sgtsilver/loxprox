@@ -1185,8 +1185,17 @@ def build_allowed_hosts(conf):
     tls = conf.get("TLS_DOMAIN", "")
     if tls:
         allowed.add(tls.lower())
-    extra = os.environ.get("LOXPROX_GUI_HOSTS", "")
-    allowed.update(h.strip().lower() for h in extra.split(",") if h.strip())
+    # GUI_HOSTS in deploy.conf (space-separated) adds names the panel answers
+    # to, such as the gateway's LAN DNS name; LOXPROX_GUI_HOSTS in the
+    # environment (comma- or space-separated) still works. This list is the
+    # DNS-rebinding guard, so it takes exact host names or addresses only:
+    # a wildcard or a "name:port" entry is dropped (the port is never part
+    # of the comparison, see _host_allowed).
+    for source in (conf.get("GUI_HOSTS", ""), os.environ.get("LOXPROX_GUI_HOSTS", "")):
+        for tok in re.split(r"[\s,]+", source):
+            tok = tok.strip("[]").lower()
+            if tok and (valid_ip(tok) or (":" not in tok and valid_host(tok))):
+                allowed.add(tok)
     return allowed
 
 

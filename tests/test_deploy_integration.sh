@@ -733,12 +733,15 @@ WL_FIXTURE
     # …but an existing deploy.conf's TRUSTED_SOURCES is carried over, address-shaped entries only.
     local conf back
     conf=$(mktemp -t loxprox-extract-conf.XXXXXX)
-    printf '%s\n' 'TRUSTED_SOURCES=("203.0.113.10" "192.168.2.0/24" "bad;entry")' 'TRUSTED_SOURCES_ALLOW_WIDE="true"' > "$conf"
+    printf '%s\n' 'TRUSTED_SOURCES=("203.0.113.10" "192.168.2.0/24" "bad;entry")' 'TRUSTED_SOURCES_ALLOW_WIDE="true"' \
+        'GUI_HOSTS="panel.home.example bad;entry 2001:db8::5"' > "$conf"
     out=$(mktemp -t loxprox-extract.XXXXXX)
     LOXPROX_DEPLOY_CONF="$conf" _loxprox_extract_config_from_live_state "$out" >/dev/null 2>&1
     grep -qx 'TRUSTED_SOURCES=( "203.0.113.10" "192.168.2.0/24" )' "$out" && pass "deploy.conf's TRUSTED_SOURCES carried over (malformed entry dropped)" \
                                                                           || fail "carried TRUSTED_SOURCES: $(grep '^TRUSTED_SOURCES=' "$out")"
     grep -qx 'TRUSTED_SOURCES_ALLOW_WIDE="true"' "$out" && pass "TRUSTED_SOURCES_ALLOW_WIDE carried over" || fail "TRUSTED_SOURCES_ALLOW_WIDE not carried"
+    grep -qx 'GUI_HOSTS="panel.home.example 2001:db8::5"' "$out" && pass "GUI_HOSTS carried over (malformed entry dropped)" \
+                                                               || fail "carried GUI_HOSTS: $(grep '^GUI_HOSTS=' "$out")"
     # shellcheck disable=SC1090
     back=$(set +u; source "$out" >/dev/null 2>&1; printf '%s|' "${TRUSTED_SOURCES[@]}")
     [[ "$back" == "203.0.113.10|192.168.2.0/24|" ]] && pass "the candidate sources back to the same array" || fail "candidate TRUSTED_SOURCES sources as '$back'"
@@ -2738,6 +2741,14 @@ EXTRA_SERVER_NAMES="*"|bad
 EXTRA_SERVER_NAMES="a*b.example.com"|bad
 EXTRA_SERVER_NAMES="*example.com"|bad
 EXTRA_SERVER_NAMES="*.*"|bad
+GUI_HOSTS=""|ok
+GUI_HOSTS="panel.home.example panel"|ok
+GUI_HOSTS="192.168.1.50 2001:db8::5"|ok
+GUI_HOSTS="*.home.example"|bad
+GUI_HOSTS="panel.home.example:1081"|bad
+GUI_HOSTS="[2001:db8::5]"|bad
+GUI_HOSTS="panel;evil"|bad
+GUI_HOSTS="panel,other"|bad
 EXTRA_SERVER_NAMES="example"|bad
 EXTRA_SERVER_NAMES="-bad.example.com"|bad
 EXTRA_SERVER_NAMES="a..example.com"|bad

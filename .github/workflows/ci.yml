@@ -166,7 +166,11 @@ jobs:
 
   host-services:
     name: Host integration — cron, journald, auditd, panel, install dir
-    runs-on: ubuntu-latest
+    # Pinned: the cron checks need the Debian-family cron that rejects a bare
+    # "MAILTO=" line, as the gateway's Debian 12 cron does. ubuntu-latest moved
+    # to 26.04 (2026-11), whose cron accepts that line, so the checks there
+    # would test another daemon. Move on together with the gateway's release.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 

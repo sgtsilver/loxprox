@@ -115,6 +115,8 @@ TUNNEL_PUBLIC_HOST="${TUNNEL_PUBLIC_HOST-}"
 ENABLE_GUI="${ENABLE_GUI-true}"
 GUI_PORT="${GUI_PORT-1081}"
 GUI_PASSWORD="${GUI_PASSWORD-}"
+# 2026-11 — further names the panel answers to (its Host-header allowlist).
+GUI_HOSTS="${GUI_HOSTS-}"
 # 2026-10 breach hardening — edge gating, ban ladders, SSH. Meanings in
 # deploy.conf.example; every key is carried into config.env.
 EXTRA_SERVER_NAMES="${EXTRA_SERVER_NAMES-}"
@@ -625,6 +627,16 @@ _loxprox_validate_hardening_config() {
         [[ "$tok" =~ ^[A-Za-z0-9._*?@/:-]+$ ]] \
             || { error "SSH_ALLOW_USERS entry '$tok' is not a user or user@host pattern."; fail=1; }
     done
+    # GUI_HOSTS is the panel's DNS-rebinding guard, compared exactly against
+    # the Host header without its port: a host name (one label or dotted), an
+    # IPv4 address or an IPv6 address (two colons at least). No wildcard, no
+    # port, no brackets. The panel drops such an entry silently; here it fails.
+    local re_gui="^(${name1}|[0-9A-Fa-f.]*:[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*)$"
+    read -r -a toks <<<"$GUI_HOSTS"
+    for tok in "${toks[@]}"; do
+        [[ "$tok" =~ $re_gui ]] \
+            || { error "GUI_HOSTS entry '$tok' is not a host name or address (no wildcard, no port)."; fail=1; }
+    done
     if [[ -n "$GEOIP_URL_BASE6" && ! "$GEOIP_URL_BASE6" =~ ^https://[A-Za-z0-9./_:-]+$ ]]; then
         error "GEOIP_URL_BASE6 must be an https:// URL without quotes or spaces."
         fail=1
@@ -950,6 +962,15 @@ _loxprox_extract_config_from_live_state() {
     fi
     : "${gui_port:=1081}"
     gui_password=$(_loxprox_conf_value GUI_PASSWORD)
+    # GUI_HOSTS exists only in deploy.conf. Carry name- or address-shaped
+    # tokens over; anything else is dropped, never quoted into the candidate.
+    local gui_hosts gui_host_tok
+    local -a gui_host_toks=() gui_host_keep=()
+    read -r -a gui_host_toks <<<"$(_loxprox_conf_value GUI_HOSTS)"
+    for gui_host_tok in "${gui_host_toks[@]}"; do
+        if [[ "$gui_host_tok" =~ ^[A-Za-z0-9.:-]+$ ]]; then gui_host_keep+=("$gui_host_tok"); fi
+    done
+    gui_hosts="${gui_host_keep[*]}"
 
     # 2026-10-21: nginx trust is operator intent only. It comes from an
     # existing deploy.conf and is never read back from the live geo, which on
@@ -1072,6 +1093,7 @@ _loxprox_extract_config_from_live_state() {
         echo "ENABLE_GUI=\"$enable_gui\""
         echo "GUI_PORT=\"$gui_port\""
         echo "GUI_PASSWORD=\"$gui_password\""
+        echo "GUI_HOSTS=\"$gui_hosts\""
         echo
         echo "# Trusted by nginx besides loopback and LAN_SUBNET (deploy.conf.example)."
         printf 'TRUSTED_SOURCES=('
@@ -3517,6 +3539,13 @@ setup_gui() {
             systemctl restart loxprox-gui.service
             ok "LoxProx Panel active → http://${GATEWAY_IP}:${GUI_PORT}/"
             ok "  Family invitation (printable QR): http://${GATEWAY_IP}:${GUI_PORT}/invite"
+            local -a gui_names=()
+            local gui_name
+            read -r -a gui_names <<<"$GUI_HOSTS"
+            for gui_name in "${gui_names[@]}"; do
+                [[ "$gui_name" == *:* ]] && gui_name="[$gui_name]"
+                ok "  Also by name (GUI_HOSTS): http://${gui_name}:${GUI_PORT}/"
+            done
             if [[ -z "$GUI_PASSWORD" ]]; then
                 info "GUI_PASSWORD is empty — the panel accepts mutations from any LAN client."
                 info "  Set GUI_PASSWORD in $LOXPROX_DEPLOY_CONF if untrusted devices share the LAN."
