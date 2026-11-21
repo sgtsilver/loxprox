@@ -1229,7 +1229,18 @@ t_debian12_host_inner() {
     SSH_ALLOW_USERS="loxci" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
     grep -qx 'PermitRootLogin prohibit-password' "$SSHD_DROPIN" \
         && pass "keyed account outside sudo → PermitRootLogin prohibit-password (no root lockout)" || fail "root login off without a sudo-capable account"
+    grep -q '^AllowUsers' "$SSHD_DROPIN" && fail "AllowUsers lists only an account that cannot become root (admin lockout)" \
+        || pass "AllowUsers refused: the only listed account cannot become root"
+    # In the sudo group but with useradd's locked password and no NOPASSWD
+    # rule, sudo can never let loxci in — group membership alone must not
+    # switch root login off (2026-11 release review).
     usermod -aG sudo loxci
+    SSH_ALLOW_USERS="loxci" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
+    grep -qx 'PermitRootLogin prohibit-password' "$SSHD_DROPIN" && ! grep -q '^AllowUsers' "$SSHD_DROPIN" \
+        && pass "sudo group + locked password, no NOPASSWD → root login kept, AllowUsers refused" \
+        || fail "sudo-group account that sudo can't let in was trusted: $(grep -E 'PermitRootLogin|AllowUsers' "$SSHD_DROPIN" | tr '\n' ' ')"
+    printf 'loxci ALL=(ALL:ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/loxci-ci
+    chmod 0440 /etc/sudoers.d/loxci-ci
     SSH_ALLOW_USERS="loxci" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
     sshd -t && pass "sshd -t accepts the HARD drop-in" || fail "sshd -t rejects the drop-in: $(sshd -t 2>&1 | head -2)"
     out=$(sshd -T 2>/dev/null)
@@ -1246,7 +1257,7 @@ t_debian12_host() {
     section "Debian 12 — unattended-upgrades origins + sshd drop-in (2026-10)"
     command -v docker >/dev/null || { fail "docker missing"; return; }
     relay_results < <(docker run --rm -e CI=true -v "$REPO:/workspace:ro" -w /workspace debian:12 bash -c '
-        apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unattended-upgrades python3-apt lsb-release openssh-server >/dev/null 2>&1 \
+        apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unattended-upgrades python3-apt lsb-release openssh-server sudo >/dev/null 2>&1 \
             || { echo "  ✗ package install failed"; exit 0; }
         bash /workspace/tests/host-integration.sh debian12-host-inner' 2>&1)
 }
