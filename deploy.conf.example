@@ -438,8 +438,10 @@ GEOIP_URL_BASE6=""
 
 # SSH: space-separated AllowUsers patterns (user or user@host). Empty = no
 # AllowUsers line (every account with a key may log in). deploy.sh refuses
-# to write a list that would lock everyone out (no listed account exists,
-# or — key-only mode — none has an authorized key).
+# to write a list that would lock everyone out: no listed account exists;
+# key-only mode and none has an authorized key; or no listed account can log
+# in and become root (sudo/wheel/admin with a usable password or NOPASSWD;
+# root itself counts when listed and able to log in).
 #   Example: "admin"
 SSH_ALLOW_USERS=""
 

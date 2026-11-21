@@ -95,7 +95,7 @@ Upgrade in place with `sudo bash deploy.sh` over SSH. Read the [upgrade notes](C
 - **Re-add every Loxone app and device with the host name** (`https://<your-host>:1080`), and list every other name they use (an old DDNS name, a CNAME) in `EXTRA_SERVER_NAMES`. With TLS on, a bare IP, a missing SNI or a foreign `Host` is a trap hit: a 444 and a HARD ban (7 days on the first offence).
 - **Admin webservice paths answer `403` from the internet.** `REMOTE_ADMIN_PATHS="allow"` proxies them again; the LAN and `TRUSTED_SOURCES` are exempt anyway.
 - **Root SSH login is off in HARD mode** once a non-root account has a key, a login shell and working sudo (a usable password or a NOPASSWD rule). Put your key on a sudo user first, check in a second session that `sudo -v` works, then run `sudo bash deploy.sh --finalize-ssh`; otherwise root stays `prohibit-password` and the deploy warns.
-- **`TRUSTED_SOURCES` vs `CROWDSEC_WHITELIST_IPS`.** A whitelist entry now means "never banned", no longer "trusted": it gets the admin-path `403` and the auth/WebSocket limits like any internet client. If a whitelisted network really administers the Miniserver through the gateway, add it to `TRUSTED_SOURCES` *before* you deploy.
+- **`TRUSTED_SOURCES` vs `CROWDSEC_WHITELIST_IPS`.** A whitelist entry means "never banned" only; nginx trusts just loopback, `LAN_SUBNET` and `TRUSTED_SOURCES`. A whitelisted address outside the LAN gets the admin-path `403` and the auth/WebSocket limits like any internet client. If a whitelisted network really administers the Miniserver through the gateway, add it to `TRUSTED_SOURCES` *before* you deploy.
 
 Other changes (much longer bans, security updates installing again, how to probe `:1080` on the gateway itself) are in the upgrade notes.
 
