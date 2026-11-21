@@ -91,10 +91,10 @@ The deploy script is **idempotent** — `git pull && sudo bash deploy.sh` re-run
 
 Upgrade in place with `sudo bash deploy.sh` over SSH. Read the [upgrade notes](CHANGELOG.md#upgrade-notes--from-v230) and **Behaviour changes you must act on** at the top of the [changelog](CHANGELOG.md) first. The short version:
 
-- **Start in observe mode.** Set `TRAP_BAN_MODE="observe"` (`ban` is the default) in `/etc/loxprox/deploy.conf` and deploy: the trap still answers 444 and logs, but nobody is banned. After a few days check `sudo cscli alerts list -s loxprox/scanner-trap --limit 0` and `/var/log/nginx/loxprox-trap-hosts.log` for your own devices, fix them, then set `"ban"` and redeploy.
-- **Re-add every Loxone app and device with the host name** (`https://<your-host>:1080`). With TLS on, a bare IP, a missing SNI or a foreign `Host` is a trap hit: a 444 and a HARD ban (7 days on the first offence).
+- **Start in observe mode.** Set `TRAP_BAN_MODE="observe"` (`ban` is the default) in `/etc/loxprox/deploy.conf` and deploy: the trap still answers 444 and logs, but `loxprox/scanner-trap` bans nothing (stock CrowdSec scenarios such as sensitive-file probes still ban). After a few days check `sudo cscli alerts list -s loxprox/scanner-trap --limit 0` and `/var/log/nginx/loxprox-trap-hosts.log` for your own devices, fix them, then set `"ban"` and redeploy.
+- **Re-add every Loxone app and device with the host name** (`https://<your-host>:1080`), and list every other name they use (an old DDNS name, a CNAME) in `EXTRA_SERVER_NAMES`. With TLS on, a bare IP, a missing SNI or a foreign `Host` is a trap hit: a 444 and a HARD ban (7 days on the first offence).
 - **Admin webservice paths answer `403` from the internet.** `REMOTE_ADMIN_PATHS="allow"` proxies them again; the LAN and `TRUSTED_SOURCES` are exempt anyway.
-- **Root SSH login is off in HARD mode** once a non-root account has a key, sudo rights and a login shell. Put your key on a sudo user first, then run `sudo bash deploy.sh --finalize-ssh`; otherwise root stays `prohibit-password` and the deploy warns.
+- **Root SSH login is off in HARD mode** once a non-root account has a key, a login shell and working sudo (a usable password or a NOPASSWD rule). Put your key on a sudo user first, check in a second session that `sudo -v` works, then run `sudo bash deploy.sh --finalize-ssh`; otherwise root stays `prohibit-password` and the deploy warns.
 - **`TRUSTED_SOURCES` vs `CROWDSEC_WHITELIST_IPS`.** A whitelist entry now means "never banned", no longer "trusted": it gets the admin-path `403` and the auth/WebSocket limits like any internet client. If a whitelisted network really administers the Miniserver through the gateway, add it to `TRUSTED_SOURCES` *before* you deploy.
 
 Other changes (much longer bans, security updates installing again, how to probe `:1080` on the gateway itself) are in the upgrade notes.
@@ -174,7 +174,7 @@ APPSEC_MODE="enforce"                      # "monitor" or "enforce"
 ENABLE_TLS="false"                         # optional HTTPS on :1080 (see TLS-SETUP)
 TLS_DOMAIN=""                              # needed when ENABLE_TLS="true": the public host name every app must use
 TLS_EMAIL=""                               # needed when ENABLE_TLS="true": ACME account e-mail
-TRAP_BAN_MODE="ban"                        # "observe" for the first rollout: trap answers 444 + logs, bans nothing
+TRAP_BAN_MODE="ban"                        # "observe" for the first rollout: the trap scenario bans nothing (444 + log)
 ENABLE_GUI="true"                          # LoxProx Panel on :1081, LAN only
 GUI_PASSWORD=""                            # empty = no password: set one
 ENABLE_TUNNEL="false"                      # optional zero-open-ports remote access (see TUNNEL-SETUP)

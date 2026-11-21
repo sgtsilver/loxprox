@@ -91,10 +91,10 @@ Das Deploy-Script ist **idempotent** — `git pull && sudo bash deploy.sh` läuf
 
 Upgrade vor Ort mit `sudo bash deploy.sh` per SSH. Lies vorher die [Upgrade-Hinweise](CHANGELOG.md#upgrade-notes--from-v230) und **Behaviour changes you must act on** am Anfang des [Changelogs](CHANGELOG.md) (englisch). Die Kurzfassung:
 
-- **Starte im Observe-Modus.** Setze `TRAP_BAN_MODE="observe"` (`ban` ist der Default) in `/etc/loxprox/deploy.conf` und deploye: Die Falle antwortet weiter mit 444 und loggt, aber niemand wird gebannt. Prüfe nach ein paar Tagen `sudo cscli alerts list -s loxprox/scanner-trap --limit 0` und `/var/log/nginx/loxprox-trap-hosts.log` auf eigene Geräte, korrigiere sie, setze dann `"ban"` und deploye erneut.
-- **Trage jede Loxone-App und jedes Gerät mit dem Hostnamen neu ein** (`https://<dein-host>:1080`). Mit TLS ist eine nackte IP, fehlendes SNI oder ein fremder `Host` ein Fallen-Treffer: 444 und ein HARD-Ban (7 Tage beim ersten Verstoß).
+- **Starte im Observe-Modus.** Setze `TRAP_BAN_MODE="observe"` (`ban` ist der Default) in `/etc/loxprox/deploy.conf` und deploye: Die Falle antwortet weiter mit 444 und loggt, aber `loxprox/scanner-trap` bannt niemanden (Standard-Szenarien von CrowdSec, etwa für Zugriffe auf sensible Dateien, bannen weiterhin). Prüfe nach ein paar Tagen `sudo cscli alerts list -s loxprox/scanner-trap --limit 0` und `/var/log/nginx/loxprox-trap-hosts.log` auf eigene Geräte, korrigiere sie, setze dann `"ban"` und deploye erneut.
+- **Trage jede Loxone-App und jedes Gerät mit dem Hostnamen neu ein** (`https://<dein-host>:1080`) und trage jeden weiteren Namen, den sie verwenden (alter DDNS-Name, CNAME), in `EXTRA_SERVER_NAMES` ein. Mit TLS ist eine nackte IP, fehlendes SNI oder ein fremder `Host` ein Fallen-Treffer: 444 und ein HARD-Ban (7 Tage beim ersten Verstoß).
 - **Admin-Webservice-Pfade antworten aus dem Internet mit `403`.** `REMOTE_ADMIN_PATHS="allow"` reicht sie wieder durch; das LAN und `TRUSTED_SOURCES` sind ohnehin ausgenommen.
-- **Root-SSH-Login ist im HARD-Modus aus**, sobald ein Nicht-Root-Konto einen Key, sudo-Rechte und eine Login-Shell hat. Lege zuerst deinen Key auf einem sudo-User ab und führe dann `sudo bash deploy.sh --finalize-ssh` aus; sonst bleibt Root bei `prohibit-password`, und der Deploy warnt.
+- **Root-SSH-Login ist im HARD-Modus aus**, sobald ein Nicht-Root-Konto einen Key, eine Login-Shell und funktionierendes sudo hat (nutzbares Passwort oder NOPASSWD-Regel). Lege zuerst deinen Key auf einem sudo-User ab, prüfe in einer zweiten Sitzung, dass `sudo -v` funktioniert, und führe dann `sudo bash deploy.sh --finalize-ssh` aus; sonst bleibt Root bei `prohibit-password`, und der Deploy warnt.
 - **`TRUSTED_SOURCES` vs. `CROWDSEC_WHITELIST_IPS`.** Ein Whitelist-Eintrag heißt jetzt „nie gebannt“, nicht mehr „vertrauenswürdig“: Er bekommt wie jeder Internet-Client das `403` auf den Admin-Pfaden und die Auth-/WebSocket-Limits. Administriert ein Whitelist-Netz den Miniserver tatsächlich über das Gateway, trage es *vor* dem Deploy in `TRUSTED_SOURCES` ein.
 
 Weitere Änderungen (deutlich längere Bans, wieder installierende Security-Updates, wie du `:1080` auf dem Gateway selbst prüfst) stehen in den Upgrade-Hinweisen.
@@ -175,7 +175,7 @@ APPSEC_MODE="enforce"                      # „monitor" oder „enforce"
 ENABLE_TLS="false"                         # optionales HTTPS auf :1080 (siehe TLS-SETUP)
 TLS_DOMAIN=""                              # nötig bei ENABLE_TLS="true": der öffentliche Hostname, den jede App nutzen muss
 TLS_EMAIL=""                               # nötig bei ENABLE_TLS="true": E-Mail für das ACME-Konto
-TRAP_BAN_MODE="ban"                        # „observe" für den ersten Rollout: Falle antwortet 444 + loggt, bannt aber nicht
+TRAP_BAN_MODE="ban"                        # „observe" für den ersten Rollout: das Fallen-Szenario bannt nicht (444 + Log)
 ENABLE_GUI="true"                          # LoxProx Panel auf :1081, nur LAN
 GUI_PASSWORD=""                            # leer = kein Passwort: setze eins
 ENABLE_TUNNEL="false"                      # optionaler Fernzugriff ohne offene Ports (siehe TUNNEL-SETUP)
