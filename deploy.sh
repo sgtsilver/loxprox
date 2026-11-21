@@ -244,6 +244,8 @@ CROWDSEC_PROFILES="${CROWDSEC_PROFILES:-$CROWDSEC_DIR/profiles.yaml}"
 CROWDSEC_CONFIG_LOCAL="${CROWDSEC_CONFIG_LOCAL:-$CROWDSEC_DIR/config.yaml.local}"
 CROWDSEC_TRAP_EXEMPT_WHITELIST="${CROWDSEC_TRAP_EXEMPT_WHITELIST:-$CROWDSEC_DIR/parsers/s02-enrich/whitelist-loxprox-trap-exempt.yaml}"
 LOXPROX_PASSWD_FILE="${LOXPROX_PASSWD_FILE:-/etc/passwd}"
+# root's authorized_keys, for the SSH_ALLOW_USERS lockout guard (tests point it elsewhere).
+LOXPROX_ROOT_AUTH_KEYS="${LOXPROX_ROOT_AUTH_KEYS:-/root/.ssh/authorized_keys}"
 # The CrowdSec package's nightly blanket hub upgrade (masked by
 # _loxprox_mask_package_hubupdate; overridable for tests).
 CROWDSEC_HUBUPDATE_TIMER="${CROWDSEC_HUBUPDATE_TIMER:-crowdsec-hubupdate.timer}"
@@ -4437,14 +4439,15 @@ _loxprox_user_can_sudo() {
 # True (0) if one of the plain account names in $2 can still log in AND
 # become root under SSH mode $1 — AllowUsers keeps every account it does not
 # list out, root included (release review 2026-11-21). HARD: a key is the
-# only way in; SOFT: a key or a usable password. root counts when listed
-# (HARD: only with a key in /root/.ssh/authorized_keys).
+# only way in; SOFT: a key or a usable password. root counts when listed and
+# it can log in itself: a key in LOXPROX_ROOT_AUTH_KEYS (SOFT: or a usable
+# password — a locked root password plus AllowUsers root is a lockout).
 _loxprox_allow_list_keeps_admin() {
     local mode="$1" u ent home
     for u in $2; do
         if [[ "$u" == "root" ]]; then
-            [[ "$mode" != "hard" ]] && return 0
-            grep -qE '^(ssh-|ecdsa-sha2-|sk-)' /root/.ssh/authorized_keys 2>/dev/null && return 0
+            grep -qE '^(ssh-|ecdsa-sha2-|sk-)' "$LOXPROX_ROOT_AUTH_KEYS" 2>/dev/null && return 0
+            [[ "$mode" == "soft" ]] && _loxprox_has_usable_password root && return 0
             continue
         fi
         ent=$(getent passwd "$u" 2>/dev/null) || continue
@@ -4495,7 +4498,7 @@ _loxprox_ssh_allow_users_line() {
         return 0
     fi
     if [[ "$mode" == "hard" ]] && ! _loxprox_has_user_authorized_key "$plain" \
-            && ! { [[ " $plain " == *" root "* ]] && _loxprox_has_authorized_key; }; then
+            && ! { [[ " $plain " == *" root "* ]] && grep -qE '^(ssh-|ecdsa-sha2-|sk-)' "$LOXPROX_ROOT_AUTH_KEYS" 2>/dev/null; }; then
         warn "No account in SSH_ALLOW_USERS has an authorized key — AllowUsers NOT written (key-only login would lock everyone out)." >&2
         return 0
     fi
@@ -4526,6 +4529,7 @@ _loxprox_write_hard_ssh_drop_in() {
         root_login="prohibit-password"
         warn "No sudo-capable account with an SSH key (and a login shell${only:+, in SSH_ALLOW_USERS}) — keeping 'PermitRootLogin prohibit-password' (no lockout)."
         warn "  Add your key to a sudo user's ~/.ssh/authorized_keys, re-run: sudo bash deploy.sh --finalize-ssh"
+        command -v sudo >/dev/null 2>&1 || warn "  sudo is not installed, so no account can become root that way (apt-get install sudo)."
     fi
     mkdir -p "$(dirname "$drop")"
     backup_file "$drop"

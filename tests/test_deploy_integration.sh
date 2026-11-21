@@ -2609,7 +2609,7 @@ test_breach_sshd() {
     getent() {
         case "$1" in
             passwd) grep "^$2:" "$pw" ;;
-            shadow) [[ "$2" == lockedpw ]] && echo "$2:!:20000:0:99999:7:::" \
+            shadow) [[ "$2" == lockedpw || "$2" == root ]] && echo "$2:!:20000:0:99999:7:::" \
                         || printf '%s:$y$j9T$mockhashformock:20000:0:99999:7:::\n' "$2" ;;
             *) return 2 ;;
         esac
@@ -2651,6 +2651,21 @@ test_breach_sshd() {
     SSH_ALLOW_USERS="plain" _loxprox_write_soft_ssh_drop_in >/dev/null 2>&1
     grep -q '^AllowUsers' "$SSHD_DROPIN" && fail "SOFT: AllowUsers for a non-sudo account (root shut out)" \
         || pass "SOFT: AllowUsers refused for a non-sudo account"
+    # root listed: it must be able to log in itself (key; SOFT also a usable password).
+    local saved_rootkeys="$LOXPROX_ROOT_AUTH_KEYS"
+    LOXPROX_ROOT_AUTH_KEYS="$MOCK_ROOT/ssh-root-authorized_keys"
+    printf 'root:x:0:0::%s/root:/bin/bash\n' "$home" >> "$pw"
+    rm -f "$LOXPROX_ROOT_AUTH_KEYS"
+    SSH_ALLOW_USERS="root" _loxprox_write_soft_ssh_drop_in >/dev/null 2>&1
+    grep -q '^AllowUsers' "$SSHD_DROPIN" && fail "SOFT: AllowUsers root with a locked root password and no root key (lockout)" \
+        || pass "SOFT: AllowUsers root refused when root has neither a usable password nor a key"
+    printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEKEYFORTESTSONLY root@ci\n' > "$LOXPROX_ROOT_AUTH_KEYS"
+    SSH_ALLOW_USERS="root" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
+    grep -qx 'AllowUsers root' "$SSHD_DROPIN" && grep -qx 'PermitRootLogin prohibit-password' "$SSHD_DROPIN" \
+        && pass "HARD: AllowUsers root with a root key → root keeps key login (prohibit-password)" \
+        || fail "AllowUsers root (keyed): $(grep -E 'AllowUsers|PermitRootLogin' "$SSHD_DROPIN" | tr '\n' ' ')"
+    rm -f "$LOXPROX_ROOT_AUTH_KEYS"
+    LOXPROX_ROOT_AUTH_KEYS="$saved_rootkeys"
 
     SSH_ALLOW_USERS="ghost" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
     grep -q '^AllowUsers' "$SSHD_DROPIN" && fail "AllowUsers for a non-existent account (lockout)" || pass "AllowUsers refused: no listed account exists"
