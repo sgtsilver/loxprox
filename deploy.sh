@@ -4423,12 +4423,15 @@ _loxprox_has_usable_password() {
 # account made with `adduser --disabled-password` is in sudo but never gets
 # past sudo's password prompt, so PermitRootLogin no would lock root out.
 _loxprox_user_can_sudo() {
-    local groups
+    local groups rules
     groups=" $(id -nG "$1" 2>/dev/null) "
     [[ "$groups" == *" sudo "* || "$groups" == *" wheel "* || "$groups" == *" admin "* ]] || return 1
     command -v sudo >/dev/null 2>&1 || return 1
     _loxprox_has_usable_password "$1" && return 0
-    sudo -n -l -U "$1" 2>/dev/null | grep -qE 'NOPASSWD: *ALL'
+    # Capture first: grep -q on the right of a pipe can turn a match into a
+    # SIGPIPE miss under pipefail.
+    rules=$(sudo -n -l -U "$1" 2>/dev/null) || true
+    grep -qE 'NOPASSWD: *ALL' <<<"$rules"
 }
 
 # True (0) if one of the plain account names in $2 can still log in AND
