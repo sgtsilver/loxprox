@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.0.0] — 2026-11-21
+
 The theme of this release: **scanner elimination — much longer bans and much
 less tolerance.**
 On 2026-10-18 Loxone, the vendor, was breached and customer data leaked.
