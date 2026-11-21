@@ -6,7 +6,7 @@ Live repo: **https://github.com/sgtsilver/loxprox**
 
 ## Repository Description
 
-> Hardened security gateway for Loxone Miniservers. Reverse proxy + WAF + IDS + firewall + monitoring — because your smart home deserves a deadbolt.
+> Hardened security gateway for Loxone Miniserver Gen 1: nginx reverse proxy, CrowdSec IDS + AppSec WAF, nftables firewall, scanner trap and alerts, installed by one idempotent script on a Debian 12 VM. Your smart home deserves a deadbolt.
 
 ---
 
@@ -15,7 +15,7 @@ Live repo: **https://github.com/sgtsilver/loxprox**
 Copy all of these into the repo "Topics" field (max 20):
 
 ```
-loxone, smart-home, home-automation, security-gateway, reverse-proxy, nginx, crowdsec, waf, ids, intrusion-detection, firewall, nftables, debian, homelab, selfhosted, iot-security, miniserver, proxy, hardening, cybersecurity
+loxone, loxone-miniserver, reverse-proxy, security, waf, ids, crowdsec, nginx, nftables, smart-home, home-automation, hardening, debian, iot-security, homelab, self-hosted
 ```
 
 ---
@@ -40,9 +40,10 @@ Release notes live on the GitHub Releases page — they're sourced from `CHANGEL
 
 ## README Badges
 
-Already added to README.md:
+Currently in `README.md` (German) and `README.en.md` (English):
+- Release (latest GitHub release)
+- CI (the workflow runs ShellCheck, the shell syntax check, the unit tests and the integration test)
 - License: Non-Commercial (see LICENSE)
-- Validation: A-
 - Debian 12
-- CIS Hardened
-- Shellcheck: passing
+
+Deliberately **not** shown: a "Validation: A-" and a "CIS Hardened" badge. Their only basis was an AI-assisted, repo-only self-audit of v1.3.3 (`audits/2026-05-23-skills-audit.md`), which is not an independent validation or a CIS certification.

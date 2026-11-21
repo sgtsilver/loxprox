@@ -12,7 +12,7 @@ Everybody starts somewhere. If you can follow a recipe, you can do this. You wil
 
 ## What you'll end up with
 
-A small, always-on computer (a virtual machine or a Raspberry Pi) that sits **between the internet and your Miniserver**. The outside world talks to the gateway; the gateway inspects everything and only passes safe traffic to your Miniserver. Your phone app keeps working exactly as before — it just connects to the gateway instead of straight to the Miniserver.
+A small, always-on computer (usually a virtual machine) that sits **between the internet and your Miniserver**. The outside world talks to the gateway; the gateway inspects everything and only passes safe traffic to your Miniserver. Your phone app keeps working exactly as before — it just connects to the gateway instead of straight to the Miniserver.
 
 ```
 Internet  →  your router  →  LoxProx gateway  →  your Loxone Miniserver
@@ -22,10 +22,10 @@ Internet  →  your router  →  LoxProx gateway  →  your Loxone Miniserver
 
 ## What you'll need
 
-- **A little computer to run it on.** Three easy options — pick whichever you already have (details in [Step 1](#step-1-get-a-little-computer-for-it)):
-  - a **virtual machine** on a Proxmox/home-server box, or
-  - a **Raspberry Pi 3, 4, or 5** (with 64-bit Raspberry Pi OS), or
-  - any **old mini-PC or laptop** you can wipe and install Debian on.
+- **A little computer to run it on.** LoxProx is built and tested on **Debian 12** running in a **virtual machine**. Pick whichever of these you already have (details in [Step 1](#step-1--get-a-little-computer-for-it)):
+  - a **virtual machine** on a Proxmox/home-server box (the tested setup), or
+  - any **old mini-PC or laptop** you can wipe and install Debian 12 on, or
+  - a **Raspberry Pi** with a 64-bit, Debian 12-based system — possible, but not tested by the project.
 - **Your Miniserver's details** — we have a tool that finds these for you, so don't worry if you don't know them yet.
 - **About 30–45 minutes** and your beverage of choice. (If that beverage is alcoholic, maybe save the round for *after* you're done — you'll want a clear head while you rewire how your home talks to the internet.)
 - That's it. You do **not** need to be a programmer.
@@ -38,15 +38,15 @@ A note on size: 1 CPU and **1 GB of RAM** is the minimum; **2 CPU / 2 GB** is co
 
 ## Step 1 — Get a little computer for it
 
-You just need *something* running **Debian 12** (a popular, free, rock-solid version of Linux). Choose the path that matches what you have:
+You just need *something* running **Debian 12** (a popular, free, rock-solid version of Linux). Debian 12 is what LoxProx is built and tested on; newer releases (Debian 13) are untested. Choose the path that matches what you have:
 
-- **You have a Proxmox or other home server →** create a new VM, give it 1–2 CPUs, 1–2 GB RAM, ~5 GB disk, and install Debian 12 on it. (Proxmox even has a "Debian 12" template.)
-- **You have a Raspberry Pi →** flash **64-bit Raspberry Pi OS Lite** to the SD card with the official [Raspberry Pi Imager](https://www.raspberrypi.com/software/). A Pi 3/4/5 is plenty.
+- **You have a Proxmox or other home server →** create a new VM, give it 1–2 CPUs, 1–2 GB RAM, ~5 GB disk, and install Debian 12 on it. (Proxmox even has a "Debian 12" template.) This is the tested setup.
 - **You have an old PC/laptop →** download Debian 12 from [debian.org](https://www.debian.org/distrib/), write it to a USB stick, and install it. The Debian installer holds your hand the whole way.
+- **You have a Raspberry Pi →** it can work, but the project has not tested it. Use a **64-bit** system based on Debian 12 (Bookworm). The current Raspberry Pi OS is based on a newer Debian (13) and is untested. Flash it with the official [Raspberry Pi Imager](https://www.raspberrypi.com/software/) and expect to do a little extra troubleshooting.
 
 When you install, just accept the defaults. The only thing to remember: **write down the username and password you create.**
 
-> Don't have any of these? A Raspberry Pi 4 is the cheapest, friendliest way in, and it sips power.
+> Don't have any of these? A small VM on a home server or an old mini-PC with Debian 12 is the friendliest way in.
 
 ## Step 2 — Get to the "terminal"
 
@@ -116,6 +116,7 @@ sudo nano /etc/loxprox/deploy.conf
 - `GATEWAY_IP` — this gateway's own address (from Step 6).
 - `LAN_SUBNET` — your home network range. `detect-loxone.sh` shows it too: if you ran it with no arguments, look near the top of its output for a line reading `Auto-detected subnet: ...` — that's your value (it isn't repeated in the "Suggested deploy.sh configuration" block below it, which only lists `LOXONE_IP`/`LOXONE_PORT`). Otherwise it's usually something like `192.168.1.0/24`.
 - `SSH_ALLOWED_SUBNETS` — who's allowed to log in to the gateway; your home network is fine to start.
+- `CROWDSEC_WHITELIST_IPS` — addresses that must never be banned. The template ships example entries: replace them so your own home network is in the list.
 - `DISCORD_WEBHOOK_URL` *(optional)* — paste a Discord webhook URL here to get phone alerts. Skip it for now if you like.
 
 Every value has a comment above it explaining what it does. When you're done: press **Ctrl+O** then **Enter** to save, then **Ctrl+X** to exit. (Stuck on a value? The full [Configuration Guide](../CONFIGURATION-GUIDE.md) explains every single one.)
@@ -137,26 +138,30 @@ It prints what it's doing as it goes (green is good). It's **safe to run again**
 
 You will **not** get locked out by following the menu. When in doubt, pick the option that keeps you logged in.
 
+One more detail: when the installer applies key-only login, it also switches off direct `root` login over SSH — but only if a normal user (not `root`) has your key, `sudo` rights and a login shell. If you only ever log in as `root`, it leaves root login as it is and prints a warning. So log in as your normal user and use `sudo`.
+
 ## Step 9 — Check that it all worked
 
 ```bash
 sudo ./test-gateway.sh
 ```
 
-This runs 50+ checks and prints a tidy pass/fail report. Lots of green ticks means you're protected. If something's red, the line usually tells you exactly what to do.
+This runs 100+ checks and prints a tidy pass/fail report. Lots of green ticks means you're protected. If something's red, the line usually tells you exactly what to do.
 
 ## Step 10 — Point your world at the gateway
 
 Two small changes outside the terminal:
 
 1. **On your router:** forward incoming port **1080** to the gateway's address (instead of forwarding it to the Miniserver directly). If you had a forward pointing at the Miniserver before, point it at the gateway now.
-2. **In the Loxone app:** change the Miniserver's connection address to the **gateway's** address on port **1080**. Everything else in the app stays the same.
+2. **In the Loxone app:** change the Miniserver's connection address to the **gateway's** address on port **1080**. Everything else in the app stays the same. (If you turn on HTTPS below, the address must instead be your **host name** — never the IP.)
 
 That's it — you're done. Your Miniserver now answers the internet only through a gateway that's watching its back.
 
 ## Optional — turn on HTTPS (encryption)
 
 Want the padlock and encrypted traffic? LoxProx can do automatic HTTPS. It needs a public domain name and one extra router setting, so it's off by default. When you're ready, follow the friendly [TLS Setup guide](TLS-SETUP.md) — it walks you through it the same gentle way.
+
+**Important once HTTPS is on:** every app and device must connect with `https://your-host-name:1080` — never with the IP address. The gateway treats a connection by IP (or by a wrong name) as a scanner, closes it and blocks that address for 7 days.
 
 ---
 
@@ -166,7 +171,7 @@ Breathe. Almost nothing here is permanent, and you can re-run things safely.
 
 - **The installer stopped with a red error.** Read the last few red lines — they usually name the problem. Fix it and just run `sudo bash deploy.sh` again.
 - **You think you locked yourself out over SSH.** You almost certainly didn't (the installer is built to prevent it). Log in at the machine's own screen/keyboard if you can, and re-run the installer.
-- **The app can't connect.** Double-check Step 10: the router forwards port 1080 to the *gateway*, and the app points at the *gateway's* address on port 1080. If you turned on HTTPS, the app address must start with `https://` (see the TLS guide).
+- **The app can't connect.** Double-check Step 10: the router forwards port 1080 to the *gateway*, and the app points at the *gateway's* address on port 1080. If you turned on HTTPS, the app address must start with `https://` and use your host name, not the IP — an IP address counts as a scanner and gets blocked for 7 days (see the TLS guide).
 - **Still stuck?** [Open an issue on GitHub](https://github.com/sgtsilver/loxprox/issues) and describe what you did and what you saw. Paste the error text. **No question is too basic** — that's literally what the tracker is for.
 
 You did a real systems-administration task today. That's not nothing. Welcome in.

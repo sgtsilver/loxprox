@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.0.0] — 2026-11-21
+
 The theme of this release: **scanner elimination — much longer bans and much
 less tolerance.**
 On 2026-10-18 Loxone, the vendor, was breached and customer data leaked.
@@ -47,12 +49,18 @@ first.
   over the authenticated WebSocket, so the Miniserver's own credentials
   remain the real control. Set `REMOTE_ADMIN_PATHS="allow"` if you need
   remote Loxone Config access through the gateway.
-- **Root SSH login is off in HARD mode.** `--finalize-ssh` now writes
-  `PermitRootLogin no` only when a non-root account has an authorized key,
-  sudo rights (sudo/wheel/admin) and a login shell. Otherwise (for example
-  when root's key is the only key on the box) it stays `prohibit-password`
-  with a warning, so the step cannot lock you out. Copy your key to a sudo user and
-  re-run `sudo bash deploy.sh --finalize-ssh`.
+- **Root SSH login is off in HARD mode.** The deploy and `--finalize-ssh`
+  now write `PermitRootLogin no` only when a non-root account has an
+  authorized key, a login shell and working sudo: membership in
+  sudo/wheel/admin **plus** a usable password or a `NOPASSWD: ALL` rule (an
+  account made with `adduser --disabled-password` and no NOPASSWD rule does
+  not count). Otherwise (for example when root's key is the only key on the
+  box) it stays `prohibit-password` with a warning, so the step cannot lock
+  you out. `SSH_ALLOW_USERS` is written only when a listed account can log in
+  and become root, or root is listed with a key — `AllowUsers` keeps everyone
+  else out, root included. Copy your key to a sudo user, check in a second
+  session that `sudo -v` works for it, and re-run
+  `sudo bash deploy.sh --finalize-ssh`.
 - **Probing `:1080` on the gateway itself changed.** In TLS mode
   `curl http://127.0.0.1:1080` now hits the trap. Use
   `curl --resolve <domain>:1080:127.0.0.1 https://<domain>:1080/jdev/cfg/api`.
@@ -61,16 +69,16 @@ first.
 - **Bans are much longer.** The first offence of an unambiguous scanner
   scenario now costs 7 days (was 4 hours), repeat offences 90 and then 365
   days. See Security.
-- **`CROWDSEC_WHITELIST_IPS` no longer makes a source trusted.** Until now
-  every whitelist entry was also put into nginx's trusted map: it reached
-  the admin paths, its unknown paths were never denied, and the auth and
-  WebSocket limits never counted it. But the whitelist is where "never ban"
-  addresses go, such as a household WAN IP behind CGNAT or a monitoring
-  service, and everyone else sending from such an address was trusted as
-  well. The whitelist now only stops bans. nginx trusts loopback,
-  `LAN_SUBNET` and the new `TRUSTED_SOURCES` (default empty). If a
-  whitelisted network really needs the admin paths, add it to
-  `TRUSTED_SOURCES` before you deploy (see Upgrade notes).
+- **`CROWDSEC_WHITELIST_IPS` only stops bans; trust is `TRUSTED_SOURCES`.**
+  New in this release, nginx exempts a trusted set — loopback, `LAN_SUBNET`
+  and the new `TRUSTED_SOURCES` (default empty) — from the admin-path 403,
+  the unknown-path deny and the auth and WebSocket limits. Whitelist entries
+  are not in that set: the whitelist is where "never ban" addresses go, such
+  as a household WAN IP behind CGNAT or a monitoring service, and everyone
+  else sending from such an address must not be trusted. Whitelisted
+  addresses outside `LAN_SUBNET` therefore get the same 403 and limits as any
+  internet source. If a whitelisted network really needs the admin paths,
+  add it to `TRUSTED_SOURCES` before you deploy (see Upgrade notes).
 
 ### Security
 
@@ -143,7 +151,8 @@ first.
 - **SSH.** HARD mode turns root login off (see above). The new optional
   `SSH_ALLOW_USERS` writes an `AllowUsers` line, which `deploy.sh` refuses to
   write unless a listed account has a login shell (HARD mode also requires
-  a key). `--finalize-ssh` now reads `deploy.conf`, so the key applies there
+  a key) and one listed account can log in and become root (or root is
+  listed, in HARD mode with a key). `--finalize-ssh` now reads `deploy.conf`, so the key applies there
   too. A drop-in that sshd rejects is now
   replaced by the previous one instead of being deleted.
 - **unattended-upgrades** matches by codename and label (`Origins-Pattern`)
@@ -323,7 +332,10 @@ Upgrade in place with `sudo bash deploy.sh` over SSH.
   name.** A client still on the IP is banned on its first request after the
   deploy (7 days). If one does get banned: `sudo cscli decisions delete --ip <IP>`, then
   re-add the connection with `https://<your-domain>:1080`.
-- **Whitelist entries lose nginx trust.** Every `CROWDSEC_WHITELIST_IPS`
+- **List every other name your devices use** — an old DDNS name, a CNAME —
+  in `EXTRA_SERVER_NAMES` before you deploy in `ban` mode. With TLS, any
+  name other than `TLS_DOMAIN` and `EXTRA_SERVER_NAMES` is a trap hit.
+- **Whitelisted addresses are not trusted.** Every `CROWDSEC_WHITELIST_IPS`
   entry outside `LAN_SUBNET` is still never banned, but from now on gets
   the admin-path 403, the auth and WebSocket limits and, with
   `UNKNOWN_PATH_MODE="deny"`, the 404 for unknown paths. The deploy names
@@ -335,8 +347,10 @@ Upgrade in place with `sudo bash deploy.sh` over SSH.
   unchanged; the nginx site is regenerated once. Afterwards
   `sudo bash test-gateway.sh` must report "nginx trusts only loopback,
   LAN_SUBNET and TRUSTED_SOURCES".
-- **Root SSH:** put your key on a sudo user first, otherwise HARD mode keeps
-  `prohibit-password` and warns.
+- **Root SSH:** put your key on a sudo user first and check in a second
+  session that `sudo -v` works for it (a usable password or a NOPASSWD
+  rule); otherwise HARD mode keeps `prohibit-password` and warns. If you set
+  `SSH_ALLOW_USERS`, list at least one such account.
 - **Network watchdog.** In TLS mode the deploy disables the network watchdog
   and re-arms it at the end. If a run stops early it prints
   `network-watchdog → NOT ARMED`; the fix is to re-run `sudo bash deploy.sh`,

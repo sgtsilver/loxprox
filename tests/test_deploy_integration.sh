@@ -2593,10 +2593,12 @@ test_breach_sshd() {
     echo "━━━ SSH drop-in — PermitRootLogin no, AllowUsers (2026-10) ━━━"
 
     # A synthetic account database: admin (sudo, key, bash), plain (key,
-    # bash, no sudo), svc (sudo, key, nologin), nokey (sudo, bash, no key).
+    # bash, no sudo), svc (sudo, key, nologin), nokey (sudo, bash, no key),
+    # lockedpw (sudo group, key, bash, locked password — sudo can't let it in
+    # unless a NOPASSWD rule exists; 2026-11 release review).
     local pw="$MOCK_ROOT/ssh-passwd" home="$MOCK_ROOT/ssh-home" u
     : > "$pw"
-    for u in admin plain svc nokey; do
+    for u in admin plain svc nokey lockedpw; do
         mkdir -p "$home/$u/.ssh"
         printf '%s:x:%d:%d::%s:%s\n' "$u" $((1000 + ${#u})) $((1000 + ${#u})) "$home/$u" \
             "$([[ "$u" == svc ]] && echo /usr/sbin/nologin || echo /bin/bash)" >> "$pw"
@@ -2604,8 +2606,17 @@ test_breach_sshd() {
     done
     local saved_pw="$LOXPROX_PASSWD_FILE"
     LOXPROX_PASSWD_FILE="$pw"
-    getent() { [[ "$1" == "passwd" ]] && grep "^$2:" "$pw"; }
-    id() { case "$2" in admin|svc|nokey) echo "$2 sudo" ;; *) echo "$2" ;; esac; }
+    getent() {
+        case "$1" in
+            passwd) grep "^$2:" "$pw" ;;
+            shadow) [[ "$2" == lockedpw || "$2" == root ]] && echo "$2:!:20000:0:99999:7:::" \
+                        || printf '%s:$y$j9T$mockhashformock:20000:0:99999:7:::\n' "$2" ;;
+            *) return 2 ;;
+        esac
+    }
+    id() { case "$2" in admin|svc|nokey|lockedpw) echo "$2 sudo" ;; *) echo "$2" ;; esac; }
+    # sudo -l -U: a NOPASSWD rule only for the account named in _MOCK_NOPASSWD.
+    sudo() { [[ -n "${_MOCK_NOPASSWD:-}" && " $* " == *" -U $_MOCK_NOPASSWD "* ]] && echo "    (ALL : ALL) NOPASSWD: ALL"; return 0; }
 
     SSH_ALLOW_USERS="" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
     grep -qx 'PermitRootLogin no' "$SSHD_DROPIN" && pass "HARD: PermitRootLogin no (admin: key + login shell + sudo)" || fail "HARD: PermitRootLogin not 'no'"
@@ -2616,16 +2627,45 @@ test_breach_sshd() {
     rm -f "$home/admin/.ssh/authorized_keys"
     SSH_ALLOW_USERS="" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
     grep -qx 'PermitRootLogin prohibit-password' "$SSHD_DROPIN" \
-        && pass "only a non-sudo account (plain) and a nologin one (svc) have keys → prohibit-password (no lockout)" \
+        && pass "keys only on a non-sudo (plain), a nologin (svc) and a locked-password sudo account (lockedpw) → prohibit-password (no lockout)" \
         || fail "root login switched off with no sudo-capable keyed account"
+    # Group membership is not enough: lockedpw passes once sudo has a NOPASSWD rule for it.
+    _MOCK_NOPASSWD=lockedpw SSH_ALLOW_USERS="" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
+    grep -qx 'PermitRootLogin no' "$SSHD_DROPIN" \
+        && pass "locked password + NOPASSWD: ALL → can become root → PermitRootLogin no" \
+        || fail "NOPASSWD sudo account not accepted: $(grep PermitRootLogin "$SSHD_DROPIN")"
     printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEKEYFORTESTSONLY admin@ci\n' > "$home/admin/.ssh/authorized_keys"
 
     SSH_ALLOW_USERS="admin backup@192.168.1.0/24" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
     grep -qx 'AllowUsers admin backup@192.168.1.0/24' "$SSHD_DROPIN" && pass "AllowUsers written verbatim" || fail "AllowUsers line wrong: $(grep AllowUsers "$SSHD_DROPIN")"
     grep -qx 'PermitRootLogin no' "$SSHD_DROPIN" && pass "…with root login off (admin is listed, keyed, sudo)" || fail "listed sudo admin did not allow PermitRootLogin no"
+    # AllowUsers keeps root out too: listing only accounts that cannot become
+    # root would leave no way to administer the box (2026-11 release review).
     SSH_ALLOW_USERS="plain" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
-    grep -qx 'AllowUsers plain' "$SSHD_DROPIN" && grep -qx 'PermitRootLogin prohibit-password' "$SSHD_DROPIN" \
-        && pass "AllowUsers limited to a non-sudo account → root login kept (key only)" || fail "AllowUsers plain: $(grep -E 'AllowUsers|PermitRootLogin' "$SSHD_DROPIN" | tr '\n' ' ')"
+    ! grep -q '^AllowUsers' "$SSHD_DROPIN" && grep -qx 'PermitRootLogin no' "$SSHD_DROPIN" \
+        && pass "HARD: AllowUsers refused for a non-sudo account (root would be shut out); admin keeps root login off" \
+        || fail "AllowUsers plain: $(grep -E 'AllowUsers|PermitRootLogin' "$SSHD_DROPIN" | tr '\n' ' ')"
+    SSH_ALLOW_USERS="lockedpw" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
+    grep -q '^AllowUsers' "$SSHD_DROPIN" && fail "HARD: AllowUsers for a sudo-group account sudo cannot let in" \
+        || pass "HARD: AllowUsers refused for a locked-password sudo account without NOPASSWD"
+    SSH_ALLOW_USERS="plain" _loxprox_write_soft_ssh_drop_in >/dev/null 2>&1
+    grep -q '^AllowUsers' "$SSHD_DROPIN" && fail "SOFT: AllowUsers for a non-sudo account (root shut out)" \
+        || pass "SOFT: AllowUsers refused for a non-sudo account"
+    # root listed: it must be able to log in itself (key; SOFT also a usable password).
+    local saved_rootkeys="$LOXPROX_ROOT_AUTH_KEYS"
+    LOXPROX_ROOT_AUTH_KEYS="$MOCK_ROOT/ssh-root-authorized_keys"
+    printf 'root:x:0:0::%s/root:/bin/bash\n' "$home" >> "$pw"
+    rm -f "$LOXPROX_ROOT_AUTH_KEYS"
+    SSH_ALLOW_USERS="root" _loxprox_write_soft_ssh_drop_in >/dev/null 2>&1
+    grep -q '^AllowUsers' "$SSHD_DROPIN" && fail "SOFT: AllowUsers root with a locked root password and no root key (lockout)" \
+        || pass "SOFT: AllowUsers root refused when root has neither a usable password nor a key"
+    printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEKEYFORTESTSONLY root@ci\n' > "$LOXPROX_ROOT_AUTH_KEYS"
+    SSH_ALLOW_USERS="root" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
+    grep -qx 'AllowUsers root' "$SSHD_DROPIN" && grep -qx 'PermitRootLogin prohibit-password' "$SSHD_DROPIN" \
+        && pass "HARD: AllowUsers root with a root key → root keeps key login (prohibit-password)" \
+        || fail "AllowUsers root (keyed): $(grep -E 'AllowUsers|PermitRootLogin' "$SSHD_DROPIN" | tr '\n' ' ')"
+    rm -f "$LOXPROX_ROOT_AUTH_KEYS"
+    LOXPROX_ROOT_AUTH_KEYS="$saved_rootkeys"
 
     SSH_ALLOW_USERS="ghost" _loxprox_write_hard_ssh_drop_in >/dev/null 2>&1
     grep -q '^AllowUsers' "$SSHD_DROPIN" && fail "AllowUsers for a non-existent account (lockout)" || pass "AllowUsers refused: no listed account exists"
@@ -2647,7 +2687,7 @@ test_breach_sshd() {
     grep -q '_loxprox_load_config' <<<"$finalize" && grep -q '_loxprox_validate_hardening_config' <<<"$finalize" \
         && pass "--finalize-ssh loads and validates deploy.conf before setup_ssh_hardening" || fail "--finalize-ssh ignores deploy.conf: $finalize"
 
-    unset -f getent id
+    unset -f getent id sudo
     LOXPROX_PASSWD_FILE="$saved_pw"
     rm -f "$SSHD_DROPIN"
 }

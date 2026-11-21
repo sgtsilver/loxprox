@@ -5,20 +5,19 @@
 [![Release](https://img.shields.io/github/v/release/sgtsilver/loxprox?label=release&color=brightgreen)](https://github.com/sgtsilver/loxprox/releases)
 [![CI](https://github.com/sgtsilver/loxprox/actions/workflows/ci.yml/badge.svg)](https://github.com/sgtsilver/loxprox/actions/workflows/ci.yml)
 [![License: Non-Commercial](https://img.shields.io/badge/License-Non--Commercial-red.svg)](#lizenz)
-[![Validation: A-](https://img.shields.io/badge/Validation-A--_brightgreen)](#)
 [![Debian 12](https://img.shields.io/badge/Debian-12-A81D33?logo=debian)](#)
-[![CIS Hardened](https://img.shields.io/badge/CIS-Hardened-blue)](#)
 
 > **Ein sofort einsatzbereites Security-Gateway für den Loxone Miniserver Gen 1.** Kein TLS, keine eingebaute Auth, keine Rate Limits — LoxProx ergänzt transparent jeden Schutz, den die Hardware vermissen lässt. Deine App läuft weiter; das Gateway steckt die Treffer ein.
 
 ```
 Internet ──► Router:1080 ──► LoxProx-Gateway:1080 ──► Loxone:80
                                    │
-                                   ├── nginx (Proxy, Rate Limits, Header)
-                                   ├── CrowdSec (IDS, CAPI-Blocks, AppSec WAF)
-                                   ├── nftables (Input DROP, erlaubt :1080 + SSH)
+                                   ├── nginx (Host/SNI-Gate + Scanner-Falle, Proxy, Rate Limits, Header)
+                                   ├── CrowdSec (IDS, CAPI-Blocks, AppSec WAF, HARD-/SOFT-Ban-Leitern)
+                                   ├── nftables (Input DROP, GeoIP-Drop, erlaubt :1080 + SSH; :80 mit TLS)
                                    ├── AppArmor (nginx-Profil: Complain → Enforce per Opt-in)
                                    ├── auditd (Config-Änderungs-Überwachung)
+                                   ├── LoxProx Panel (:1081, nur LAN)
                                    └── Discord-Alerts (Echtzeit)
 
 LAN (192.168.x.0/24) ──────────► Loxone:80   (direkt — am Gateway vorbei)
@@ -50,17 +49,20 @@ LoxProx setzt sich davor und liefert die gesamte fehlende Sicherheitsschicht.
 
 **Auf einen Blick**
 
-- **Drop-in & idempotent** — ein Script; `git pull && sudo bash deploy.sh` läuft gefahrlos erneut und übersteht Upgrades (inkl. deiner nginx-Handanpassungen).
-- **Scanner-Abwehr** — mit TLS bedient `:1080` nur den echten Hostnamen; Scanner-Pfade und IP-Zugriffe landen in einer Falle (444, Log) und werden 7 Tage, dann 90 und 365 Tage gebannt (`TRAP_BAN_MODE="observe"` für den ersten Rollout). Jede App nutzt `https://<hostname>:1080`, nie die IP.
+- **Drop-in & idempotent** — ein Script; `git pull && sudo bash deploy.sh` läuft gefahrlos erneut. Die nginx-Site `/etc/nginx/sites-available/loxone` wird neu erzeugt, sobald sie vom Template oder von deiner `deploy.conf` abweicht (vorher gesichert; ein fehlschlagendes `nginx -t` stellt das Backup wieder her) — Handanpassungen überleben ein Redeploy also **nicht**. Mit `LOXPROX_KEEP_NGINX_SITE=1` friert du eine handgepflegte Site ein ([Details](CONFIGURATION-GUIDE.de.md#deploysh-erneut-laufen-lassen--nginx-site-regenerierung--exit-codes)).
 - **Defense in Depth** — nginx Reverse-Proxy + CrowdSec IDS + AppSec WAF + nftables + AppArmor + auditd, geschichtet.
+- **Scanner-Abwehr (v3.0)** — mit TLS bedienen `:1080` und `:80` nur deinen echten Hostnamen (`TLS_DOMAIN` + `EXTRA_SERVER_NAMES`). Eine nackte IP, fehlendes SNI, ein fremder `Host` oder ein Scanner-Pfad landen in einer Falle (444 + Log) und bekommen einen **HARD-Ban**: 7 Tage, dann 90, dann 365. Andere Verstöße laufen auf einer **SOFT-Leiter** (24 h → 7 → 30 → 90 Tage); `progressive-ban.py` verlängert Wiederholungstäter. Jede App nutzt `https://<hostname>:1080`, nie die IP; rolle zuerst mit `TRAP_BAN_MODE="observe"` aus und trage einen bekannten Prober bei Bedarf in `TRAP_EXEMPT_IPS` ein.
+- **Admin-Pfade gesperrt (v3.0)** — die einfachen Loxone-Admin-Webservices (`fsget`, `fsdel`, `sys/reboot`, …) antworten aus dem Internet mit `403` (`REMOTE_ADMIN_PATHS="allow"` öffnet sie wieder); LAN und `TRUSTED_SOURCES` sind ausgenommen. Das filtert nur einfache HTTP-Pfade — die eigenen Zugangsdaten des Miniservers bleiben die eigentliche Kontrolle.
+- **Nie gebannt heißt nicht vertrauenswürdig (v3.0)** — `CROWDSEC_WHITELIST_IPS` verhindert nur Bans; nginx vertraut ausschließlich Loopback, `LAN_SUBNET` und dem neuen `TRUSTED_SOURCES`.
+- **GeoIP-Drop** — nftables verwirft CN, RU, KP und IR (IPv4 + IPv6). Auch Reisende in diesen Ländern sind damit ausgesperrt.
 - **Transparent** — LAN-Traffic geht direkt zum Miniserver; nur Internet-Traffic wird geprüft, lokale Nutzer werden also nie ausgebremst.
 - **Optional HTTPS auf `:1080`** — TLS-Terminierung per `acme.sh` + Let's Encrypt (mit ZeroSSL-Fallback), deckt das No-TLS-Gerät dahinter ab.
 - **Optional Fernzugriff ohne offene Ports (v2.0)** — frp-Tunnel über einen eigenen Relay-VPS für CGNAT-/DS-Lite-Anschlüsse; selbst gehostet, ohne Abo, mit eigenem Watchdog. Siehe [Tunnel-Setup](docs/TUNNEL-SETUP.de.md).
-- **Optionales LAN-only Web-Panel (v2.1)** — Status-Kacheln, Log-Ansicht, Config-Editor und Ein-Klick-Support-Aktionen (entbannen, neu starten, TLS erneuern) unter `http://<gateway-ip>:1081`. Siehe [GUI Panel](docs/GUI-PANEL.de.md).
-- **Leichtgewichtig** — läuft auf einer 1-GB-VM oder einem Raspberry Pi 3+.
+- **LAN-only Web-Panel (v2.1, standardmäßig an)** — Status-Kacheln, Log-Ansicht, Config-Editor und Ein-Klick-Support-Aktionen (entbannen, neu starten, TLS erneuern) unter `http://<gateway-ip>:1081`, erreichbar nur aus `LAN_SUBNET` und `SSH_ALLOWED_SUBNETS`. `GUI_PASSWORD` ist standardmäßig leer — setze eins. Siehe [GUI Panel](docs/GUI-PANEL.de.md).
+- **Leichtgewichtig** — läuft auf einer VM mit 1 vCPU / 1 GB (empfohlen: 2 vCPU / 2 GB); Raspberry-Pi-Hardware ist im Scope, aber kein getestetes Ziel (siehe [Hardware-Anforderungen](#hardware-anforderungen)).
 - **Selbstheilend** — ein Netzwerk-Watchdog erkennt und repariert Stack-Ausfälle automatisch.
 - **Echtzeit-Alerts** — optionale Discord-Benachrichtigungen bei Blocks, Fehlern und Anomalien.
-- **Unabhängig validiert** — A- gegen CIS Debian 12 + OWASP IoT Top 10.
+- **CIS-orientierte Härtung** — SSH, Kernel-Sysctls, auditd und unattended-upgrades folgen den CIS-Debian-12-Empfehlungen. Das ist keine Zertifizierung; ein KI-gestütztes, rein repo-basiertes Selbst-Audit von v1.3.3 (2026-05) liegt in [`audits/`](audits/2026-05-23-skills-audit.md).
 
 ---
 
@@ -79,15 +81,27 @@ LoxProx setzt sich davor und liefert die gesamte fehlende Sicherheitsschicht.
    sudo $EDITOR /etc/loxprox/deploy.conf      # [REQUIRED]-Werte eintragen
    ```
 6. **Deploy** — `chmod +x deploy.sh && sudo ./deploy.sh`
-7. **Validieren** — `sudo bash test-gateway.sh` (50+ automatisierte Checks)
-8. **Umschalten** — folge [`phase3-cutover.md`](phase3-cutover.md), um das Router-Forwarding aufs Gateway umzuziehen.
-9. **Monitoren** — folge [`phase4-monitoring.md`](phase4-monitoring.md) für Tuning und Beobachtung.
+7. **Validieren** — `sudo bash test-gateway.sh` (100+ automatisierte Checks)
+8. **Umschalten** — folge [`phase3-cutover.de.md`](phase3-cutover.de.md), um das Router-Forwarding aufs Gateway umzuziehen. (Die Phasen-Guides stammen aus der Zeit vor der VM-only-Entscheidung: Das Gateway ist eine VM, führe deren Befehle also in der VM aus statt per `pct exec`.)
+9. **Monitoren** — folge [`phase4-monitoring.de.md`](phase4-monitoring.de.md) für Tuning und Beobachtung. (Gleicher Hinweis: Befehle in der VM ausführen statt per `pct exec`; auf Proxmox `qm` statt `pct` nutzen.)
 
-Das Deploy-Script ist **idempotent** und upgrade-sicher — `git pull && sudo bash deploy.sh` reicht, und Operator-Anpassungen an `/etc/nginx/sites-available/loxone` (z. B. ein WebSocket-Block) überleben jedes Redeploy.
+Das Deploy-Script ist **idempotent** — `git pull && sudo bash deploy.sh` läuft gefahrlos erneut. Es bewahrt aber keine Handanpassungen: Seit v2.3.0 erzeugt es `/etc/nginx/sites-available/loxone` aus dem Template neu, sobald die Datei oder deine `deploy.conf` abweicht (mit Backup und Rückfall, wenn `nginx -t` fehlschlägt). Mit `LOXPROX_KEEP_NGINX_SITE=1` friert du eine handgepflegte Site ein — Template-Fixes und `deploy.conf`-Änderungen erreichen sie dann nicht mehr. Siehe den [Konfigurations-Guide](CONFIGURATION-GUIDE.de.md#deploysh-erneut-laufen-lassen--nginx-site-regenerierung--exit-codes).
+
+### Upgrade auf v3.0.0 (von v2.3.0)
+
+Upgrade vor Ort mit `sudo bash deploy.sh` per SSH. Lies vorher die [Upgrade-Hinweise](CHANGELOG.md#upgrade-notes--from-v230) und **Behaviour changes you must act on** am Anfang des [Changelogs](CHANGELOG.md) (englisch). Die Kurzfassung:
+
+- **Starte im Observe-Modus.** Setze `TRAP_BAN_MODE="observe"` (`ban` ist der Default) in `/etc/loxprox/deploy.conf` und deploye: Die Falle antwortet weiter mit 444 und loggt, aber `loxprox/scanner-trap` bannt niemanden (Standard-Szenarien von CrowdSec, etwa für Zugriffe auf sensible Dateien, bannen weiterhin). Prüfe nach ein paar Tagen `sudo cscli alerts list -s loxprox/scanner-trap --limit 0` und `/var/log/nginx/loxprox-trap-hosts.log` auf eigene Geräte, korrigiere sie, setze dann `"ban"` und deploye erneut.
+- **Trage jede Loxone-App und jedes Gerät mit dem Hostnamen neu ein** (`https://<dein-host>:1080`) und trage jeden weiteren Namen, den sie verwenden (alter DDNS-Name, CNAME), in `EXTRA_SERVER_NAMES` ein. Mit TLS ist eine nackte IP, fehlendes SNI oder ein fremder `Host` ein Fallen-Treffer: 444 und ein HARD-Ban (7 Tage beim ersten Verstoß).
+- **Admin-Webservice-Pfade antworten aus dem Internet mit `403`.** `REMOTE_ADMIN_PATHS="allow"` reicht sie wieder durch; das LAN und `TRUSTED_SOURCES` sind ohnehin ausgenommen.
+- **Root-SSH-Login ist im HARD-Modus aus**, sobald ein Nicht-Root-Konto einen Key, eine Login-Shell und funktionierendes sudo hat (nutzbares Passwort oder NOPASSWD-Regel). Lege zuerst deinen Key auf einem sudo-User ab, prüfe in einer zweiten Sitzung, dass `sudo -v` funktioniert, und führe dann `sudo bash deploy.sh --finalize-ssh` aus; sonst bleibt Root bei `prohibit-password`, und der Deploy warnt.
+- **`TRUSTED_SOURCES` vs. `CROWDSEC_WHITELIST_IPS`.** Ein Whitelist-Eintrag heißt nur „nie gebannt“; nginx vertraut allein Loopback, `LAN_SUBNET` und `TRUSTED_SOURCES`. Eine Whitelist-Adresse außerhalb des LANs bekommt wie jeder Internet-Client das `403` auf den Admin-Pfaden und die Auth-/WebSocket-Limits. Administriert ein Whitelist-Netz den Miniserver tatsächlich über das Gateway, trage es *vor* dem Deploy in `TRUSTED_SOURCES` ein.
+
+Weitere Änderungen (deutlich längere Bans, wieder installierende Security-Updates, wie du `:1080` auf dem Gateway selbst prüfst) stehen in den Upgrade-Hinweisen.
 
 **Gut zu wissen:**
-- **Upgrade von v1.3.x?** Einmalig `sudo bash deploy.sh --bootstrap-config` ausführen — liest deine aktiven Werte zurück nach `/etc/loxprox/deploy.conf`. Anleitung: [`docs/UPGRADE-to-v1.5.md`](docs/UPGRADE-to-v1.5.md).
-- **HTTPS gewünscht?** `ENABLE_TLS="true"` setzen (braucht öffentlichen DNS-Namen + eine `WAN:80 → Gateway:80`-Weiterleitung für ACME). Runbook: [`docs/TLS-SETUP.de.md`](docs/TLS-SETUP.de.md).
+- **Upgrade von v1.3.x oder älter?** Einmalig `sudo bash deploy.sh --bootstrap-config` ausführen — liest deine aktiven Werte zurück nach `/etc/loxprox/deploy.conf`. Anleitung: [`docs/UPGRADE-to-v1.5.de.md`](docs/UPGRADE-to-v1.5.de.md). Danach die v3.0.0-Hinweise oben befolgen.
+- **HTTPS gewünscht?** `ENABLE_TLS="true"` setzen (braucht öffentlichen DNS-Namen + eine `WAN:80 → Gateway:80`-Weiterleitung für ACME). Mit TLS muss jede App und jedes Gerät `https://<hostname>:1080` nutzen — nie die IP, die ein Fallen-Treffer und ein HARD-Ban wäre. Runbook: [`docs/TLS-SETUP.de.md`](docs/TLS-SETUP.de.md).
 - **Hinter CGNAT / DS-Lite (keine Portweiterleitung möglich)?** Den v2.0-Tunnel aktivieren: ein kleiner Relay-VPS wird zum öffentlichen Einstiegspunkt, das Gateway wählt sich ausgehend ein. Runbook: [`docs/TUNNEL-SETUP.de.md`](docs/TUNNEL-SETUP.de.md).
 - **SSH sperrt dich nicht aus.** Existiert beim ersten Lauf kein `authorized_keys`, zeigt der Installer ein interaktives Menü (Key einfügen, Hilfe beim Anlegen, oder Passwort-Auth mit Warnung behalten) und fällt bei nicht-interaktiven Deploys in einen sicheren Modus. Details: [`CONFIGURATION-GUIDE.de.md`](CONFIGURATION-GUIDE.de.md) → „SSH Key Bootstrap".
 
@@ -127,17 +141,17 @@ gateway-eigene **LoxProx Panel** zur Verfügung — eine LAN-only Web-UI unter
 
 | # | Schicht | Zweck |
 |---|---------|-------|
-| 1 | **nftables** | Input DROP per Default; SSH nur aus dem LAN; `:1080` fürs Internet offen |
-| 2 | **nginx** | Reverse-Proxy, 10 req/s Rate Limit, Connection-Caps, Security-Header, Slowloris-Timeouts |
-| 3 | **CrowdSec** | IDS, parst nginx- und SSH-Logs; CAPI-Community-Feed (~26k bekannte Bad IPs) |
+| 1 | **nftables** | Input DROP per Default; SSH nur aus dem LAN; `:1080` fürs Internet offen (mit TLS zusätzlich `:80` für ACME); das LoxProx Panel `:1081` nur aus dem LAN; GeoIP-Drop von CN, RU, KP und IR (IPv4 + IPv6) |
+| 2 | **nginx** | Reverse-Proxy, 10 req/s Rate Limit, Connection-Caps, Security-Header, Slowloris-Timeouts; mit TLS ein Host/SNI-Gate mit Scanner-Falle (444 + Log); Admin-Webservice-Pfade antworten aus dem Internet mit `403` (`REMOTE_ADMIN_PATHS`); Auth- und WebSocket-Limits pro nicht vertrauenswürdiger Adresse |
+| 3 | **CrowdSec** | IDS, parst nginx- und SSH-Logs; CAPI-Community-Blocklist; HARD- (7 d → 90 d → 365 d) und SOFT-Ban-Leitern (24 h → 7 → 30 → 90 d), für Wiederholungstäter verlängert von `progressive-ban.py` |
 | 4 | **Firewall Bouncer** | Holt CrowdSec-Entscheidungen ab → setzt sie dynamisch in nftables durch |
-| 5 | **AppSec WAF** | Virtual Patching (200+ CVE-spezifische Regeln); prüft jeden Request vor dem Weiterreichen |
+| 5 | **AppSec WAF** | Virtual Patching für bekannte CVEs in gängiger Software (CrowdSec-Hub-Regeln); prüft jeden Request vor dem Weiterreichen |
 | 6 | **AppArmor** | nginx-Profil — läuft im Complain-Modus (protokolliert, blockiert nicht), bis du nach dem Soak mit `APPARMOR_NGINX_MODE="enforce"` auf Enforce umschaltest ([ADR 0006](docs/adr/0006-apparmor-nginx-profile-complain-first.md)) |
 | 7 | **auditd** | Überwacht Config-Änderungen an nginx, crowdsec, nftables, ssh, sudoers, an der LoxProx-Config, der AppArmor-Policy und den Scripts unter `/opt/loxprox` |
-| 8 | **unattended-upgrades** | Auto-Reboot um 03:00 für Kernel-Patches |
+| 8 | **unattended-upgrades** | Debian-Security-Updates; Auto-Reboot für Kernel-Patches zu `AUTOREBOOT_TIME` (Default 03:00) |
 | 9 | **Security-Monitor** | 60-Sek-Zyklus: CrowdSec-Blocks, nginx-Fehler, Auth-Versuche, Resource-Alarme → Discord |
 | 10 | **Network Watchdog** | Selbstheilend: erkennt Netzwerk-Ausfälle (dhclient-Death-Spiral, Routing-Korruption) und repariert per Service-Restart oder Reboot |
-| 11 | **Log-Rotation** | 14 Tage nginx-Log-Aufbewahrung; LoxProx-eigene Logs wöchentlich bzw. ab 10 MB (8 Generationen); Journal auf 300 MB begrenzt |
+| 11 | **Log-Rotation** | nginx-Access-, Trap- und Unknown-Path-Logs 90 Tage, Error- und AppSec-Logs 14 Tage; LoxProx-eigene Logs wöchentlich bzw. ab 10 MB (8 Generationen); Journal auf 300 MB begrenzt |
 | 12 | **Config-Backup** | Tägliche automatische Backups nach `/root/loxprox-backups/` — enthält `deploy.conf`, TLS-Cert+Key, Tunnel-Config und das SSH-Drop-in; Restore via `deploy.sh --restore <tarball>` |
 
 ---
@@ -151,13 +165,19 @@ Die Werte, die du tatsächlich setzt:
 ```bash
 LOXONE_IP="192.168.1.100"                 # dein Miniserver
 GATEWAY_IP="192.168.1.50"                  # statische IP dieses Gateways
-LAN_SUBNET="192.168.1.0/24"                # vertrauenswürdiges LAN
+LAN_SUBNET="192.168.1.0/24"                # vertrauenswürdiges LAN (nginx vertraut ihm: kein Admin-Pfad-403, keine Auth-/WebSocket-Limits)
 SSH_ALLOWED_SUBNETS=("192.168.1.0/24")     # wer SSH erreichen darf
+CROWDSEC_WHITELIST_IPS=("192.168.1.0/24")  # nie gebannt (nginx vertraut nicht); lass dein LAN hier drin, ergänze die WAN-IP deines Haushalts
 RATE_LIMIT_REQ_PER_SEC="10"
 RATE_LIMIT_BURST="100"
 ENABLE_APPSEC="true"
 APPSEC_MODE="enforce"                      # „monitor" oder „enforce"
 ENABLE_TLS="false"                         # optionales HTTPS auf :1080 (siehe TLS-SETUP)
+TLS_DOMAIN=""                              # nötig bei ENABLE_TLS="true": der öffentliche Hostname, den jede App nutzen muss
+TLS_EMAIL=""                               # nötig bei ENABLE_TLS="true": E-Mail für das ACME-Konto
+TRAP_BAN_MODE="ban"                        # „observe" für den ersten Rollout: das Fallen-Szenario bannt nicht (444 + Log)
+ENABLE_GUI="true"                          # LoxProx Panel auf :1081, nur LAN
+GUI_PASSWORD=""                            # leer = kein Passwort: setze eins
 ENABLE_TUNNEL="false"                      # optionaler Fernzugriff ohne offene Ports (siehe TUNNEL-SETUP)
 DISCORD_WEBHOOK_URL=""                     # optionales Alerting — leer lassen zum Überspringen
 ```
@@ -175,7 +195,11 @@ DISCORD_WEBHOOK_URL=""                     # optionales Alerting — leer lassen
 | Disk | 5 GB | 10 GB |
 | OS | Debian 12 (Bookworm) 64-bit | Debian 12 |
 
-Die Referenz-Installation läuft auf einer **Proxmox-VM mit 1 vCPU und 1 GB RAM** und liegt im normalen Betrieb bei **~850 MB RSS**. Der Stack selbst (nginx + CrowdSec + AppSec + Bouncer) verbraucht im Leerlauf 100–150 MB; den Rest holen sich Debian-Basis und Page-Cache.
+**Unterstütztes Ziel: eine Debian-12-VM (Bookworm).** Darauf laufen die Referenz-Installation und die Tests des Projekts. Das CrowdSec-Paket-Repository ist auf `bookworm` festgenagelt, und `deploy.sh` warnt bei jedem anderen OS nur („continuing“). Debian 13 und das aktuelle Raspberry Pi OS sind ungetestet.
+
+**Miniserver:** Gen 1 (reines HTTP auf Port 80) ist das getestete Ziel. `detect-loxone.sh` erkennt an der HTTPS-Antwort auch einen Gen 2 oder neuer und empfiehlt dann nur, TLS auf dem Gateway zu aktivieren; ein Setup mit Gen 2 oder neuer ist nicht getestet.
+
+Die Referenz-Installation ist eine **Proxmox-VM mit 1 vCPU und 1 GB RAM**. Der Speicherverbrauch wurde zuletzt auf v1.x gemessen und seit dem Panel, den Log-Watchern und den zusätzlichen CrowdSec-Szenarien nicht neu bestimmt — prüfe `free -m` auf deinem eigenen Gateway, bevor du die VM unter die Empfehlung verkleinerst.
 
 **Warum 2 vCPU / 2 GB empfohlen sind:** CrowdSecs Leaky-Bucket-Speicher skaliert mit der Anzahl gleichzeitig aktiver Angreifer-IPs — 256 IPs ≈ 150 MB, 15 000 IPs ≈ 1,2–1,5 GB ([Quelle](https://www.crowdsec.net/blog/how-to-process-billions-daily-events-with-crowdsec)). Bei einem breit gestreuten Scan wächst der RAM-Bedarf entsprechend. AppSec WAF kostet pro Request rund **5 ms / 50 mc CPU** mit aktiviertem Virtual-Patching-Ruleset ([Quelle](https://docs.crowdsec.net/docs/appsec/benchmark/)) — eine zweite vCPU hält `nginx` für legitime Nutzer responsiv, während der Bouncer in den ersten 30–60 Sekunden eines Angriffs aufholt und Angreifer schon auf nftables-Ebene gedroppt werden. 1 vCPU / 1 GB funktionieren bei reinem Home-Automation-Traffic einwandfrei; die empfohlene Konfiguration ist die Reserve, die im Angriffsfall den Unterschied macht.
 
@@ -187,13 +211,13 @@ Die Referenz-Installation läuft auf einer **Proxmox-VM mit 1 vCPU und 1 GB RAM*
 > - **AppArmor-Enforcement** — `aa-enforce` lädt Profile in das Subsystem des Hosts; der Container kann das nicht.
 > - **nftables** — das Capability-Set eines unprivilegierten LXC lässt das Anlegen der `inet filter`-Tabelle nicht zu.
 >
-> `deploy.sh` erkennt LXC und bricht **standardmäßig ab**. `ALLOW_LXC=1 sudo ./deploy.sh` übergeht das — die dokumentierte CIS-Debian-12-/OWASP-IoT-Top-10-Posture gilt dann aber nicht mehr.
+> `deploy.sh` erkennt LXC und bricht **standardmäßig ab**. `ALLOW_LXC=1 sudo ./deploy.sh` übergeht das — die dokumentierte Härtungs-Posture gilt dann aber nicht mehr.
 
 ### Raspberry Pi
 
-Der Stack ist **leichtgewichtig genug für Raspberry-Pi-Deployments** im Home-Automation-Umfeld.
+Raspberry-Pi-Hardware ist im Scope, aber **kein getestetes Ziel**: Die Tests und die Referenz-Installation des Projekts laufen auf einer x86-64-Debian-12-VM. Die Tabelle folgt der von CrowdSec veröffentlichten Architektur-Unterstützung, nicht LoxProx-Testläufen. Nimm ein 64-bit-OS auf Debian-12-Basis (Bookworm); das aktuelle Raspberry Pi OS (Debian-13-Basis) ist ungetestet. Lass nach dem Deploy `sudo bash test-gateway.sh` laufen.
 
-| Modell | Architektur | RAM | Kompatibilität | Hinweis |
+| Modell | Architektur | RAM | Erwartete Kompatibilität | Hinweis |
 |--------|-------------|-----|----------------|---------|
 | **Pi 5** | ARMv8 (64-bit) | 2–8 GB | ✅ Voll | Overkill. Läuft mühelos. |
 | **Pi 4** | ARMv8 (64-bit) | 1–8 GB | ✅ Voll | Ideal. Offizielle ARM64-Pakete von CrowdSec. |
@@ -202,7 +226,7 @@ Der Stack ist **leichtgewichtig genug für Raspberry-Pi-Deployments** im Home-Au
 | **Pi 1 / Zero (original)** | ARMv6 | 512 MB | ❌ Nein | Keine ARMv6-Binaries von CrowdSec. |
 | **Pi Zero 2 W** | ARMv8 (64-bit) | 512 MB | ⚠️ Knapp | 64-bit OS möglich, 512 MB aber knapp — Swap und Scenario-Reduktion vermutlich nötig. |
 
-Typischer Fußabdruck auf dem Pi: nginx ~5–10 MB · CrowdSec-Agent ~30–50 MB · Firewall-Bouncer ~10–20 MB · AppSec ~20–40 MB · OS ~100–200 MB → **~165–320 MB gesamt**. Ein Pi 3 oder Pi 4 schafft das mit Reserve. Vorbilder: [CrowdSec auf einem Pi 3 (DietPi)](https://it-security.dnit.fr/en/crowdsec-installation-on-rpi3-with-dietpi-raspberry-os/), [CrowdSec + nginx auf dem Raspberry Pi (2025)](https://www.polimetro.com/en/How-to-protect-your-Raspberry-Pi-with-CrowdSec/).
+Pro-Prozess-Speicherwerte für einen Pi nennen wir hier nicht: Die Zahlen früherer README-Versionen stammten von v1.x und sind älter als das Panel und die Härtung vom 2026-10. Miss auf deinem eigenen Board. Vorbilder: [CrowdSec auf einem Pi 3 (DietPi)](https://it-security.dnit.fr/en/crowdsec-installation-on-rpi3-with-dietpi-raspberry-os/), [CrowdSec + nginx auf dem Raspberry Pi (2025)](https://www.polimetro.com/en/How-to-protect-your-Raspberry-Pi-with-CrowdSec/).
 
 ---
 
@@ -210,11 +234,12 @@ Typischer Fußabdruck auf dem Pi: nginx ~5–10 MB · CrowdSec-Agent ~30–50 MB
 
 | Bedrohung | Mitigation |
 |-----------|-----------|
-| Internet-Scanning / Reconnaissance | nftables DROP-Default + CrowdSec CAPI |
+| Internet-Scanning / Reconnaissance (Shodan-/Censys-artige Crawler) | nftables DROP-Default, Host/SNI-Gate + Falle (444, kein Fingerprint), HARD-Ban-Leiter (7 d → 90 d → 365 d), GeoIP-Drop (CN/RU/KP/IR), CrowdSec-Community-Blocklist |
+| Fernnutzung der Loxone-Admin-Webservices (Dateisystem, Reboot) | `403` aus dem Internet auf den einfachen Pfaden (`REMOTE_ADMIN_PATHS`); LAN und `TRUSTED_SOURCES` ausgenommen |
 | Brute-Force gegen Web-UI | nginx Rate Limits + CrowdSec `http-generic-bf` |
 | Application-Layer-DDoS | nginx Connection-Limits, Timeouts, CrowdSec |
-| Credential Stuffing | Rate Limits + CrowdSec `http-cve` |
-| Ausnutzung von Loxone-CVEs | AppSec WAF (200+ Virtual Patches) |
+| Credential Stuffing | Rate Limits, Auth-Endpoint-Limits (3 req/s pro nicht vertrauenswürdiger Adresse) + CrowdSec `http-cve` |
+| Ausnutzung bekannter Web-CVEs | AppSec-WAF-Virtual-Patching (CrowdSec-Hub-Regeln — die Abdeckung ist, was der Hub liefert, nicht Loxone-spezifisch) |
 | SSH-Brute-Force | CrowdSec `ssh-bf` + nftables-Source-Beschränkung |
 | Slowloris / Slow-Read | aggressive nginx-Timeouts (10–15 s) |
 | Config-Manipulation | auditd (+ AppArmor, sobald enforced) |
@@ -225,7 +250,7 @@ Typischer Fußabdruck auf dem Pi: nginx ~5–10 MB · CrowdSec-Agent ~30–50 MB
 
 ## Betrieb & Tests
 
-Nach dem Deploy die Validierungs-Suite laufen lassen — **50+ automatisierte Checks** über Services, Firewall, Proxy, CrowdSec, AppSec, Monitoring, Kernel-Härtung und Backups (inklusive eines Test-Bans, der hinzugefügt und wieder entfernt wird, um die komplette Blocking-Kette zu prüfen):
+Nach dem Deploy die Validierungs-Suite laufen lassen — **100+ automatisierte Checks** über Services, Firewall, Proxy, CrowdSec, AppSec, Monitoring, Kernel-Härtung und Backups (inklusive eines Test-Bans, der hinzugefügt und wieder entfernt wird, um die komplette Blocking-Kette zu prüfen):
 
 ```bash
 sudo bash test-gateway.sh
@@ -260,7 +285,7 @@ Das komplette Incident-Response-Playbook steht in [`SECURITY.de.md`](SECURITY.de
 | [Upgrade auf v1.5](docs/UPGRADE-to-v1.5.de.md) · [EN](docs/UPGRADE-to-v1.5.md) | Migration von v1.3.x (Config-Bootstrap) |
 | [Security](SECURITY.de.md) · [EN](SECURITY.md) | Bedrohungsmodell, Incident Response, Härtung |
 | [Phasen-Guides](phase1-hardening.de.md) | [1: Härtung](phase1-hardening.de.md) · [3: Cutover](phase3-cutover.de.md) · [4: Monitoring](phase4-monitoring.de.md) |
-| [Changelog](CHANGELOG.md) · [Mitarbeit](CONTRIBUTING.de.md) | Versionshistorie · Beitragen |
+| [Changelog](CHANGELOG.md) (englisch) · [Mitarbeit](CONTRIBUTING.de.md) | Versionshistorie (inkl. der [Upgrade-Hinweise ab v2.3.0](CHANGELOG.md#upgrade-notes--from-v230)) · Beitragen |
 
 ---
 
@@ -276,13 +301,15 @@ Das hier ist ein Experiment in **KI-gestützter, menschlich kuratierter Infrastr
 
 ## Mitarbeit
 
-Siehe [CONTRIBUTING.de.md](CONTRIBUTING.de.md). Das hier ist eine spezialisierte Security-Appliance — Beiträge sollten beim Härten des Loxone-Gateways, Pi-Kompatibilität und Test-Coverage bleiben. Jedes getrackte Markdown-Dokument ist zweisprachig (Deutsch + Englisch); halte beide im selben PR synchron.
+Siehe [CONTRIBUTING.de.md](CONTRIBUTING.de.md). Das hier ist eine spezialisierte Security-Appliance — Beiträge sollten beim Härten des Loxone-Gateways, Pi-Kompatibilität und Test-Coverage bleiben. Nutzer-Doku ist zweisprachig (Deutsch + Englisch); halte beide im selben PR synchron. Changelog, Rundown, ADRs und Audit-Berichte gibt es nur auf Englisch.
+
+**Hilfe bekommen:** Eröffne für Fragen und Bugs ein [GitHub-Issue](https://github.com/sgtsilver/loxprox/issues); bei Sicherheitsproblemen folge [SECURITY.de.md](SECURITY.de.md) (Responsible Disclosure).
 
 ---
 
 ## Lizenz
 
-**Non-Commercial Use Only** — siehe [LICENSE](LICENSE). Die Software darf für persönliche, schulische, Forschungs- und nicht-kommerzielle Zwecke frei genutzt, verändert und weiterverteilt werden. Kommerzielle Nutzung — direkt oder indirekt, ganz oder teilweise — ist ausdrücklich untersagt.
+**Source-available, kostenlos für nicht-kommerzielle Nutzung** — siehe [LICENSE](LICENSE). Die Software darf für persönliche, schulische, Forschungs- und nicht-kommerzielle Zwecke frei genutzt, verändert und weiterverteilt werden. Kommerzielle Nutzung — direkt oder indirekt, ganz oder teilweise — ist ausdrücklich untersagt.
 
 ---
 

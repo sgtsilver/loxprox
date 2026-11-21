@@ -29,13 +29,14 @@ If you used AI to help find a bug: include the actual test output and steps to r
 ## Before Submitting
 
 1. Run `bash -n` on any modified shell scripts
-2. Test on a fresh Debian 12 VM or Raspberry Pi if possible
-3. Update `SECURITY.md` if the threat model changes — and `SECURITY.de.md` to match
-4. Keep changes surgical — this project values simplicity over completeness
+2. Run `bash tests/run-tests.sh` — the portable shell tests plus the Python tests, including the repo-hygiene guard `tests/test_repo_hygiene.py` (the Python part needs `pytest`)
+3. Test on a fresh Debian 12 VM if possible (Raspberry Pi results are welcome, but a Pi is not a tested target)
+4. Update `SECURITY.md` if the threat model changes — and `SECURITY.de.md` to match
+5. Keep changes surgical — this project values simplicity over completeness
 
 ## Bilingual Documentation
 
-Every tracked Markdown doc exists in both German and English. The two files must be kept semantically in sync — if you change one, change the other in the same PR.
+User-facing Markdown docs exist in both German and English. The two files must be kept semantically in sync — if you change one, change the other in the same PR. Some files are English-only by design: `CHANGELOG.md`, `RUNDOWN.md`, `GITHUB-METADATA.md`, `grafana-integration/README.md`, the ADRs under `docs/adr/` and the audit records under `audits/`. `tests/test_repo_hygiene.py` enforces the pairing for every other Markdown file.
 
 Naming convention (matches the existing `README.md` / `README.en.md` precedent):
 

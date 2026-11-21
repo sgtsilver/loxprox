@@ -2,17 +2,14 @@
 
 **Status:** Published on GitHub  
 **Repo:** https://github.com/sgtsilver/loxprox  
-**Version:** 2.3.0 (released)  
-**Last updated:** 2026-10-06 (v2.3.0 — calm ops console Panel: status-first overview with plain-language
-action items, typed config editor, SVG charts with table equivalents, designed to WCAG 2.2 AA, no third-party JS; the
-2026-10-05 health audit and its follow-ups: `/etc/cron.d/loxprox` no longer rejected by cron (`MAILTO=""`), Panel
-Apply/Renew as their own transient unit, root-only `/opt/loxprox`, logrotate/journald/auditd coverage, nginx
-AppArmor profile enforce-ready (complain by default); progressive ban reads CrowdSec 1.8.1's nested decisions;
-the AppSec detection log is written from the subrequest status; GeoIP refresh with retries, validation and a
-staleness alert; sweep-4 open findings still tracked in the local-only gitignored
-`audits/2026-07-29-sweep4-audit.md`)  
-**Previous:** 2026-07-30 (v2.2.0 — LoxProx Panel dashboard overhaul: tabbed dashboard, 24-hour charts, vendored
-assets, CSP `script-src 'self'`)
+**Version:** 3.0.0 (released)  
+**Last updated:** 2026-11-21 (v3.0.0 — scanner elimination after the 2026-10-18 Loxone breach: Host/SNI gate and
+scanner trap with HARD/SOFT ban ladders, plain admin webservice paths answered 403 from the internet, root SSH login
+off in HARD mode, `TRUSTED_SOURCES` replaces the CrowdSec whitelist as the nginx trust set, `TRAP_EXEMPT_IPS`,
+`GUI_HOSTS`, `server_tokens off`, unattended-upgrades matching `oldstable-security` again, one CrowdSec acquisition
+per log and a rollback-protected daily hub refresh; read CHANGELOG "Behaviour changes you must act on" before
+upgrading)  
+**Previous:** 2026-10-06 (v2.3.0 — calm ops console Panel and the 2026-10-05 health-audit follow-ups)
 
 ---
 
@@ -175,8 +172,8 @@ The Miniserver Gen 1 CPU cannot handle SSL. The gateway terminates TLS and speak
 | Platform | Status | Notes |
 |----------|--------|-------|
 | Debian 12 VM (Proxmox) | ✅ Production | 1 vCPU, 1 GB RAM, 5 GB disk |
-| Raspberry Pi 4/5 | ✅ Supported | Official ARM64 packages |
-| Raspberry Pi 3 | ✅ Supported | Requires 64-bit Raspberry Pi OS |
+| Raspberry Pi 4/5 | ⚠️ In scope, not a tested target | Official ARM64 packages; the tested target is a Debian 12 VM |
+| Raspberry Pi 3 | ⚠️ In scope, not a tested target | Requires 64-bit Raspberry Pi OS |
 | Raspberry Pi 2 | ⚠️ Partial | Needs 64-bit kernel or manual compile |
 | Raspberry Pi 1 / Zero | ❌ Not supported | ARMv6, no 64-bit support |
 
@@ -198,10 +195,10 @@ These settings are configured on the repo and affect how code lands in `main`:
 
 | Setting | Status | Notes |
 |---------|--------|-------|
-| Branch protection on `main` | ✅ Active | Requires PR + 1 approval + all CI checks pass |
+| Branch protection on `main` | ✅ Active | PR required (0 approvals, solo repo), all CI checks must pass, no force-push |
 | Dependabot (Actions) | ✅ Active | Weekly checks; auto-opens PRs for action updates |
-| Secret scanning | ⏭️ Skipped | LAN-only project; no secrets committed |
-| Releases | ✅ Published | `v1.1.0`, `v1.2.0`, `v1.2.1`, `v1.3.1`, `v1.3.2`, `v1.3.3`, `v1.3.4`, `v1.5.0`, `v1.5.1`, `v1.5.2`, `v2.0.0`, `v2.0.1`, `v2.1.0`, `v2.2.0`, `v2.3.0` (latest). v1.3.0 was withdrawn — do not install. v1.4.0 and the v1.6.x same-day tags were retired and consolidated into v1.5.0 (see CHANGELOG). See [Releases](https://github.com/sgtsilver/loxprox/releases). |
+| Secret scanning | ✅ Active | Secret scanning and push protection enabled 2026-11-21 |
+| Releases | ✅ Published | `v1.1.0`, `v1.2.0`, `v1.2.1`, `v1.3.1`, `v1.3.2`, `v1.3.3`, `v1.3.4`, `v1.5.0`, `v1.5.1`, `v1.5.2`, `v2.0.0`, `v2.0.1`, `v2.1.0`, `v2.2.0`, `v2.3.0`, `v3.0.0` (latest). v1.3.0 was withdrawn — do not install. v1.4.0 and the v1.6.x same-day tags were retired and consolidated into v1.5.0 (see CHANGELOG). See [Releases](https://github.com/sgtsilver/loxprox/releases). |
 
 ### Developer workflow (after branch protection)
 

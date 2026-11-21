@@ -43,7 +43,7 @@ These are deliberate boundaries for the **current (Gen 1)** deployment — what 
 | **Application-layer DDoS** | Medium | High | nginx conn limits, timeouts, CrowdSec |
 | **Volumetric DDoS** | Low | Critical | *Cannot stop at gateway — ISP/cloud only* |
 | **Credential stuffing** | High | Critical | Rate limits + CrowdSec http-cve |
-| **Exploitation of Loxone CVEs** | Medium | Critical | AppSec WAF (virtual patching), WAF rules |
+| **Exploitation of known web CVEs** | Medium | Critical | AppSec WAF (virtual patching with CrowdSec hub rules — coverage is what the hub ships, not Loxone-specific) |
 | **Lateral movement (LAN → Miniserver)** | Low | High | Proxmox firewall, VLAN isolation |
 | **Lateral movement (LAN → Gateway via SSH)** | Low | Critical | `setup_ssh_hardening` — CIS §5.2 drop-in, key-only, `PermitRootLogin no` (HARD mode, once a sudo-capable non-root user has a key), `MaxAuthTries 4`, optional `SSH_ALLOW_USERS` |
 | **Passive token capture on the gateway → Miniserver hop** | Low | High | *Cleartext by necessity — Gen 1 has no TLS. Isolate this hop on a dedicated VLAN/link so the same on-LAN attacker modeled above cannot sniff the relayed Loxone token. See note below.* |
@@ -133,7 +133,7 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 
 ### Layer 3: Intrusion Detection (CrowdSec)
 
-- CAPI community feed: ~26k known malicious IPs auto-blocked
+- CAPI community blocklist: IPs that CrowdSec's community reports as malicious are auto-blocked
 - Local scenarios: nginx bad requests, SSH brute force, HTTP CVEs
 - AppSec WAF: virtual patching for known CVEs, SQLi, XSS, path traversal
 - **Two ban ladders** (`/etc/crowdsec/profiles.yaml`, managed by `deploy.sh`; the original is kept as `profiles.yaml.loxprox-orig`): scenarios matching `BAN_HARD_SCENARIOS` — the unambiguous scanner ones (CVE/virtual-patching probes, sensitive-file, backdoor, path-traversal and admin-interface probing, open-proxy probing, and the trap) — ban for `BAN_HARD_LADDER` = 7 days, then 90 days, then 365 days. Everything else uses `BAN_SOFT_LADDER` = 24 hours, 7 days, 30 days, 90 days. `progressive-ban.py` (cron every 15 minutes, under `flock`) extends repeat offenders along the ladder and never shortens a ban. Its extensions carry the reason `repeat-offender-hard-<n>` (HARD) or `repeat-offender-<n>` (SOFT).
@@ -146,7 +146,7 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 ### Layer 4: Application Security (AppSec WAF)
 
 - Mode: `APPSEC_MODE` — **enforce** (default, blocks matched requests with 403) or **monitor** (alerts via `cscli alerts list`, never blocks; for verifying no false positives before switching to enforce)
-- Collection: `crowdsecurity/appsec-virtual-patching` (200+ CVE-specific rules)
+- Collection: `crowdsecurity/appsec-virtual-patching` (virtual patching for known CVEs in common software; the rule set is maintained in the CrowdSec hub and refreshed by the daily hub refresh)
 - Listens on `127.0.0.1:7422`
 - Evaluates every request before it reaches Loxone
 - **Authentication**: AppSec requires the CrowdSec firewall bouncer API key in the `X-Crowdsec-Appsec-Api-Key` header
@@ -163,7 +163,7 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 - Kernel: syncookies, rp_filter, dmesg_restrict, kptr_restrict, ASLR
 - auditd: monitors nginx/crowdsec/nftables config changes, auth files, sudo, and LoxProx's own state — `/etc/loxprox` (config, TLS), `/etc/apparmor.d` (policy) and the root-run scripts under `/opt/loxprox`
 - unattended-upgrades: auto-reboot at 03:00 for kernel patches. Origins are matched by codename and label (`Origins-Pattern`), not by archive name: the old archive-based form matched nothing once Debian 12 became oldstable (its security archive is now `oldstable-security`), so security updates had silently stopped on gateways deployed before this release. The CrowdSec package repository is deliberately excluded — CrowdSec upgrades are staged by hand (the monitor tells you when one is available)
-- SSH HARD mode (`--finalize-ssh`): `PermitRootLogin no` only if a non-root account has an authorized key, sudo rights (`sudo`/`wheel`/`admin`) and a login shell; otherwise it stays `prohibit-password` with a warning, so the step can never lock you out. `--finalize-ssh` reads `deploy.conf`, so the optional `SSH_ALLOW_USERS` applies there too: it writes an `AllowUsers` line, refused (with a warning) unless a listed account has a login shell (HARD mode also requires a key)
+- SSH HARD mode (`--finalize-ssh`): `PermitRootLogin no` only if a non-root account has an authorized key, a login shell and working sudo (`sudo`/`wheel`/`admin` plus a usable password or a `NOPASSWD: ALL` rule); otherwise it stays `prohibit-password` with a warning, so the step does not lock root out. `--finalize-ssh` reads `deploy.conf`, so the optional `SSH_ALLOW_USERS` applies there too: it writes an `AllowUsers` line, refused (with a warning) unless a listed account has a login shell (HARD mode also requires a key) and one listed account can log in and become root, or root is listed and can log in itself
 
 ### Layer 6: Monitoring & Alerting
 

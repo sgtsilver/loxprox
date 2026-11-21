@@ -12,7 +12,7 @@ Jeder fängt mal an. Wer einem Kochrezept folgen kann, schafft auch das hier. Du
 
 ## Was am Ende dabei herauskommt
 
-Ein kleiner, dauerhaft laufender Computer (eine virtuelle Maschine oder ein Raspberry Pi), der **zwischen dem Internet und deinem Miniserver** sitzt. Die Außenwelt spricht mit dem Gateway; das Gateway prüft alles und lässt nur sicheren Verkehr zum Miniserver durch. Deine Handy-App funktioniert weiter wie bisher — sie verbindet sich nur zum Gateway statt direkt zum Miniserver.
+Ein kleiner, dauerhaft laufender Computer (meist eine virtuelle Maschine), der **zwischen dem Internet und deinem Miniserver** sitzt. Die Außenwelt spricht mit dem Gateway; das Gateway prüft alles und lässt nur sicheren Verkehr zum Miniserver durch. Deine Handy-App funktioniert weiter wie bisher — sie verbindet sich nur zum Gateway statt direkt zum Miniserver.
 
 ```
 Internet  →  dein Router  →  LoxProx-Gateway  →  dein Loxone Miniserver
@@ -22,10 +22,10 @@ Internet  →  dein Router  →  LoxProx-Gateway  →  dein Loxone Miniserver
 
 ## Was du brauchst
 
-- **Einen kleinen Computer dafür.** Drei einfache Optionen — nimm, was du schon hast (Details in [Schritt 1](#schritt-1--einen-kleinen-computer-besorgen)):
-  - eine **virtuelle Maschine** auf einem Proxmox-/Heimserver, oder
-  - einen **Raspberry Pi 3, 4 oder 5** (mit 64-bit Raspberry Pi OS), oder
-  - irgendeinen **alten Mini-PC oder Laptop**, den du löschen und mit Debian neu aufsetzen kannst.
+- **Einen kleinen Computer dafür.** LoxProx ist für **Debian 12** in einer **virtuellen Maschine** gebaut und darauf getestet. Nimm, was du schon hast (Details in [Schritt 1](#schritt-1--einen-kleinen-computer-besorgen)):
+  - eine **virtuelle Maschine** auf einem Proxmox-/Heimserver (das getestete Setup), oder
+  - irgendeinen **alten Mini-PC oder Laptop**, den du löschen und mit Debian 12 neu aufsetzen kannst, oder
+  - einen **Raspberry Pi** mit einem 64-bit-System auf Debian-12-Basis — möglich, aber vom Projekt nicht getestet.
 - **Die Daten deines Miniservers** — dafür gibt es ein Tool, das sie für dich findet. Kein Stress, wenn du sie noch nicht kennst.
 - **Etwa 30–45 Minuten** und dein Lieblingsgetränk. (Falls dein Lieblingsgetränk Alkohol enthält, heb dir die Runde vielleicht für *danach* auf — einen klaren Kopf willst du behalten, während du umbaust, wie dein Zuhause mit dem Internet spricht.)
 - Mehr nicht. Du musst **kein** Programmierer sein.
@@ -38,15 +38,15 @@ Zur Größe: 1 CPU und **1 GB RAM** ist das Minimum; **2 CPU / 2 GB** ist komfor
 
 ## Schritt 1 — Einen kleinen Computer besorgen
 
-Du brauchst nur *irgendetwas*, auf dem **Debian 12** läuft (eine beliebte, kostenlose, grundsolide Linux-Version). Wähle den Weg, der zu dir passt:
+Du brauchst nur *irgendetwas*, auf dem **Debian 12** läuft (eine beliebte, kostenlose, grundsolide Linux-Version). Auf Debian 12 ist LoxProx gebaut und getestet; neuere Versionen (Debian 13) sind ungetestet. Wähle den Weg, der zu dir passt:
 
-- **Du hast einen Proxmox- oder anderen Heimserver →** lege eine neue VM an, gib ihr 1–2 CPUs, 1–2 GB RAM, ~5 GB Disk und installiere Debian 12. (Proxmox hat sogar eine „Debian 12"-Vorlage.)
-- **Du hast einen Raspberry Pi →** flashe **64-bit Raspberry Pi OS Lite** auf die SD-Karte mit dem offiziellen [Raspberry Pi Imager](https://www.raspberrypi.com/software/). Ein Pi 3/4/5 reicht locker.
+- **Du hast einen Proxmox- oder anderen Heimserver →** lege eine neue VM an, gib ihr 1–2 CPUs, 1–2 GB RAM, ~5 GB Disk und installiere Debian 12. (Proxmox hat sogar eine „Debian 12"-Vorlage.) Das ist das getestete Setup.
 - **Du hast einen alten PC/Laptop →** lade Debian 12 von [debian.org](https://www.debian.org/distrib/), schreibe es auf einen USB-Stick und installiere es. Der Debian-Installer nimmt dich an die Hand.
+- **Du hast einen Raspberry Pi →** das kann funktionieren, ist vom Projekt aber nicht getestet. Nimm ein **64-bit**-System auf Debian-12-Basis (Bookworm). Das aktuelle Raspberry Pi OS basiert auf einem neueren Debian (13) und ist ungetestet. Flashe es mit dem offiziellen [Raspberry Pi Imager](https://www.raspberrypi.com/software/) und rechne mit etwas zusätzlicher Fehlersuche.
 
 Bei der Installation kannst du einfach die Standardwerte übernehmen. Nur eines merken: **Schreib dir Benutzername und Passwort auf, die du anlegst.**
 
-> Nichts davon zur Hand? Ein Raspberry Pi 4 ist der günstigste, freundlichste Einstieg und verbraucht kaum Strom.
+> Nichts davon zur Hand? Eine kleine VM auf einem Heimserver oder ein alter Mini-PC mit Debian 12 ist der freundlichste Einstieg.
 
 ## Schritt 2 — Zum „Terminal" kommen
 
@@ -116,6 +116,7 @@ sudo nano /etc/loxprox/deploy.conf
 - `GATEWAY_IP` — die eigene Adresse dieses Gateways (aus Schritt 6).
 - `LAN_SUBNET` — der Bereich deines Heimnetzes. `detect-loxone.sh` zeigt ihn ebenfalls: hast du es ohne Argumente gestartet, steht nahe dem Anfang der Ausgabe eine Zeile `Auto-detected subnet: ...` — das ist dein Wert (er taucht im Block „Suggested deploy.sh configuration" darunter nicht nochmal auf, der nur `LOXONE_IP`/`LOXONE_PORT` nennt). Sonst ist es meist sowas wie `192.168.1.0/24`.
 - `SSH_ALLOWED_SUBNETS` — wer sich am Gateway anmelden darf; dein Heimnetz ist für den Anfang in Ordnung.
+- `CROWDSEC_WHITELIST_IPS` — Adressen, die nie gebannt werden dürfen. Die Vorlage bringt Beispiel-Einträge mit: ersetze sie so, dass dein eigenes Heimnetz in der Liste steht.
 - `DISCORD_WEBHOOK_URL` *(optional)* — füge hier eine Discord-Webhook-URL ein, um Handy-Benachrichtigungen zu bekommen. Für den Anfang ruhig weglassen.
 
 Über jedem Wert steht ein Kommentar, der erklärt, was er bedeutet. Wenn du fertig bist: **Strg+O** dann **Enter** zum Speichern, dann **Strg+X** zum Beenden. (Bei einem Wert hängengeblieben? Der vollständige [Konfigurations-Guide](../CONFIGURATION-GUIDE.de.md) erklärt jeden einzelnen.)
@@ -137,26 +138,30 @@ Es zeigt unterwegs an, was es tut (grün ist gut). Es ist **gefahrlos erneut aus
 
 Wenn du dem Menü folgst, sperrst du dich **nicht** aus. Im Zweifel: die Option wählen, bei der du angemeldet bleibst.
 
+Noch ein Detail: Wendet der Installer den reinen Key-Login an, schaltet er auch den direkten `root`-Login per SSH ab — aber nur, wenn ein normaler Benutzer (nicht `root`) deinen Key, `sudo`-Rechte und eine Login-Shell hat. Meldest du dich nur als `root` an, lässt er den Root-Login, wie er ist, und gibt eine Warnung aus. Melde dich also als normaler Benutzer an und nutze `sudo`.
+
 ## Schritt 9 — Prüfen, ob alles geklappt hat
 
 ```bash
 sudo ./test-gateway.sh
 ```
 
-Das führt über 50 Prüfungen aus und gibt einen ordentlichen Pass/Fail-Bericht. Viele grüne Häkchen heißt: du bist geschützt. Ist etwas rot, sagt dir die Zeile meist genau, was zu tun ist.
+Das führt über 100 Prüfungen aus und gibt einen ordentlichen Pass/Fail-Bericht. Viele grüne Häkchen heißt: du bist geschützt. Ist etwas rot, sagt dir die Zeile meist genau, was zu tun ist.
 
 ## Schritt 10 — Deine Welt aufs Gateway zeigen lassen
 
 Zwei kleine Änderungen außerhalb des Terminals:
 
 1. **An deinem Router:** leite eingehenden Port **1080** an die Adresse des Gateways weiter (statt direkt an den Miniserver). Hattest du vorher eine Weiterleitung auf den Miniserver, zeig sie jetzt aufs Gateway.
-2. **In der Loxone-App:** ändere die Verbindungsadresse des Miniservers auf die Adresse des **Gateways** an Port **1080**. Alles andere in der App bleibt gleich.
+2. **In der Loxone-App:** ändere die Verbindungsadresse des Miniservers auf die Adresse des **Gateways** an Port **1080**. Alles andere in der App bleibt gleich. (Schaltest du unten HTTPS ein, muss dort stattdessen dein **Hostname** stehen — nie die IP.)
 
 Das war's — du bist fertig. Dein Miniserver antwortet dem Internet jetzt nur noch durch ein Gateway, das ihm den Rücken freihält.
 
 ## Optional — HTTPS (Verschlüsselung) einschalten
 
 Du willst das Schloss-Symbol und verschlüsselten Verkehr? LoxProx kann automatisches HTTPS. Es braucht einen öffentlichen Domainnamen und eine zusätzliche Router-Einstellung, daher ist es standardmäßig aus. Wenn du bereit bist, folge dem freundlichen [TLS-Setup-Guide](TLS-SETUP.de.md) — er führt dich genauso behutsam durch.
+
+**Wichtig, sobald HTTPS an ist:** Jede App und jedes Gerät muss sich mit `https://dein-hostname:1080` verbinden — nie mit der IP-Adresse. Das Gateway behandelt eine Verbindung per IP (oder mit einem falschen Namen) als Scanner, trennt sie und sperrt diese Adresse für 7 Tage.
 
 ---
 
@@ -166,7 +171,7 @@ Durchatmen. Fast nichts hier ist endgültig, und du kannst Dinge gefahrlos erneu
 
 - **Der Installer ist mit einem roten Fehler gestoppt.** Lies die letzten roten Zeilen — meist benennen sie das Problem. Behebe es und führe einfach wieder `sudo bash deploy.sh` aus.
 - **Du glaubst, du hast dich per SSH ausgesperrt.** Mit ziemlicher Sicherheit nicht (der Installer ist genau dafür gebaut, das zu verhindern). Melde dich am Bildschirm/an der Tastatur der Maschine an, wenn möglich, und führe den Installer erneut aus.
-- **Die App verbindet sich nicht.** Prüf Schritt 10 doppelt: der Router leitet Port 1080 ans *Gateway*, und die App zeigt auf die Adresse des *Gateways* an Port 1080. Hast du HTTPS aktiviert, muss die App-Adresse mit `https://` beginnen (siehe TLS-Guide).
+- **Die App verbindet sich nicht.** Prüf Schritt 10 doppelt: der Router leitet Port 1080 ans *Gateway*, und die App zeigt auf die Adresse des *Gateways* an Port 1080. Hast du HTTPS aktiviert, muss die App-Adresse mit `https://` beginnen und deinen Hostnamen nutzen, nicht die IP — eine IP-Adresse zählt als Scanner und wird 7 Tage gesperrt (siehe TLS-Guide).
 - **Immer noch hängen?** [Öffne ein Issue auf GitHub](https://github.com/sgtsilver/loxprox/issues) und beschreibe, was du gemacht und gesehen hast. Füge den Fehlertext ein. **Keine Frage ist zu einfach** — genau dafür ist der Tracker da.
 
 Du hast heute eine echte Systemadministrations-Aufgabe erledigt. Das ist nicht nichts. Willkommen an Bord.
