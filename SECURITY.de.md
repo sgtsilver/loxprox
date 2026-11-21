@@ -43,7 +43,7 @@ Das sind bewusst gesetzte Grenzen für das **aktuelle (Gen-1-)** Deployment — 
 | **Application-Layer-DDoS** | Mittel | Hoch | nginx Connection-Limits, Timeouts, CrowdSec |
 | **Volumetrischer DDoS** | Niedrig | Kritisch | *Am Gateway nicht stoppbar — nur ISP/Cloud* |
 | **Credential Stuffing** | Hoch | Kritisch | Rate Limits + CrowdSec http-cve |
-| **Ausnutzung von Loxone-CVEs** | Mittel | Kritisch | AppSec WAF (Virtual Patching), WAF-Regeln |
+| **Ausnutzung bekannter Web-CVEs** | Mittel | Kritisch | AppSec WAF (Virtual Patching mit CrowdSec-Hub-Regeln — die Abdeckung ist, was der Hub liefert, nicht Loxone-spezifisch) |
 | **Lateral Movement (LAN → Miniserver)** | Niedrig | Hoch | Proxmox-Firewall, VLAN-Isolation |
 | **Lateral Movement (LAN → Gateway via SSH)** | Niedrig | Kritisch | `setup_ssh_hardening` — CIS §5.2 Drop-in, Key-only, `PermitRootLogin no` (HARD-Modus, sobald ein sudo-fähiger Nicht-Root-User einen Key hat), `MaxAuthTries 4`, optional `SSH_ALLOW_USERS` |
 | **Passives Abgreifen des Tokens auf dem Hop Gateway → Miniserver** | Niedrig | Hoch | *Klartext aus Notwendigkeit — Gen 1 kann kein TLS. Diesen Hop auf einem dedizierten VLAN/Link isolieren, damit der oben modellierte LAN-interne Angreifer das weitergereichte Loxone-Token nicht mitschneiden kann. Siehe Hinweis unten.* |
@@ -133,7 +133,7 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 
 ### Layer 3: Intrusion Detection (CrowdSec)
 
-- CAPI-Community-Feed: ~26k bekannte Bad IPs werden automatisch geblockt
+- CAPI-Community-Blocklist: IPs, die die CrowdSec-Community als bösartig meldet, werden automatisch geblockt
 - Lokale Scenarios: nginx Bad Requests, SSH-Brute-Force, HTTP-CVEs
 - AppSec WAF: Virtual Patching für bekannte CVEs, SQLi, XSS, Path Traversal
 - **Zwei Ban-Leitern** (`/etc/crowdsec/profiles.yaml`, von `deploy.sh` verwaltet; das Original bleibt als `profiles.yaml.loxprox-orig` erhalten): Scenarios, die auf `BAN_HARD_SCENARIOS` passen — die eindeutigen Scanner-Scenarios (CVE-/Virtual-Patching-Probes, Probing auf sensible Dateien, Backdoors, Path Traversal und Admin-Interfaces, Open-Proxy-Probing sowie der Trap) —, bannen mit `BAN_HARD_LADDER` = 7 Tage, dann 90 Tage, dann 365 Tage. Alles andere nutzt `BAN_SOFT_LADDER` = 24 Stunden, 7 Tage, 30 Tage, 90 Tage. `progressive-ban.py` (Cron alle 15 Minuten, unter `flock`) verlängert Wiederholungstäter entlang der Leiter und verkürzt nie einen Ban. Seine Verlängerungen tragen den Grund `repeat-offender-hard-<n>` (HARD) bzw. `repeat-offender-<n>` (SOFT).
@@ -146,7 +146,7 @@ Internet ──► Router:1080 ──► Gateway VM:1080 ──► Loxone:80
 ### Layer 4: Application Security (AppSec WAF)
 
 - Modus: `APPSEC_MODE` — **enforce** (Default, geblockte Requests werden mit 403 abgewiesen) oder **monitor** (alarmiert via `cscli alerts list`, blockiert nie; zum Prüfen auf False Positives vor dem Wechsel zu enforce)
-- Collection: `crowdsecurity/appsec-virtual-patching` (200+ CVE-spezifische Regeln)
+- Collection: `crowdsecurity/appsec-virtual-patching` (Virtual Patching für bekannte CVEs in gängiger Software; das Regelwerk wird im CrowdSec-Hub gepflegt und vom täglichen Hub-Refresh aktualisiert)
 - Lauscht auf `127.0.0.1:7422`
 - Prüft jeden Request, bevor er Loxone erreicht
 - **Authentifizierung**: AppSec verlangt den API-Key des CrowdSec Firewall Bouncers im Header `X-Crowdsec-Appsec-Api-Key`

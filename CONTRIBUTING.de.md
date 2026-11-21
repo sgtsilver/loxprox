@@ -29,20 +29,14 @@ Wenn du KI verwendet hast, um einen Bug zu finden: füge den tatsächlichen Test
 ## Vor dem Submit
 
 1. `bash -n` auf alle modifizierten Shell-Scripts laufen lassen
-2. Auf einer frischen Debian-12-VM oder einem Raspberry Pi testen, wenn möglich
-3. `SECURITY.md` aktualisieren, wenn sich das Threat-Modell ändert — und `SECURITY.de.md` parallel
-4. Änderungen chirurgisch halten — dieses Projekt setzt auf Simplicity vor Vollständigkeit
-
-## Code-Style
-
-- 4-Space-Einrückung
-- `set -euo pipefail` in allen Scripts
-- F-Strings in Python (falls vorhanden)
-- Kommentare erklären das *Warum*, nicht das *Was*
+2. `bash tests/run-tests.sh` ausführen — die portablen Shell-Tests plus die Python-Tests, inklusive des Repo-Hygiene-Guards `tests/test_repo_hygiene.py` (der Python-Teil braucht `pytest`)
+3. Auf einer frischen Debian-12-VM testen, wenn möglich (Ergebnisse von einem Raspberry Pi sind willkommen, ein Pi ist aber kein getestetes Ziel)
+4. `SECURITY.md` aktualisieren, wenn sich das Threat-Modell ändert — und `SECURITY.de.md` parallel
+5. Änderungen chirurgisch halten — dieses Projekt setzt auf Simplicity vor Vollständigkeit
 
 ## Bilinguale Dokumentation
 
-Jede tracked Markdown-Doku existiert sowohl auf Deutsch als auch auf Englisch. Die beiden Dateien müssen semantisch synchron gehalten werden — wenn du eine änderst, ändere die andere im selben PR.
+Nutzer-Doku im Markdown-Format gibt es sowohl auf Deutsch als auch auf Englisch. Die beiden Dateien müssen semantisch synchron gehalten werden — wenn du eine änderst, ändere die andere im selben PR. Einige Dateien sind absichtlich nur englisch: `CHANGELOG.md`, `RUNDOWN.md`, `GITHUB-METADATA.md`, `grafana-integration/README.md`, die ADRs unter `docs/adr/` und die Audit-Berichte unter `audits/`. `tests/test_repo_hygiene.py` erzwingt die Paarung für jede andere Markdown-Datei.
 
 Naming-Konvention (folgt dem existierenden `README.md` / `README.en.md`-Muster):
 
@@ -61,6 +55,13 @@ Jede Datei trägt einen Sprach-Switcher-Banner direkt oben:
 Wenn du eine neue Doku nur in einer Sprache beiträgst, muss die Übersetzung vor dem Merge nachkommen. Match den existierenden Voice: knapp, operator-fokussiert, `du`-Form auf Deutsch; direkt und technical-reader auf Englisch. Code-Blöcke, Pfade, Command-Namen und CVE- / Config-Key-Identifier werden **nie** übersetzt. Anglizismen im deutschen Text sind okay, wo sie in diesem Repo der Arbeitsbegriff sind (`nginx`, `Reverse Proxy`, `Port-Forward`, `Cert`, `Renewal`, `AppSec`, `Bouncer`, …).
 
 Übersetzungsprobleme / Drift kannst du als eigene Issues anlegen, getaggt mit `docs:translation`.
+
+## Code-Style
+
+- 4-Space-Einrückung
+- `set -euo pipefail` in allen Scripts
+- F-Strings in Python (falls vorhanden)
+- Kommentare erklären das *Warum*, nicht das *Was*
 
 ## Fragen?
 

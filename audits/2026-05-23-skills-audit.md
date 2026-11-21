@@ -5,7 +5,7 @@
 Baseline: v1.3.3 (2026-05-21, netlink batch GeoIP loader). Audit is repo-only;
 no SSH to the production VM.
 
-Skills applied (12, all loaded from `/Users/paul/Library/Mobile Documents/com~apple~CloudDocs/Projects/skills/Anthropic-Cybersecurity-Skills/skills/`):
+Skills applied (12, all loaded from a local checkout of the Anthropic-Cybersecurity-Skills collection):
 
 1. `implementing-cloud-waf-rules`
 2. `detecting-sql-injection-via-waf-logs`
@@ -22,26 +22,25 @@ Skills applied (12, all loaded from `/Users/paul/Library/Mobile Documents/com~ap
 13. `performing-linux-log-forensics-investigation`
 
 Files read:
-- `/Users/paul/projects/loxone-security-gateway/deploy.sh` (1374 lines)
-- `/Users/paul/projects/loxone-security-gateway/progressive-ban.py` (209 lines)
-- `/Users/paul/projects/loxone-security-gateway/security-monitoring/geoip-block.sh`
-- `/Users/paul/projects/loxone-security-gateway/security-monitoring/gateway-monitor.sh`
-- `/Users/paul/projects/loxone-security-gateway/security-monitoring/gateway-backup.sh`
-- `/Users/paul/projects/loxone-security-gateway/security-monitoring/discord-alert.sh`
-- `/Users/paul/projects/loxone-security-gateway/README.md`, `CONTEXT.md`
-- `/Users/paul/projects/knowledge-wiki/wiki/loxprox.md` (full version history)
+- `deploy.sh` (1374 lines)
+- `progressive-ban.py` (209 lines)
+- `security-monitoring/geoip-block.sh`
+- `security-monitoring/gateway-monitor.sh`
+- `security-monitoring/gateway-backup.sh`
+- `security-monitoring/discord-alert.sh`
+- `README.md` and local project notes (full version history; the notes are not part of this repository)
 
 Architecture note: README explicitly disclaims TLS termination ("Keine
 HTTPS/TLS-Unterstützung"). nginx listens on plain HTTP `:1080`. TLS
-termination is deferred to the v2.0+ Relay VPS (`CONTEXT.md` line 16). The
-wiki summary calling the gateway a "TLS terminator" is **wrong for v1.x**.
+termination is deferred to the v2.0+ Relay VPS (local project notes). The
+project-notes summary calling the gateway a "TLS terminator" is **wrong for v1.x**.
 See OUT-OF-SCOPE section.
 
 ## Findings
 
 ### [HIGH] No SSH daemon hardening in deploy.sh (skill: hardening-linux-endpoint-with-cis-benchmark)
 
-- **Where:** `/Users/paul/projects/loxone-security-gateway/deploy.sh` — no `sshd_config` write block exists anywhere in the 1374-line script. Only `auditd` watches the file (line 933).
+- **Where:** `deploy.sh` — no `sshd_config` write block exists anywhere in the 1374-line script. Only `auditd` watches the file (line 933).
 - **What:** `deploy.sh` ships Debian 12 stock `sshd_config`. Stock Debian 12 ships with `PermitRootLogin prohibit-password`, `PasswordAuthentication yes`, no `MaxAuthTries` override, no `ClientAliveInterval`, no `LogLevel VERBOSE`.
 - **Gap:** CIS Debian 12 §5.2 (and the `hardening-linux-endpoint-with-cis-benchmark` SKILL Step 3) require `PermitRootLogin no`, `PasswordAuthentication no`, `MaxAuthTries 4`, `LoginGraceTime 60`, `ClientAliveInterval 300`, `ClientAliveCountMax 3`, `LogLevel VERBOSE`. None are set. nftables restricts SSH source IPs to `SSH_ALLOWED_SUBNETS`, but a compromised host inside the LAN can still password-brute-force root over SSH because nothing on the box prevents it.
 - **Fix:** Add a `setup_ssh_hardening()` function called from `main()` between `setup_nginx_hardening` and `install_crowdsec`:
@@ -82,7 +81,7 @@ See OUT-OF-SCOPE section.
 
 ### [MED] auditd persistence-watch gaps (skill: analyzing-persistence-mechanisms-in-linux)
 
-- **Where:** `/Users/paul/projects/loxone-security-gateway/deploy.sh:925-948` (audit rules file).
+- **Where:** `deploy.sh:925-948` (audit rules file).
 - **What:** Watches `/etc/nginx/`, `/etc/crowdsec/`, `/etc/nftables.conf`, `/etc/ssh/sshd_config`, `/etc/passwd`, `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d/`, `/usr/bin/sudo`, `/bin/su`, `/etc/cron.d/`, `/var/spool/cron/`.
 - **Gap:** `analyzing-persistence-mechanisms-in-linux` covers six MITRE techniques (T1053.003, T1543.002, T1574.006, T1546.004). Coverage is missing for:
     - **T1574.006 LD_PRELOAD** — `/etc/ld.so.preload` not watched.
@@ -121,11 +120,11 @@ See OUT-OF-SCOPE section.
         -w /etc/cron.monthly/    -p wa -k persistence_cron
         -w /etc/anacrontab       -p wa -k persistence_cron
 
-- **Why it matters:** Without these watches, the most common Linux post-exploit persistence vectors leave zero forensic trail in the box's own audit log — the very log the wiki cites as a defense layer.
+- **Why it matters:** Without these watches, the most common Linux post-exploit persistence vectors leave zero forensic trail in the box's own audit log — the very log the project notes cite as a defense layer.
 
 ### [MED] progressive-ban.py inflates offense count with CAPI community decisions (skill: detecting-port-scanning-with-fail2ban / implementing-cloud-waf-rules)
 
-- **Where:** `/Users/paul/projects/loxone-security-gateway/progressive-ban.py:123-133`.
+- **Where:** `progressive-ban.py:123-133`.
 - **What:**
 
         all_decisions = run_cscli(["decisions", "list", "-a"])
@@ -174,8 +173,8 @@ See OUT-OF-SCOPE section.
 ### [LOW] gateway-backup.sh and discord-alert.sh use `/tmp` without TOCTOU protection (skill: hardening-linux-endpoint-with-cis-benchmark / performing-linux-log-forensics-investigation)
 
 - **Where:**
-    - `/Users/paul/projects/loxone-security-gateway/security-monitoring/gateway-backup.sh:15` — `WORK_DIR="/tmp/${BACKUP_NAME}"`
-    - `/Users/paul/projects/loxone-security-gateway/security-monitoring/discord-alert.sh:73-78` — `CB_DIR="/tmp/loxprox-discord-cb"`
+    - `security-monitoring/gateway-backup.sh:15` — `WORK_DIR="/tmp/${BACKUP_NAME}"`
+    - `security-monitoring/discord-alert.sh:73-78` — `CB_DIR="/tmp/loxprox-discord-cb"`
 - **What:** Both scripts run as root, use predictable `/tmp` paths, and rely on `mkdir -p` (which silently uses an existing path).
 - **Gap:** CIS §1.1.2 requires `/tmp` mounted `nodev,nosuid,noexec` (the deploy does not configure this — see also next finding) AND scripts running as root should not use shared, predictable `/tmp` paths. Today the gateway has no non-root interactive users so the attack surface is theoretical, but the `network-watchdog.sh` reboot path runs the same scripts after a partial network failure, exactly the window where a compromised LAN host could pre-stage symlinks at the predictable paths.
 - **Fix:**
@@ -190,11 +189,11 @@ See OUT-OF-SCOPE section.
         CB_DIR="${LOXPROX_STATE_DIR:-/var/lib/loxprox}/discord-cb"
 
   `deploy.sh:setup_alerting()` already creates `/var/lib/loxprox` with mode 0750.
-- **Why it matters:** Future-proofing. The wiki repeatedly says LoxProx should remain hardened against a hostile LAN, not only a hostile WAN. Symlink races in `/tmp` are exactly the CIS hardening class that catches this.
+- **Why it matters:** Future-proofing. The project notes repeatedly say LoxProx should remain hardened against a hostile LAN, not only a hostile WAN. Symlink races in `/tmp` are exactly the CIS hardening class that catches this.
 
 ### [LOW] /tmp not mounted with nodev,nosuid,noexec (skill: hardening-linux-endpoint-with-cis-benchmark)
 
-- **Where:** `/Users/paul/projects/loxone-security-gateway/deploy.sh` — no `setup_filesystem_hardening` or fstab modification anywhere.
+- **Where:** `deploy.sh` — no `setup_filesystem_hardening` or fstab modification anywhere.
 - **What:** Stock Debian 12 mounts `/tmp` as part of root filesystem with default options (or as a `tmpfs` via `systemd` with default mount options).
 - **Gap:** CIS §1.1.2-1.1.5 (and the `hardening-linux-endpoint-with-cis-benchmark` SKILL Step 1) require `tmpfs /tmp tmpfs defaults,rw,nosuid,nodev,noexec,relatime 0 0`. The repo's independent A- validation called out `kernel.yama.ptrace_scope` and `fs.suid_dumpable` (fixed in v1.1.0) but missed the filesystem-level `noexec` hardening which is in the same CIS section.
 - **Fix:** Add to `apply_sysctls` epilogue, or as a new short function:
@@ -220,7 +219,7 @@ See OUT-OF-SCOPE section.
 
 ### [LOW] CrowdSec firewall bouncer rate-limiting / scanning detection not explicitly tuned (skill: detecting-port-scanning-with-fail2ban)
 
-- **Where:** `/Users/paul/projects/loxone-security-gateway/deploy.sh:837-841` (CrowdSec collections list).
+- **Where:** `deploy.sh:837-841` (CrowdSec collections list).
 - **What:** Installs `crowdsecurity/base-http-scenarios` and `crowdsecurity/http-cve`, plus AppSec. Has no equivalent of the `recidive` / `nmap-scan` / `portscan` jails from the `detecting-port-scanning-with-fail2ban` SKILL.
 - **Gap:** Fail2ban-style port-scan detection (kernel `--recent --hitcount` rule streaming into a custom filter) is NOT covered by CrowdSec's stock nginx/sshd collections. CrowdSec only sees what nginx + auth.log surface; a slow TCP fan-scan against port 1080 itself never makes the access log because nginx never accepts beyond the listen socket. Port-scan visibility is therefore zero.
 - **Fix:** Two-line addition to the nftables `input` chain at `deploy.sh:454-480` to feed a `recent`-style limit set into `meta nftrace` for CrowdSec — OR install the upstream collection that does this:
@@ -239,7 +238,7 @@ See OUT-OF-SCOPE section.
 
 - **What:** No `crt.sh` polling, no `certspotter`, no CAA records.
 - **Gap:** Both CT-log skills assume the system owns one or more public DNS names with public TLS certificates. LoxProx v1.x has no public DNS name and no TLS termination — port 1080 is reached via raw IP through a router port-forward. There is therefore no certificate to monitor in any CT log.
-- **Status:** **Genuinely out of scope** for v1.x. Becomes in-scope the moment the v2.0+ Relay VPS is set up (the Relay does terminate TLS on a public name per `CONTEXT.md:16`). At that point: deploy a `certspotter` agent or a 15-min crt.sh poller for the chosen public name, with CAA pinned to the Relay's chosen CA.
+- **Status:** **Genuinely out of scope** for v1.x. Becomes in-scope the moment the v2.0+ Relay VPS is set up (the Relay does terminate TLS on a public name per the local project notes). At that point: deploy a `certspotter` agent or a 15-min crt.sh poller for the chosen public name, with CAA pinned to the Relay's chosen CA.
 - **Why it matters:** Avoid re-flagging in future audits. When Relay-v2.0 lands, the `auditing-tls-certificate-transparency-logs` checklist becomes mandatory for it.
 
 ### [INFO] No AIDE — defensible omission, but document the tradeoff (skill: implementing-file-integrity-monitoring-with-aide)
@@ -270,8 +269,8 @@ See OUT-OF-SCOPE section.
         echo "0 4 * * 0 root /usr/bin/aide.wrapper --check 2>&1 | /opt/loxprox/aide-to-discord.sh" \
             > /etc/cron.d/loxprox-aide
 
-  Whether to do this is a project-level decision, not a finding. Note it in the wiki gap log.
-- **Why it matters:** Future audits will keep raising this. Settling the question once and writing the rationale into `wiki/loxprox.md` ends the loop.
+  Whether to do this is a project-level decision, not a finding. Note it in the project's gap log.
+- **Why it matters:** Future audits will keep raising this. Settling the question once and writing the rationale into the project notes ends the loop.
 
 ### [INFO] IoT-assessment skill applies to the Miniserver itself, not the gateway (skill: performing-iot-security-assessment)
 

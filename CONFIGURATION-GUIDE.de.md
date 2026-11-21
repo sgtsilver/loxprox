@@ -55,7 +55,7 @@ LOXONE_IP="192.168.1.100"
 
 **Default:** `80`
 
-**Wann ändern:** Nur, wenn du den Miniserver manuell auf einen anderen Port umkonfiguriert hast. Gen-1-Geräte laufen ohne Modifikation immer auf Port 80. Gen-2-Geräte leiten 80 → 443 weiter, der interne Port bleibt aber 80 — und genau den proxyt das Gateway.
+**Wann ändern:** Nur, wenn du den Miniserver manuell auf einen anderen Port umkonfiguriert hast. Gen-1-Geräte laufen ohne Modifikation immer auf Port 80. Gen 1 ist das getestete Ziel: `detect-loxone.sh` erkennt einen Gen 2 oder neuer an der HTTPS-Antwort, das Gateway proxyt aber reines HTTP an diesen Port, und ein Setup mit Gen 2 oder neuer ist nicht getestet.
 
 **Wie du es prüfst:**
 ```bash
@@ -92,7 +92,7 @@ ip addr show | grep "inet "
 
 ### `LAN_SUBNET` — der Bereich deines Heimnetzes
 
-**Was es ist:** Die CIDR-Notation deines gesamten LANs. Wird für die CrowdSec-Whitelist und die SSH-Restriktionen verwendet.
+**Was es ist:** Die CIDR-Notation deines gesamten LANs. Es ist das LAN, dem nginx vertraut: zusammen mit Loopback und [`TRUSTED_SOURCES`](#vertrauenswürdige-quellen-trusted_sources) ist es vom `403` auf den Admin-Pfaden, von der Unknown-Path-Sperre und von den Auth-/WebSocket-Limits ausgenommen, und es ist ein Quellbereich der Firewall-Regel des LoxProx Panels. Nimm dein echtes LAN, keinen größeren Bereich. Es trägt nichts in die CrowdSec-Whitelist ein (nimm das LAN zusätzlich in `CROWDSEC_WHITELIST_IPS` auf — siehe unten) und öffnet kein SSH (das macht `SSH_ALLOWED_SUBNETS`).
 
 **Wie du es findest:**
 ```bash
@@ -530,9 +530,21 @@ DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/123456789/abcdefghijklmnop
 
 **Was es ist:** Wenn `unattended-upgrades` ein Kernel-Security-Update installiert, bootet das System zu dieser Uhrzeit neu, um den neuen Kernel zu laden.
 
-**Wähle eine Uhrzeit**, zu der niemand den Loxone benutzt (z. B. 3 Uhr nachts).
+| Key | Default | Was er tut |
+|---|---|---|
+| `AUTOREBOOT_TIME` | `"03:00"` | Uhrzeit des automatischen Neustarts, 24-Stunden-Format, Ortszeit. |
 
-**Auto-Reboot ganz deaktivieren:** Wird über die `unattended-upgrades`-Config geregelt. Nach dem Deploy `/etc/apt/apt.conf.d/50unattended-upgrades` editieren.
+**Wähle eine Uhrzeit**, zu der niemand den Loxone benutzt (z. B. 3 Uhr nachts): setze `AUTOREBOOT_TIME` in `/etc/loxprox/deploy.conf` und lass `sudo bash deploy.sh` erneut laufen.
+
+**Editiere `/etc/apt/apt.conf.d/50unattended-upgrades` nicht von Hand.** `deploy.sh` erzeugt diese Datei bei jedem Lauf (automatischer Reboot an, `Automatic-Reboot-Time` aus `AUTOREBOOT_TIME`) und ersetzt manuelle Änderungen beim nächsten Deploy. Einen `deploy.conf`-Key, der den Reboot abschaltet, gibt es nicht.
+
+### AppArmor-Profil für nginx (`APPARMOR_NGINX_MODE`)
+
+| Key | Default | Was er tut |
+|---|---|---|
+| `APPARMOR_NGINX_MODE` | `"complain"` | `complain` lädt das mitgelieferte nginx-Profil (`apparmor/usr.sbin.nginx`) im Complain-Modus: Verstöße werden protokolliert, nichts wird blockiert (die Soak-Phase). `enforce` blockiert. `deploy.sh` schaltet nie von selbst auf Enforce. |
+
+**Wann ändern:** erst nach einem mehrwöchigen Complain-Soak, der mindestens eine ~60-Tage-Zertifikatserneuerung von `acme.sh` und einen vollständigen Deploy-Lauf abgedeckt hat. Beobachte vorher `aa-status` und `journalctl -g apparmor` auf ALLOWED-Events. Begründung: [ADR 0006](docs/adr/0006-apparmor-nginx-profile-complain-first.md).
 
 ---
 

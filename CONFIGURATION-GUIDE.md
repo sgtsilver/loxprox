@@ -55,7 +55,7 @@ LOXONE_IP="192.168.1.100"
 
 **Default:** `80`
 
-**When to change:** Only if you have manually reconfigured the Miniserver to use a different port. Gen 1 units are always port 80 unless modified. Gen 2 units may redirect 80 → 443, but the internal port is still 80 for the gateway to proxy.
+**When to change:** Only if you have manually reconfigured the Miniserver to use a different port. Gen 1 units are always port 80 unless modified. Gen 1 is the tested target: `detect-loxone.sh` recognises a Gen 2 or newer by its HTTPS answer, but the gateway proxies plain HTTP to this port and a Gen 2 or newer setup has not been tested.
 
 **How to verify:**
 ```bash
@@ -92,7 +92,7 @@ ip addr show | grep "inet "
 
 ### `LAN_SUBNET` — Your Home Network Range
 
-**What it is:** The CIDR notation of your entire LAN. This is used for CrowdSec whitelisting and SSH restrictions.
+**What it is:** The CIDR notation of your entire LAN. It is the LAN that nginx trusts: together with loopback and [`TRUSTED_SOURCES`](#trusted-sources-trusted_sources) it is exempt from the admin-path `403`, the unknown-path denial and the auth / WebSocket limits, and it is a source range of the LoxProx Panel's firewall rule. Use your real LAN, not a wider range. It adds nothing to the CrowdSec whitelist (list the LAN in `CROWDSEC_WHITELIST_IPS` as well — see below) and does not open SSH (that is `SSH_ALLOWED_SUBNETS`).
 
 **How to find it:**
 ```bash
@@ -526,9 +526,21 @@ DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/123456789/abcdefghijklmnop
 
 **What it is:** If a kernel security update is installed by `unattended-upgrades`, the system reboots at this time to load the new kernel.
 
-**Pick a time** when nobody uses the Loxone (e.g., 3 AM).
+| Key | Default | What it does |
+|---|---|---|
+| `AUTOREBOOT_TIME` | `"03:00"` | Time of the automatic reboot, 24-hour clock, local time. |
 
-**To disable auto-reboot:** This is handled by `unattended-upgrades` config. Edit `/etc/apt/apt.conf.d/50unattended-upgrades` after deploy.
+**Pick a time** when nobody uses the Loxone (e.g., 3 AM): set `AUTOREBOOT_TIME` in `/etc/loxprox/deploy.conf` and re-run `sudo bash deploy.sh`.
+
+**Do not edit `/etc/apt/apt.conf.d/50unattended-upgrades` by hand.** `deploy.sh` generates that file on every run (automatic reboot on, `Automatic-Reboot-Time` taken from `AUTOREBOOT_TIME`) and replaces manual edits at the next deploy. There is no `deploy.conf` key that switches the reboot off.
+
+### AppArmor nginx profile (`APPARMOR_NGINX_MODE`)
+
+| Key | Default | What it does |
+|---|---|---|
+| `APPARMOR_NGINX_MODE` | `"complain"` | `complain` loads the shipped nginx profile (`apparmor/usr.sbin.nginx`) in complain mode: violations are logged, nothing is blocked (the soak phase). `enforce` blocks. `deploy.sh` never switches to enforce on its own. |
+
+**When to change:** only after a multi-week complain soak that covered at least one ~60-day `acme.sh` certificate renewal and one full deploy run. Watch `aa-status` and `journalctl -g apparmor` for ALLOWED events first. Rationale: [ADR 0006](docs/adr/0006-apparmor-nginx-profile-complain-first.md).
 
 ---
 
